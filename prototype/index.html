@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Atsumi Next UX Prototype</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell" id="appShell">
+      <aside class="sidebar" aria-label="주 메뉴">
+        <div class="brand" title="Atsumi">
+          <img src="../../assets/icons/atsumi.svg" alt="" />
+          <div class="brand-copy">
+            <strong>Atsumi</strong>
+            <span>Hitomi library</span>
+          </div>
+        </div>
+
+        <nav class="main-nav">
+          <button class="nav-item is-active" data-view="explore">
+            <span class="fluent" aria-hidden="true">&#xE80F;</span>
+            <span class="nav-label">Explore</span>
+          </button>
+          <button class="nav-item" data-view="auto-find">
+            <span class="fluent" aria-hidden="true">&#xE735;</span>
+            <span class="nav-label">Auto Find</span>
+            <span class="nav-count">4</span>
+          </button>
+          <button class="nav-item" data-view="downloads">
+            <span class="fluent" aria-hidden="true">&#xE896;</span>
+            <span class="nav-label">Downloads</span>
+            <span class="nav-count warning">2</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <span class="live-indicator"><i></i><span class="nav-label">Live search</span></span>
+          <button class="icon-button sidebar-toggle" id="sidebarToggle" title="메뉴 접기" aria-label="메뉴 접기">
+            <span class="fluent" aria-hidden="true">&#xE76B;</span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="view-header">
+          <form class="search-box" id="searchForm" autocomplete="off">
+            <span class="fluent search-symbol" aria-hidden="true">&#xE721;</span>
+            <input id="searchInput" type="search" placeholder="앨범, 작가, 태그 검색" aria-label="검색" />
+            <div class="suggestions" id="suggestions" hidden></div>
+          </form>
+          <button class="icon-button primary-soft" id="searchButton" title="검색" aria-label="검색">
+            <span class="fluent" aria-hidden="true">&#xE721;</span>
+          </button>
+          <div class="menu-anchor">
+            <button class="icon-button" id="languageButton" title="언어 필터" aria-label="언어 필터" aria-expanded="false">
+              <span class="fluent" aria-hidden="true">&#xE774;</span>
+              <span class="icon-dot" id="languageCount">1</span>
+            </button>
+            <div class="popover language-popover" id="languageMenu" hidden>
+              <strong>언어</strong>
+              <label><input type="checkbox" value="korean" checked /> 한국어</label>
+              <label><input type="checkbox" value="japanese" /> 일본어</label>
+              <label><input type="checkbox" value="chinese" /> 중국어</label>
+              <label><input type="checkbox" value="english" /> 영어</label>
+            </div>
+          </div>
+          <button class="icon-button" id="refreshButton" title="현재 화면 새로고침" aria-label="현재 화면 새로고침">
+            <span class="fluent" aria-hidden="true">&#xE72C;</span>
+          </button>
+          <button class="icon-button activity-button" id="activityButton" title="작업 상태" aria-label="작업 상태" aria-expanded="false">
+            <span class="fluent" aria-hidden="true">&#xE9D9;</span>
+            <span class="activity-count">2</span>
+          </button>
+          <button class="icon-button" id="settingsButton" title="설정" aria-label="설정">
+            <span class="fluent" aria-hidden="true">&#xE713;</span>
+          </button>
+        </header>
+
+        <section class="page-heading">
+          <div>
+            <span class="eyebrow" id="viewEyebrow">EXPLORE</span>
+            <h1 id="viewTitle">갤러리 탐색</h1>
+          </div>
+          <div class="heading-actions" id="headingActions"></div>
+        </section>
+
+        <section class="context-row">
+          <div class="context-left" id="contextLeft">
+            <div class="select-control">
+              <label for="sortSelect">정렬</label>
+              <select id="sortSelect">
+                <option value="recent">최신순</option>
+                <option value="popular_today">인기순 · 오늘</option>
+                <option value="popular_week">인기순 · 이번 주</option>
+                <option value="popular_month">인기순 · 이번 달</option>
+                <option value="popular_year">인기순 · 올해</option>
+                <option value="random">무작위</option>
+              </select>
+            </div>
+          </div>
+          <div class="context-summary" id="contextSummary">20개 결과</div>
+        </section>
+
+        <div class="selection-slot">
+          <div class="selection-toolbar" id="selectionToolbar" aria-live="polite"></div>
+        </div>
+
+        <section class="gallery-viewport" id="galleryViewport">
+          <div class="gallery-grid" id="galleryGrid"></div>
+          <div class="pager" id="pager">
+            <button class="text-button" disabled>이전</button>
+            <span>1 / 8</span>
+            <button class="text-button next-ready">다음</button>
+          </div>
+        </section>
+      </main>
+
+      <aside class="activity-panel" id="activityPanel" aria-label="작업 상태" hidden>
+        <header>
+          <div>
+            <span class="eyebrow">ACTIVITY</span>
+            <h2>작업 상태</h2>
+          </div>
+          <button class="icon-button small" id="activityClose" title="닫기" aria-label="닫기">
+            <span class="fluent">&#xE711;</span>
+          </button>
+        </header>
+        <div class="activity-list">
+          <article class="activity-item">
+            <span class="activity-icon is-running"><span class="spinner"></span></span>
+            <div><strong>Summer Pool Notes</strong><span>받는 중 · 34 / 84</span></div>
+            <b>41%</b>
+          </article>
+          <article class="activity-item warning">
+            <span class="activity-icon"><span class="fluent">&#xE7BA;</span></span>
+            <div><strong>Archive of Rain</strong><span>유사 작품 검토 필요</span></div>
+            <button class="mini-command" data-open-review="4021102">검토</button>
+          </article>
+          <article class="activity-item complete">
+            <span class="activity-icon"><span class="fluent">&#xE73E;</span></span>
+            <div><strong>Paper Garden</strong><span>다운로드 완료</span></div>
+            <b>100%</b>
+          </article>
+        </div>
+      </aside>
+    </div>
+
+    <section class="detail-workspace" id="detailWorkspace" hidden>
+      <div class="detail-tabbar">
+        <div class="detail-tabs" id="detailTabs"></div>
+        <button class="icon-button small" id="detailMinimize" title="상세 최소화" aria-label="상세 최소화">
+          <span class="fluent">&#xE921;</span>
+        </button>
+        <button class="icon-button small" id="detailCloseAll" title="상세 전체 닫기" aria-label="상세 전체 닫기">
+          <span class="fluent">&#xE711;</span>
+        </button>
+      </div>
+      <div class="detail-body" id="detailBody"></div>
+    </section>
+
+    <button class="detail-restore" id="detailRestore" hidden>
+      <span class="fluent">&#xE8A7;</span>
+      <span id="detailRestoreLabel">상세 탭 1</span>
+    </button>
+
+    <dialog class="settings-dialog" id="settingsDialog">
+      <form method="dialog">
+        <header class="dialog-header">
+          <div><span class="eyebrow">SETTINGS</span><h2>설정</h2></div>
+          <button class="icon-button small" value="cancel" title="닫기" aria-label="닫기"><span class="fluent">&#xE711;</span></button>
+        </header>
+        <div class="settings-layout">
+          <nav class="settings-nav" aria-label="설정 분류">
+            <button type="button" class="is-active">일반</button>
+            <button type="button">탐색</button>
+            <button type="button">다운로드</button>
+            <button type="button">네트워크</button>
+            <button type="button">중복 검사</button>
+            <button type="button">저장 공간</button>
+          </nav>
+          <section class="settings-content">
+            <div class="setting-row">
+              <div><strong>다운로드 폴더</strong><span>완료된 갤러리를 저장할 위치</span></div>
+              <input value="D:\Atsumi" aria-label="다운로드 폴더" />
+            </div>
+            <div class="setting-row">
+              <div><strong>앨범 카드 최대 열 수</strong><span>창이 넓어도 설정한 열 수를 넘지 않습니다</span></div>
+              <div class="range-wrap"><input id="columnsRange" type="range" min="1" max="4" step="1" value="3" /><output id="columnsOutput">3열</output></div>
+            </div>
+            <div class="setting-row">
+              <div><strong>앨범 미리보기 크기</strong><span>Explore와 Downloads에 함께 적용</span></div>
+              <div class="range-wrap"><input id="previewRange" type="range" min="160" max="360" value="220" /><output id="previewOutput">220px</output></div>
+            </div>
+            <div class="setting-row">
+              <div><strong>캐시 한도</strong><span>썸네일과 재생성 가능한 자료</span></div>
+              <div class="range-wrap"><input id="cacheRange" type="range" min="1" max="30" value="10" /><output id="cacheOutput">10GB</output></div>
+            </div>
+            <div class="setting-row">
+              <div><strong>동시 이미지 요청</strong><span>실측 안정 기본값 5</span></div>
+              <input type="number" min="1" max="30" value="5" aria-label="동시 이미지 요청" />
+            </div>
+            <div class="danger-zone">
+              <strong>저장 데이터 관리</strong>
+              <div>
+                <button type="button" class="text-button">캐시 제거</button>
+                <button type="button" class="text-button warning-button">데이터 제거</button>
+                <button type="button" class="text-button danger-button">모든 파일 제거</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="review-dialog" id="reviewDialog">
+      <form method="dialog">
+        <header class="dialog-header">
+          <div><span class="eyebrow">DUPLICATE REVIEW</span><h2>중복 작품 판독</h2></div>
+          <button class="icon-button small" value="cancel" title="닫기" aria-label="닫기"><span class="fluent">&#xE711;</span></button>
+        </header>
+        <div class="review-summary">
+          <span class="review-signal">해시 판독</span>
+          <strong>후보가 부모를 포함 · 82% · 14/17p 일치</strong>
+          <span>자동 삭제하지 않습니다. 일치 페이지와 관계 정보를 확인하세요.</span>
+        </div>
+        <div class="review-columns" id="reviewColumns"></div>
+        <details class="match-pairs" open>
+          <summary>일치 페이지 전체보기 · 14쌍</summary>
+          <div class="pair-strip" id="pairStrip"></div>
+        </details>
+        <div class="review-actions">
+          <button type="button" class="text-button scan-button"><span class="fluent">&#xE9D9;</span> 전수 검사</button>
+          <span></span>
+          <button type="button" class="text-button danger-button" data-review-action="parent">부모 숨기기</button>
+          <button type="button" class="text-button danger-button" data-review-action="candidate">후보 숨기기</button>
+          <button type="button" class="text-button series-button" data-review-action="series">연작으로 묶기</button>
+          <button type="button" class="text-button" data-review-action="dismiss">묶음 풀기</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" hidden></div>
+    <script src="./app.js"></script>
+  </body>
+</html>
