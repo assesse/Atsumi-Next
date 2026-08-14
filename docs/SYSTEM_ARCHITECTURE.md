@@ -1,6 +1,6 @@
-# 시스템 구조 초안
+# 시스템 구조
 
-## 제안 스택
+## 확정 스택
 
 - Desktop shell: Tauri 2
 - Core: Rust
@@ -9,7 +9,7 @@
 - HTTP: 비동기 client와 전역 scheduler
 - Image processing: worker task와 versioned hash profile
 
-상태는 `제안`이다. 사용자 승인 후 ADR로 확정한다.
+이 스택은 D-101~D-103과 ADR-0002로 승인됐다. SQLite가 canonical source이며 frontend memory state는 snapshot과 event의 projection만 가진다.
 
 ## 경계
 
@@ -85,6 +85,7 @@ queued
 각 단계 -> review_required
 각 단계 -> failed
 실행 중 종료 -> interrupted -> resume 또는 cancel
+허용된 미완료 상태 -> cancelled -> retry
 ```
 
 작업 상태는 메모리 Map이 아니라 SQLite에 기록한다. 이벤트는 상태의 원본이 아니라 UI 갱신 신호다.
@@ -132,7 +133,7 @@ type JobEvent = {
 - 폴더 manifest: 이식성과 복구를 위한 파생 metadata
 - thumbnail cache: 언제든 재생성 가능한 cache
 - 프론트 store: backend snapshot의 projection과 임시 UI 상태
-- localStorage: 초기에는 사용하지 않는 것이 기본안
+- localStorage: 사용하지 않음
 
 ## 다운로드 scheduler
 
@@ -142,6 +143,18 @@ type JobEvent = {
 - connection pool 구조로 바뀌면 별도 probe로 다시 측정한다.
 - 검색, thumbnail, 다운로드는 priority queue에서 서로 다른 budget을 사용한다.
 - retry는 오류 분류, attempt, host 상태에 따라 계산한다.
+
+## Thumbnail coordinator
+
+- 앱 프로세스에는 탭별 worker가 아니라 `ThumbnailCoordinator` 하나만 둔다.
+- Explore, Downloads, Detail, Review는 `GalleryCover(galleryId)` 또는 `GalleryPage(galleryId, sourcePage)` key만 요청한다.
+- coordinator가 `critical > visible > prefetch` queue, 동시성, 요청 시작 간격, in-flight 병합, 성공 cache와 짧은 실패 cache를 소유한다.
+- 각 UI 구독은 고유 requestId를 가진다. 마지막 구독 취소 시 resolver cancellation token을 중단하고 늦은 결과를 cache에 넣지 않는다.
+- worker 완료는 하나의 process-wide completion channel을 거쳐 `thumbnail:ready`로 전달한다. 카드 수만큼 대기 thread/task를 만들지 않는다.
+- WebView는 전달된 byte payload를 짧게 유지되는 Blob URL로 표시하고 마지막 frontend 구독에서 해제한다. 실제 원본 URL과 cache path는 backend 경계 밖으로 노출하지 않는다.
+- 카드 preview는 `IntersectionObserver`의 near-viewport 경계 안에서만 구독하고, 경계를 벗어나면 frontend 구독과 Blob URL을 해제한다. Detail/Review의 현재 작업은 `critical`, 화면 안 카드는 `visible`, 나머지는 `prefetch`로 분류한다.
+- retryable failure는 짧은 negative-cache TTL 뒤 한정 재시도하고, permanent failure는 더 긴 negative cache로 반복 원격 호출을 막는다. WebView decode 실패는 해당 key cache를 무효화한 뒤 한 번만 재해석한다.
+- 현재 resolver는 로컬 fixture다. 실제 HTTP 후보 선택, decode 검증과 disk cache는 `ThumbnailResolver` 구현으로 교체한다.
 
 ## 해시와 중복
 

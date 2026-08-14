@@ -4,7 +4,39 @@
 
 Atsumi Next는 기존 Atsumi를 보존하면서 새 구조로 재작성하는 독립 프로젝트다.
 
-현재 단계는 `Phase 1: UX prototype과 V2 계약`이다. 아직 production Rust crate와 실제 Hitomi 연결은 만들지 않는다.
+승인된 UX prototype과 V2 계약을 기준으로 `Phase 2: Core foundation`을 완료했고, 현재 `Phase 3A`를 진행 중이다. UI는 저장 fixture 기반 검색·페이지·상세 command와 SQLite queue/list projection을 실제 typed client로 호출한다. queue snapshot과 event는 revision으로 병합하며, 실제 파일 없이 완료 상태를 만들던 production mock command는 제거했다. retry/cancel과 attempt 이력은 SQLite에 영속되고, 탐색·다운로드·상세·중복 검토의 미리보기는 하나의 전역 thumbnail coordinator에서 우선순위·중복 요청·취소·cache를 공유한다.
+
+아직 실제 Hitomi HTTP 검색·다운로드, artifact 검증·재개·reconcile, 완료 파일 열기는 구현되지 않았다. 현재 fixture queue는 `queued -> resolving_metadata -> interrupted`까지만 진행해 원격 artifact pipeline이 없다는 사실을 명시적으로 보존한다. Auto Find의 원격 갱신, 작품 중복 판정, 내부 페이지 중복 판정도 각각 후속 계약이 확정될 때까지 fixture 또는 비활성 상태로 남긴다.
+
+## 실행과 검증
+
+### 검토용 실행 (`pnpm` 설치 불필요)
+
+새 앱은 Classic 저장소와 분리된 이 저장소에 있다. 일상적인 검토는 탐색기에서 프로젝트 루트의 `start-app.vbs`를 더블클릭한다. 콘솔이나 브라우저 없이 실제 Tauri 앱만 열린다. 소스가 바뀐 경우 release 실행 파일을 백그라운드에서 먼저 갱신하고, 실행 출력은 `.runtime/app-launch.log`에 저장한다. 실패할 때만 로그 위치를 알려 주는 안내창이 표시된다.
+
+`start-dev.cmd`는 빌드 출력을 화면에서 직접 확인해야 할 때 사용하는 진단용 실행기다.
+
+```bat
+start-app.vbs
+```
+
+이 실행기는 전역 `pnpm`을 요구하지 않는다. 시스템 Node.js가 없으면 Codex Desktop의 bundled Node.js를 사용하고, Rust/Cargo는 PATH 또는 `%USERPROFILE%\.cargo\bin`에서 찾는다. Tauri 앱을 새로 빌드하려면 Rust 외에 MSVC C++ Build Tools와 Windows SDK가 필요하다. 첫 실행 또는 소스 변경 뒤에는 빌드 시간만큼 앱 창이 늦게 나타날 수 있으며, 이후 실행은 만들어 둔 release 실행 파일을 바로 연다.
+
+MSVC/Windows SDK가 없는 PC에서는 `start-review.cmd`를 실행해 브라우저 fixture 모드로 UI와 command projection을 검토할 수 있다. 이 모드는 SQLite/Tauri backend 검증을 대신하지 않으며, 창과 함께 열린 최소화된 개발 서버를 닫으면 종료된다.
+
+### 개발 및 자동 검증
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm run dev
+pnpm run typecheck
+pnpm run test
+pnpm run build
+pnpm tauri dev
+```
+
+이 저장소의 PowerShell 실행기는 시스템 Node.js를 우선 사용하고, 없으면 Codex Desktop의 bundled Node.js를 찾는다.
+일상적인 사용자 검토는 `start-app.vbs`로 앱을 직접 실행한다. `start-dev.cmd`는 오류 진단용으로 남겨 둔다. MSI/Setup 번들은 명시적인 릴리스 요청이 있을 때만 만든다.
 
 ## 절대 원칙
 
@@ -28,6 +60,8 @@ Atsumi Next는 기존 Atsumi를 보존하면서 새 구조로 재작성하는 �
 - 현재 프로젝트는 Classic의 포크가 아니라 별도 Git 저장소이며 원격 저장소는 아직 연결하지 않았다.
 - Classic 기준선은 frontend production build와 Rust 15개 unit test를 통과했다.
 - Classic 코드는 참조 및 데이터 이전 입력으로만 사용하며 새 구현 코드를 Classic 저장소에 추가하지 않는다.
+- 앱 브랜드에는 Aluminum Classic의 `atsumi.svg`, `atsumi-256.png`, `icon.ico` 원본만 복사해 사용한다. Pupil APK 추출 자원은 사용하지 않는다.
+- 국가 표시는 Aluminum Classic 릴리스가 실제 UI에서 사용한 FlagCDN `kr.png`, `jp.png`, `us.png` 바이트를 로컬 번들로 고정한다. Classic에 없던 중국어 badge는 표시하지 않는다.
 
 ## 문서 지도
 
@@ -35,6 +69,7 @@ Atsumi Next는 기존 Atsumi를 보존하면서 새 구조로 재작성하는 �
 - [PRODUCT_SCOPE.md](docs/PRODUCT_SCOPE.md): 새 제품의 목표, 비목표, 첫 완성 범위
 - [FEATURE_MATRIX.md](docs/FEATURE_MATRIX.md): Classic 기능의 유지, 재설계, 보류 분류
 - [UX_ARCHITECTURE.md](docs/UX_ARCHITECTURE.md): 정보 구조와 주요 화면 흐름
+- [MULTI_SELECTION_RESEARCH.md](docs/MULTI_SELECTION_RESEARCH.md): 카드 내부 action과 충돌하지 않는 다중 선택 mode 조사·권장안
 - [SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md): 프론트와 백엔드의 새 경계
 - [DATA_MIGRATION.md](docs/DATA_MIGRATION.md): 데이터 소유권과 이전 원칙
 - [INCIDENT_AND_LESSONS.md](docs/INCIDENT_AND_LESSONS.md): 문제, 원인, 해결 이력과 회귀 조건

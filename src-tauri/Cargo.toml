@@ -1,0 +1,28 @@
+[package]
+name = "atsumi-next"
+version = "0.1.0"
+description = "Atsumi Next desktop backend"
+authors = ["Atsumi Next contributors"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "atsumi_next_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

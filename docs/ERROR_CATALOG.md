@@ -21,7 +21,13 @@
 | `FILESYSTEM_CONFLICT` | 같은 위치에 다른 파일이 있습니다 | 아니오 | 사용자 검토 |
 | `DATABASE_BUSY` | 내부 기록이 사용 중입니다 | 예 | 짧은 재시도 |
 | `DATABASE_CORRUPT` | 내부 데이터 복구가 필요합니다 | 아니오 | backup/repair flow |
+| `IDEMPOTENCY_CONFLICT` | 같은 요청 식별자가 다른 대상에 이미 사용되었습니다 | 아니오 | 호출 내용 검토 |
+| `DOWNLOAD_ENTRY_NOT_FOUND` | 다운로드 항목을 다시 불러오세요 | 아니오 | 목록 새로고침 |
+| `INVALID_DOWNLOAD_STATE` | 현재 상태에서는 요청한 작업을 수행할 수 없습니다 | 아니오 | 최신 상태 검토 |
 | `JOB_INTERRUPTED` | 작업이 중단되었습니다 | 예 | 이어받기 |
+| `THUMBNAIL_REQUEST_INVALID` | 미리보기 요청 정보가 올바르지 않습니다 | 아니오 | 요청 key 확인 |
+| `THUMBNAIL_COORDINATOR_CLOSED` | 미리보기 작업기가 종료되었습니다 | 예 | 앱 상태 확인 후 재시도 |
+| `THUMBNAIL_WORKER_UNAVAILABLE` | 미리보기 작업기를 시작하지 못했습니다 | 예 | 로그 확인 후 재시도 |
 | `INTEGRITY_INCOMPLETE` | 일부 페이지가 없습니다 | 예 | 누락 페이지 plan |
 | `DUPLICATE_EXACT` | 동일한 이미지가 발견되었습니다 | 아니오 | Review |
 | `DUPLICATE_VISUAL` | 유사한 작품을 확인해야 합니다 | 아니오 | Review |

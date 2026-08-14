@@ -2,7 +2,7 @@
 
 ## Phase 0: 기준선과 명세
 
-현재 단계다.
+완료했다.
 
 산출물:
 
@@ -20,6 +20,8 @@
 - 첫 수직 기능의 acceptance criteria가 확정된다.
 
 ## Phase 1: UX prototype과 계약
+
+완료했다. 승인된 clickable prototype은 `prototype/`에 보존하고, 구현은 공통 component와 reducer로 옮긴다.
 
 산출물:
 
@@ -39,6 +41,8 @@
 
 ## Phase 2: Core foundation
 
+완료했다. 앱 셸, SQLite 기반 설정·창 배치, Gallery/Artifact model, typed command client, revision event projection, fixture event foundation, structured logging을 구현하고 검증했다. 실제 원격 기능은 Phase 3 command로 확장한다.
+
 산출물:
 
 - 새 Tauri workspace와 React frontend
@@ -52,9 +56,11 @@
 
 - 앱 셸이 실행된다.
 - 설정과 window placement가 SQLite에서 저장 및 복원된다.
-- mock job의 상태 변경이 전체 목록 재렌더 없이 표시된다.
+- fixture event의 상태 변경이 전체 목록 재렌더 없이 표시된다.
 
 ## Phase 3: 첫 수직 기능
+
+진행 중이다. 저장 fixture를 공유하는 검색·상세 command와 UI projection, requestId/active-gallery 멱등성을 가진 다운로드 queue/list, revision snapshot, startup `interrupted` 복구 기반을 구현했다. retry/cancel, attempt 이력과 `cancelled` 상태도 SQLite 계약으로 연결했다. Explore/Downloads/Detail/Review는 하나의 전역 thumbnail coordinator를 사용하며 in-flight 병합·우선순위·취소·메모리/negative cache를 공유한다. production mock 완료 경로는 제거했으며 신규 fixture queue는 실제 artifact pipeline이 없으면 `interrupted`에서 멈춘다. 실제 원격 resolver, artifact 처리와 파일 열기는 이어서 연결한다.
 
 범위:
 
@@ -117,8 +123,10 @@
 
 ## 다음 즉시 작업
 
-1. 사용자에게 `DECISION_REGISTER.md`의 D-101~D-110 승인을 받는다.
-2. 승인 후 Classic 보존 commit 또는 tag를 만든다.
-3. UX interaction matrix와 저해상도 prototype을 만든다.
-4. 동시에 API contract와 SQLite schema 초안을 만든다.
-5. 두 문서가 합의되면 빈 scaffold를 생성한다.
+1. 완료: `search_submit`, `search_page_get`, `gallery_detail_get` adapter, metadata/thumbnail DTO, App projection과 저장 fixture.
+2. 완료: 같은 gallery ID의 queue 멱등성, revision snapshot, 다운로드 상태 복구 기반과 production mock 완료 경로 제거.
+3. 완료: 중앙 상태 전이, attempt/error/timestamp schema, `download_retry`/`download_cancel`, `cancelled`와 batch/CAS 회귀 검증.
+4. 완료: 공용 thumbnail key/component와 프로세스 전역 coordinator, priority, in-flight dedupe, 취소, 성공/실패 cache 기반.
+5. 실제 Hitomi metadata/thumbnail resolver를 저장 fixture의 404, 503, timeout, rate-limit test부터 연결한다.
+6. 임시 exclusive DB guard를 owner lease/heartbeat 또는 앱 내부 single-instance 계약으로 교체한다.
+7. 정식 queue runner와 artifact 저장·검증·resume·reconcile, 첫 이미지 열기를 연결한 뒤 Phase 3 E2E를 수행한다.

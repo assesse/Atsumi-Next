@@ -1,0 +1,343 @@
+import { describe, expect, it, vi } from "vitest";
+import { galleryId } from "../core/types";
+import { backend } from "./backend";
+import type { DownloadEntry, SearchRequest } from "./contracts";
+
+const searchRequest = (patch: Partial<SearchRequest> = {}): SearchRequest => ({
+  text: "",
+  includeTags: [],
+  excludeTags: [],
+  languages: ["korean"],
+  sort: "recent",
+  pageSize: 3,
+  ...patch,
+});
+
+describe("browser backend settings contract", () => {
+  it("rejects values outside the approved settings ranges", async () => {
+    expect(backend.runtime).toBe("browser-mock");
+    const current = await backend.settingsGet();
+    if (!current.ok) throw new Error(current.error.message);
+
+    const result = await backend.settingsUpdate({ maxColumns: 5 }, current.data.revision);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("VALIDATION_ERROR");
+    expect(result.error.details?.field).toBe("maxColumns");
+  });
+
+  it("emits the new revision when settings change", async () => {
+    const revisions: number[] = [];
+    const unsubscribe = await backend.on("settings:changed", (snapshot) => revisions.push(snapshot.revision));
+    const current = await backend.settingsGet();
+    if (!current.ok) throw new Error(current.error.message);
+
+    const nextColumns = current.data.maxColumns === 4 ? 3 : 4;
+    const result = await backend.settingsUpdate({ maxColumns: nextColumns }, current.data.revision);
+    unsubscribe();
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(revisions).toEqual([result.data.revision]);
+  });
+});
+
+describe("browser backend search contract", () => {
+  it("reuses a canonical query key and returns deterministic Recent pages", async () => {
+    const first = await backend.searchSubmit(searchRequest({
+      text: "  ARCHIVE  ",
+      includeTags: [" FULL_COLOR ", "MYSTERY"],
+      languages: ["english", "korean", "japanese", "korean"],
+    }));
+    const repeated = await backend.searchSubmit(searchRequest({
+      text: "archive",
+      includeTags: ["mystery", "full_color"],
+      languages: ["japanese", "english", "korean"],
+    }));
+
+    expect(first.ok).toBe(true);
+    expect(repeated.ok).toBe(true);
+    if (!first.ok || !repeated.ok) return;
+    expect(repeated.data.queryId).toBe(first.data.queryId);
+    expect(first.data.queryId).toBe("fixture-f68ffad46ba6b7569bf724ae0776c47d");
+    expect(first.data.firstPage.items.map((item) => item.title)).toEqual(["Archive of Rain"]);
+  });
+
+  it("serves later pages from the submitted query session", async () => {
+    const submitted = await backend.searchSubmit(searchRequest({ pageSize: 2 }));
+    if (!submitted.ok) throw new Error(submitted.error.message);
+
+    const second = await backend.searchPageGet(submitted.data.queryId, 2);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.data.page).toBe(2);
+    expect(second.data.items).toHaveLength(1);
+    expect(second.data.items[0]?.id).not.toBe(submitted.data.firstPage.items[0]?.id);
+
+    const outside = await backend.searchPageGet(submitted.data.queryId, 3);
+    expect(outside).toMatchObject({ ok: false, error: { code: "VALIDATION_ERROR" } });
+  });
+
+  it("returns structured errors for unknown queries and galleries", async () => {
+    const page = await backend.searchPageGet("missing-query", 1);
+    const detail = await backend.galleryDetailGet(galleryId(999));
+
+    expect(page).toMatchObject({ ok: false, error: { code: "QUERY_NOT_FOUND" } });
+    expect(detail).toMatchObject({ ok: false, error: { code: "SOURCE_NOT_FOUND" } });
+  });
+
+  it("returns tags and related summaries from the detail fixture", async () => {
+    const result = await backend.galleryDetailGet(galleryId(4051038));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.tags).toContain("female:glasses");
+    expect(result.data.related).toHaveLength(2);
+    expect(result.data.related.every((item) => item.id !== result.data.id)).toBe(true);
+  });
+});
+
+describe("browser backend download contract", () => {
+  it("persists idempotent cancellation and retries the same entry", async () => {
+    const gallery = galleryId(7_100_000);
+    const queued = await backend.downloadQueueAdd([gallery], "queue-cancel-retry-request");
+    if (!queued.ok) throw new Error(queued.error.message);
+    const entry = queued.data[0]!;
+
+    const cancelled = await backend.downloadCancel([entry.entryId]);
+    const cancelReplay = await backend.downloadCancel([entry.entryId]);
+    expect(cancelled).toMatchObject({
+      ok: true,
+      data: [{ entryId: entry.entryId, state: "cancelled", revision: 1 }],
+    });
+    expect(cancelReplay).toEqual(cancelled);
+
+    const retried = await backend.downloadRetry([entry.entryId]);
+    expect(retried).toEqual({
+      ok: true,
+      data: [{ jobId: `browser-fixture-${entry.entryId}`, reused: false }],
+    });
+    const current = await backend.downloadEntriesList({
+      query: entry.entryId,
+      page: 1,
+      pageSize: 20,
+    });
+    expect(current).toMatchObject({
+      ok: true,
+      data: { entries: [{ entryId: entry.entryId, state: "queued", revision: 2 }] },
+    });
+    await backend.downloadCancel([entry.entryId]);
+  });
+
+  it("does not let an old fixture timer advance a retried attempt", async () => {
+    vi.useFakeTimers();
+    const unsubscribe = await backend.on("download:changed", () => undefined);
+    try {
+      const gallery = galleryId(7_100_101);
+      const queued = await backend.downloadQueueAdd([gallery], "queue-stale-browser-worker");
+      if (!queued.ok) throw new Error(queued.error.message);
+      const entry = queued.data[0]!;
+
+      await vi.advanceTimersByTimeAsync(75);
+      await backend.downloadCancel([entry.entryId]);
+      const retried = await backend.downloadRetry([entry.entryId]);
+      expect(retried).toMatchObject({ ok: true, data: [{ reused: false }] });
+
+      await vi.advanceTimersByTimeAsync(150);
+      const whileOldCompletionFires = await backend.downloadEntriesList({
+        query: entry.entryId,
+        page: 1,
+        pageSize: 20,
+      });
+      expect(whileOldCompletionFires).toMatchObject({
+        ok: true,
+        data: {
+          entries: [{
+            entryId: entry.entryId,
+            state: "resolving_metadata",
+            attempt: 2,
+          }],
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(75);
+      const currentAttemptCompletion = await backend.downloadEntriesList({
+        query: entry.entryId,
+        page: 1,
+        pageSize: 20,
+      });
+      expect(currentAttemptCompletion).toMatchObject({
+        ok: true,
+        data: {
+          entries: [{
+            entryId: entry.entryId,
+            state: "interrupted",
+            attempt: 2,
+            errorCode: "DOWNLOAD_FOUNDATION_UNAVAILABLE",
+          }],
+        },
+      });
+    } finally {
+      unsubscribe();
+      vi.useRealTimers();
+    }
+  });
+
+  it("replays the original entries for the same request ID and normalized gallery set", async () => {
+    const firstGallery = galleryId(7_100_002);
+    const secondGallery = galleryId(7_100_001);
+    const first = await backend.downloadQueueAdd(
+      [firstGallery, secondGallery, firstGallery],
+      " queue-replay-request ",
+    );
+    expect(await backend.downloadActiveCount()).toEqual({ ok: true, data: 2 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const browserState = backend as unknown as { downloadEntries: Map<string, DownloadEntry> };
+    const current = first.data[0]!;
+    browserState.downloadEntries.set(current.entryId, {
+      ...current,
+      state: "downloading",
+      progress: 47,
+    });
+    const replay = await backend.downloadQueueAdd(
+      [secondGallery, firstGallery],
+      "queue-replay-request",
+    );
+
+    expect(replay.ok).toBe(true);
+    if (!replay.ok) return;
+    expect(first.data.map((entry) => entry.galleryId)).toEqual([secondGallery, firstGallery]);
+    expect(replay.data).toEqual(first.data);
+  });
+
+  it("rejects reuse of a request ID for a different normalized gallery set", async () => {
+    const firstGallery = galleryId(7_100_011);
+    const secondGallery = galleryId(7_100_012);
+    const queued = await backend.downloadQueueAdd([firstGallery], "queue-conflict-request");
+    const conflict = await backend.downloadQueueAdd([firstGallery, secondGallery], "queue-conflict-request");
+
+    expect(queued.ok).toBe(true);
+    expect(conflict).toMatchObject({
+      ok: false,
+      error: { code: "IDEMPOTENCY_CONFLICT", details: { requestId: "queue-conflict-request" } },
+    });
+  });
+
+  it("validates the original gallery input length before deduplication", async () => {
+    const repeated = Array.from({ length: 201 }, () => galleryId(7_100_015));
+    const result = await backend.downloadQueueAdd(repeated, "queue-too-many-request");
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        details: { field: "galleries", reason: "must contain at most 200 IDs" },
+      },
+    });
+  });
+
+  it("reuses an existing entry in each of the six active states for a new request ID", async () => {
+    const states: DownloadEntry["state"][] = [
+      "queued",
+      "resolving_metadata",
+      "downloading",
+      "hashing",
+      "verifying",
+      "retry_wait",
+    ];
+    const browserState = backend as unknown as { downloadEntries: Map<string, DownloadEntry> };
+
+    for (const [index, state] of states.entries()) {
+      const shared = galleryId(7_100_021 + index);
+      const first = await backend.downloadQueueAdd([shared], `queue-active-first-${state}`);
+      if (!first.ok) throw new Error(first.error.message);
+      const entry = first.data[0]!;
+      browserState.downloadEntries.set(entry.entryId, { ...entry, state, progress: 23 });
+
+      const second = await backend.downloadQueueAdd([shared], `queue-active-second-${state}`);
+      expect(second).toMatchObject({
+        ok: true,
+        data: [{ entryId: entry.entryId, galleryId: shared, state, progress: 23 }],
+      });
+    }
+  });
+
+  it("filters and paginates queued entries deterministically", async () => {
+    const query = "710003";
+    const galleries = [
+      galleryId(7_100_033),
+      galleryId(7_100_031),
+      galleryId(7_100_034),
+      galleryId(7_100_032),
+    ];
+    const queued = await backend.downloadQueueAdd(galleries, "queue-list-request");
+    if (!queued.ok) throw new Error(queued.error.message);
+
+    const first = await backend.downloadEntriesList({ state: "queued", query, page: 1, pageSize: 2 });
+    const second = await backend.downloadEntriesList({ state: "queued", query, page: 2, pageSize: 2 });
+    const completed = await backend.downloadEntriesList({ state: "completed", query, page: 1, pageSize: 2 });
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(completed.ok).toBe(true);
+    if (!first.ok || !second.ok || !completed.ok) return;
+    expect(first.data.totalItems).toBe(4);
+    expect(first.data.entries.map((entry) => entry.galleryId)).toEqual([galleryId(7_100_031), galleryId(7_100_032)]);
+    expect(second.data.entries.map((entry) => entry.galleryId)).toEqual([galleryId(7_100_033), galleryId(7_100_034)]);
+    expect(completed.data).toMatchObject({ totalItems: 0, entries: [] });
+  });
+
+  it("rejects list queries longer than 500 UTF-8 bytes after normalization", async () => {
+    const result = await backend.downloadEntriesList({
+      query: `  ${"가".repeat(167)}  `,
+      page: 1,
+      pageSize: 20,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        details: { field: "query", reason: "must be at most 500 bytes" },
+      },
+    });
+  });
+
+  it("ends the review fixture at interrupted without manufacturing a completed artifact", async () => {
+    vi.useFakeTimers();
+    const states: DownloadEntry["state"][] = [];
+    const unsubscribe = await backend.on("download:changed", (entry) => states.push(entry.state));
+    try {
+      const gallery = galleryId(7_100_099);
+      const queued = await backend.downloadQueueAdd([gallery], "queue-safe-fixture-request");
+      expect(queued).toMatchObject({ ok: true, data: [{ galleryId: gallery, revision: 0, state: "queued" }] });
+
+      await vi.advanceTimersByTimeAsync(225);
+
+      expect(states).toEqual(["resolving_metadata", "interrupted"]);
+      const interrupted = await backend.downloadEntriesList({
+        state: "interrupted",
+        query: String(gallery),
+        page: 1,
+        pageSize: 20,
+      });
+      expect(interrupted).toMatchObject({
+        ok: true,
+        data: {
+          entries: [{
+            galleryId: gallery,
+            revision: 2,
+            state: "interrupted",
+            progress: 0,
+            attempt: 1,
+            errorCode: "DOWNLOAD_FOUNDATION_UNAVAILABLE",
+          }],
+        },
+      });
+    } finally {
+      unsubscribe();
+      vi.useRealTimers();
+    }
+  });
+});

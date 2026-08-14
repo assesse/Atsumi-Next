@@ -8,15 +8,15 @@
 
 | 상황 | 입력 | 동작 | 상태 |
 |---|---|---|---|
-| 선택 없음 | 좌클릭 | 해당 카드 하나 선택 | 초안 |
-| 한 개 이상 선택 | 좌클릭 | 기존 선택을 지우고 해당 카드만 선택 | Classic 최신 요구 반영 |
-| 같은 단일 카드 선택됨 | 좌클릭 | 선택 해제 | 최신 요구 반영 |
-| 모든 상황 | Ctrl + 좌클릭 | 해당 카드만 선택 toggle | 확정 후보 |
-| anchor 있음 | Shift + 좌클릭 | anchor부터 대상까지 범위 선택 | 확정 후보 |
-| 다운로드 완료 | 더블클릭 | 첫 이미지 기본 연결 프로그램으로 열기 | 확정 |
-| 다운로드 미완료 | 더블클릭 | 아무 파일도 열지 않고 상세 보기 | 초안 |
+| 선택 없음 | 카드 배경 좌클릭 | 해당 카드 하나 선택 | 확정 |
+| 한 개 이상 선택 | 카드 어디든 좌클릭 | 기존 선택을 지우고 해당 카드만 선택 | 확정 |
+| 같은 단일 카드 선택됨 | 좌클릭 | 해당 카드 선택과 anchor 해제 | 확정 |
+| 모든 상황 | Ctrl + 좌클릭 | 해당 카드만 선택 toggle | 확정 |
+| anchor 있음 | Shift + 좌클릭 | anchor부터 대상까지 범위 선택 | 확정 |
+| Explore / Auto Find | 더블클릭 | 상세 workspace 열기 | 확정 |
+| Downloads | 더블클릭 | `artifact_open_first`로 해당 항목의 첫 파일 실행. 실행 가능한 artifact가 없으면 상태 오류를 표시하고 상세로 전환하지 않음 | 확정 |
 | card background | 우클릭 | 상세 workspace 열기 | 초안 |
-| 중복 의심 badge | 좌클릭 | 작품 Review 열기 | 확정 |
+| 중복 의심 warning icon | 좌클릭 | 작품 Review 열기 | 확정 |
 | 검토 필요 status | 좌클릭 | 해당 작업 상세 또는 Review 열기 | 확정 |
 
 ## Metadata chip
@@ -29,6 +29,8 @@
 
 metadata target이 이벤트를 처리하면 card의 상세 열기와 선택은 발생하지 않는다.
 
+단, Ctrl/Shift가 눌렸거나 선택 항목이 하나 이상이면 별도 toggle state 없이 선택 문맥으로 파생한다. 이 문맥에서는 metadata, 상태, 상세 button을 포함한 카드 내부의 모든 좌클릭이 카드 선택 규칙을 우선하며 내부 action은 실행하지 않는다. 일반 좌클릭은 toggle이 아니라 대상 하나로 교체한다.
+
 ## Keyboard
 
 | 화면 | 입력 | 동작 |
@@ -40,7 +42,7 @@ metadata target이 이벤트를 처리하면 card의 상세 열기와 선택은 
 | Downloads 완료 | Enter | 선택 항목 첫 이미지 열기 |
 | Downloads 대기/실패 | Enter | 선택 항목 시작 또는 재시도 |
 | Downloads | Delete | 확인 후 목록과 파일을 quarantine |
-| 모든 목록 | Escape | 선택 해제, 열린 menu 닫기 |
+| 모든 목록 | Escape | 열린 상세 active tab 하나 닫기 → 선택 해제 → 종료 선택창 순으로 처리. 열린 menu/dialog가 먼저 입력을 소비함 |
 
 ## Search
 
@@ -69,7 +71,5 @@ metadata target이 이벤트를 처리하면 card의 상세 열기와 선택은 
 
 ## 미확정 항목
 
-1. 미완료 Gallery 더블클릭을 상세 보기로 사용할지
-2. card 우클릭과 길게 누르기 중 상세 보기의 주 입력
-3. 같은 단일 카드 재클릭 해제가 범위 선택 anchor도 지울지
-4. Downloads에서 여러 완료 항목 Enter를 모두 외부 viewer로 열지, 첫 항목만 열지
+1. card 우클릭과 길게 누르기 중 상세 보기의 주 입력
+2. Downloads에서 여러 완료 항목 Enter를 모두 외부 viewer로 열지, 첫 항목만 열지

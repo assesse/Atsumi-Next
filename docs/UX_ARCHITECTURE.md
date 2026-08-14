@@ -46,7 +46,8 @@
 - 앨범 목록만 스크롤
 - 1~4열 responsive grid
 - 카드 최소 폭을 우선하고 설정의 최대 열 수를 상한으로 사용
-- resize 시 JavaScript로 매 카드 폭을 계산하지 않고 CSS layout을 우선 사용
+- grid container 하나만 관찰해 `미리보기 폭 + metadata 최소 폭`을 만족하는 열 수를 계산하고, 매 카드 폭은 측정하지 않는다.
+- 작가와 선택적 그룹은 카드 좌측 정렬 바이라인 한 줄에 namespace 아이콘과 함께 표시한다.
 
 ## 화면별 구조
 
@@ -76,10 +77,12 @@
 ### Detail workspace
 
 - 화면 위에 떠 있지만 자체 tab strip과 scroll context를 가진다.
+- Classic과 같은 중앙 정렬 1120px 폭을 기준으로 하되, 충분히 넓은 앱 창에서는 최대 1860px까지 연속적으로 확장한다.
 - 전체 닫기는 tab strip 최우측, 탭 닫기는 각 탭에 위치한다.
 - 최소화 시 view header 중앙의 복원 control로 돌아온다.
 - Related gallery를 열면 현재 탭 바로 다음에 자식 탭으로 삽입한다.
-- 페이지 preview 영역은 우측 metadata 높이에 맞추되 내부 최대 높이와 독립 스크롤을 갖는다.
+- 현재 mock sprite는 실제 cell 비율인 1:1로 대표 이미지와 페이지 preview를 표시한다. Phase 3의 실제 thumbnail 계약은 각 이미지의 width/height를 전달해 source별 비율을 적용한다.
+- 페이지 preview 전체는 잘라내거나 짧은 중첩 스크롤에 가두지 않고 상세 본문의 단일 scroll context에서 확인한다.
 
 ### Review workspace
 
@@ -112,7 +115,7 @@
 공통 작업 상태:
 
 - 대기
-- 받는 중 N%
+- 다운로드 중 animation icon과 접근 가능한 진행률
 - 해시 중
 - 검사 중
 - 중단됨
