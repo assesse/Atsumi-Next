@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { GalleryId } from "../core/types";
+import { galleryId, type GalleryId } from "../core/types";
 import type {
   ApiResult,
   AutoFindExclusionResult,
@@ -10,6 +10,12 @@ import type {
   DownloadEntry,
   DownloadListRequest,
   DownloadPage,
+  DuplicateCandidate,
+  DuplicateDecisionRequest,
+  DuplicateGalleryRef,
+  DuplicateReview,
+  DuplicateScanRun,
+  DuplicateSnapshot,
   FavoriteKey,
   FavoriteMutationResult,
   FavoriteRecord,
@@ -43,6 +49,7 @@ import {
 
 export type BackendEventMap = {
   "auto-find:changed": AutoFindRun;
+  "duplicate:changed": DuplicateScanRun;
   "job:changed": JobEvent;
   "download:changed": DownloadChangedEvent;
   "thumbnail:ready": ThumbnailCompletionEvent;
@@ -71,6 +78,11 @@ export interface BackendClient {
   autoFindRefresh(): Promise<ApiResult<AutoFindRun>>;
   autoFindCancel(): Promise<ApiResult<AutoFindRun>>;
   autoFindExclude(galleryIds: GalleryId[], reason: string): Promise<ApiResult<AutoFindExclusionResult>>;
+  duplicateSnapshot(): Promise<ApiResult<DuplicateSnapshot>>;
+  duplicateScanStart(): Promise<ApiResult<DuplicateScanRun>>;
+  duplicateScanCancel(): Promise<ApiResult<DuplicateScanRun>>;
+  duplicateReviewGet(candidateId: string): Promise<ApiResult<DuplicateReview>>;
+  duplicateDecisionApply(request: DuplicateDecisionRequest): Promise<ApiResult<DuplicateReview>>;
   downloadQueueAdd(galleries: GalleryId[], requestId: string): Promise<ApiResult<DownloadEntry[]>>;
   downloadEntriesList(request: DownloadListRequest): Promise<ApiResult<DownloadPage>>;
   downloadRetry(entryIds: string[]): Promise<ApiResult<JobRef[]>>;
@@ -199,6 +211,132 @@ const cloneAutoFindSnapshot = (snapshot: AutoFindSnapshot): AutoFindSnapshot => 
   })),
 });
 
+const duplicateProfile: DuplicateSnapshot["profile"] = {
+  profileVersion: 1,
+  algorithmVersion: 1,
+  dHashBits: 1024,
+  pHashBits: 64,
+  visualMatchThreshold: 0.8,
+  lowInformationStdDevThreshold: 10,
+};
+
+const duplicateGalleryRef = (
+  id: number,
+  entryId: string,
+  title: string,
+  artist: string,
+  pageCount: number,
+): DuplicateGalleryRef => ({
+  galleryId: galleryId(id),
+  entryId,
+  title,
+  artist,
+  pageCount,
+});
+
+const browserDuplicateReviewFixture = (now: string): DuplicateReview => ({
+  candidate: {
+    candidateId: "browser-duplicate-archive-tram",
+    revision: 0,
+    parent: duplicateGalleryRef(4_051_038, "browser-artifact-4051038", "Archive of Rain", "serein", 38),
+    candidate: duplicateGalleryRef(4_050_754, "browser-artifact-4050754", "The Last Tram", "serein", 24),
+    relation: "contains",
+    confidence: 0.94,
+    matchedPages: 3,
+    parentCoverage: 0.079,
+    candidateCoverage: 0.125,
+    createdAt: now,
+    updatedAt: now,
+  },
+  evidence: [
+    {
+      evidenceId: "browser-evidence-sequence",
+      kind: "sequence_alignment",
+      confidence: 0.94,
+      matchedPages: 3,
+      description: "원본 페이지 번호를 보존한 순서 정렬에서 세 페이지가 대응합니다.",
+    },
+    {
+      evidenceId: "browser-evidence-exact",
+      kind: "exact_sha256",
+      confidence: 1,
+      matchedPages: 1,
+      description: "한 페이지의 검증된 SHA-256이 정확히 일치합니다.",
+    },
+    {
+      evidenceId: "browser-evidence-visual",
+      kind: "visual_hash",
+      confidence: 0.91,
+      matchedPages: 2,
+      description: "재압축 가능성이 있는 두 페이지가 시각 해시 기준을 통과했습니다.",
+    },
+  ],
+  pagePairs: [
+    {
+      parentSourcePage: 1,
+      candidateSourcePage: 3,
+      exactSha256: true,
+      dHashDistance: 0,
+      pHashDistance: 0,
+      detailHashDistance: 0,
+      edgeSimilarity: 1,
+      visualSimilarity: 1,
+      lowInformation: false,
+    },
+    {
+      parentSourcePage: 7,
+      candidateSourcePage: 8,
+      exactSha256: false,
+      dHashDistance: 3,
+      pHashDistance: 4,
+      detailHashDistance: 31,
+      edgeSimilarity: 0.92,
+      visualSimilarity: 0.94,
+      lowInformation: false,
+    },
+    {
+      parentSourcePage: 12,
+      candidateSourcePage: 14,
+      exactSha256: false,
+      dHashDistance: 5,
+      pHashDistance: 6,
+      detailHashDistance: 44,
+      edgeSimilarity: 0.89,
+      visualSimilarity: 0.91,
+      lowInformation: false,
+    },
+  ],
+  decisions: [],
+  seriesGroups: [],
+});
+
+const cloneDuplicateGalleryRef = (gallery: DuplicateGalleryRef): DuplicateGalleryRef => ({ ...gallery });
+
+const cloneDuplicateCandidate = (candidate: DuplicateCandidate): DuplicateCandidate => ({
+  ...candidate,
+  parent: cloneDuplicateGalleryRef(candidate.parent),
+  candidate: cloneDuplicateGalleryRef(candidate.candidate),
+});
+
+const cloneDuplicateScanRun = (run: DuplicateScanRun): DuplicateScanRun => ({ ...run });
+
+const cloneDuplicateReview = (review: DuplicateReview): DuplicateReview => ({
+  candidate: cloneDuplicateCandidate(review.candidate),
+  evidence: review.evidence.map((evidence) => ({ ...evidence })),
+  pagePairs: review.pagePairs.map((pair) => ({ ...pair })),
+  decisions: review.decisions.map((decision) => ({ ...decision })),
+  seriesGroups: review.seriesGroups.map((group) => ({
+    ...group,
+    members: group.members.map(cloneDuplicateGalleryRef),
+  })),
+});
+
+const cloneDuplicateSnapshot = (snapshot: DuplicateSnapshot): DuplicateSnapshot => ({
+  profile: { ...snapshot.profile },
+  ...(snapshot.run ? { run: cloneDuplicateScanRun(snapshot.run) } : {}),
+  candidates: snapshot.candidates.map(cloneDuplicateCandidate),
+});
+
 type Handler<K extends keyof BackendEventMap> = (payload: BackendEventMap[K]) => void;
 
 class BrowserMockBackend implements BackendClient {
@@ -207,6 +345,7 @@ class BrowserMockBackend implements BackendClient {
   private placement = { ...defaultPlacement };
   private listeners: { [K in keyof BackendEventMap]: Set<Handler<K>> } = {
     "auto-find:changed": new Set(),
+    "duplicate:changed": new Set(),
     "job:changed": new Set(),
     "download:changed": new Set(),
     "thumbnail:ready": new Set(),
@@ -228,6 +367,16 @@ class BrowserMockBackend implements BackendClient {
   private autoFindExclusions = new Set<number>();
   private autoFindGeneration = 0;
   private nextAutoFindRunId = 1;
+  private duplicateSnapshotState: DuplicateSnapshot = {
+    profile: { ...duplicateProfile },
+    candidates: [],
+  };
+  private duplicateReviews = new Map<string, DuplicateReview>();
+  private duplicateResolvedCandidates = new Set<string>();
+  private duplicateHiddenGalleryIds = new Set<GalleryId>();
+  private duplicateGeneration = 0;
+  private nextDuplicateRunId = 1;
+  private nextDuplicateDecisionId = 1;
 
   async settingsGet(): Promise<ApiResult<SettingsSnapshot>> {
     return ok({ ...this.settings });
@@ -434,6 +583,203 @@ class BrowserMockBackend implements BackendClient {
       excludedGalleryIds: normalizedIds,
       snapshot: cloneAutoFindSnapshot(this.autoFind),
     });
+  }
+
+  async duplicateSnapshot(): Promise<ApiResult<DuplicateSnapshot>> {
+    return ok(cloneDuplicateSnapshot(this.duplicateSnapshotState));
+  }
+
+  async duplicateScanStart(): Promise<ApiResult<DuplicateScanRun>> {
+    const current = this.duplicateSnapshotState.run;
+    if (current?.state === "running") return ok(cloneDuplicateScanRun(current));
+
+    const generation = ++this.duplicateGeneration;
+    const now = new Date().toISOString();
+    const run: DuplicateScanRun = {
+      runId: `browser-duplicate-run-${this.nextDuplicateRunId++}`,
+      revision: 0,
+      state: "running",
+      totalArtifacts: 2,
+      hashedArtifacts: 0,
+      totalPairs: 1,
+      comparedPairs: 0,
+      candidatesFound: 0,
+      startedAt: now,
+      updatedAt: now,
+    };
+    this.duplicateSnapshotState = {
+      profile: { ...duplicateProfile },
+      run,
+      candidates: this.duplicateSnapshotState.candidates.map(cloneDuplicateCandidate),
+    };
+    queueMicrotask(() => this.emit("duplicate:changed", cloneDuplicateScanRun(run)));
+    window.setTimeout(() => this.advanceDuplicateScanFixture(generation, false), 45);
+    window.setTimeout(() => this.advanceDuplicateScanFixture(generation, true), 90);
+    return ok(cloneDuplicateScanRun(run));
+  }
+
+  async duplicateScanCancel(): Promise<ApiResult<DuplicateScanRun>> {
+    const current = this.duplicateSnapshotState.run;
+    if (!current || current.state !== "running") {
+      return {
+        ok: false,
+        error: {
+          code: "DUPLICATE_SCAN_NOT_RUNNING",
+          message: "실행 중인 작품 중복 검사가 없습니다.",
+          retryable: false,
+          action: "none",
+        },
+      };
+    }
+    this.duplicateGeneration += 1;
+    const now = new Date().toISOString();
+    const cancelled: DuplicateScanRun = {
+      ...current,
+      revision: current.revision + 1,
+      state: "cancelled",
+      updatedAt: now,
+      finishedAt: now,
+    };
+    this.duplicateSnapshotState = { ...this.duplicateSnapshotState, run: cancelled };
+    this.emit("duplicate:changed", cloneDuplicateScanRun(cancelled));
+    return ok(cloneDuplicateScanRun(cancelled));
+  }
+
+  async duplicateReviewGet(candidateId: string): Promise<ApiResult<DuplicateReview>> {
+    const normalizedId = candidateId.trim();
+    const review = this.duplicateReviews.get(normalizedId);
+    return review
+      ? ok(cloneDuplicateReview(review))
+      : notFoundError(
+          "DUPLICATE_CANDIDATE_NOT_FOUND",
+          "중복 후보를 찾을 수 없습니다.",
+          { candidateId: normalizedId },
+        );
+  }
+
+  async duplicateDecisionApply(
+    request: DuplicateDecisionRequest,
+  ): Promise<ApiResult<DuplicateReview>> {
+    const candidateId = request.candidateId.trim();
+    const review = this.duplicateReviews.get(candidateId);
+    if (!review) {
+      return notFoundError(
+        "DUPLICATE_CANDIDATE_NOT_FOUND",
+        "중복 후보를 찾을 수 없습니다.",
+        { candidateId },
+      );
+    }
+    if (request.expectedRevision !== review.candidate.revision) {
+      return {
+        ok: false,
+        error: {
+          code: "REVISION_CONFLICT",
+          message: "중복 후보가 다른 창에서 변경되었습니다.",
+          retryable: false,
+          action: "review",
+          details: {
+            resource: "duplicateCandidate",
+            expectedRevision: request.expectedRevision,
+            actualRevision: review.candidate.revision,
+          },
+        },
+      };
+    }
+
+    if (request.action === "series_link" && !request.seriesGroupId?.trim() && !request.seriesName?.trim()) {
+      return validationError("request.seriesName", "seriesGroupId 또는 seriesName 중 하나가 필요합니다");
+    }
+    if (request.action === "series_unlink" && request.targetGalleryId === undefined) {
+      return validationError("request.targetGalleryId", "series_unlink에는 대상 갤러리가 필요합니다");
+    }
+
+    const now = new Date().toISOString();
+    const candidate = {
+      ...review.candidate,
+      revision: review.candidate.revision + 1,
+      updatedAt: now,
+    };
+    let seriesGroups = review.seriesGroups.map((group) => ({
+      ...group,
+      members: group.members.map(cloneDuplicateGalleryRef),
+    }));
+    let appliedSeriesGroupId = request.seriesGroupId?.trim() || undefined;
+
+    if (request.action === "series_link") {
+      let group = appliedSeriesGroupId
+        ? seriesGroups.find((item) => item.seriesGroupId === appliedSeriesGroupId)
+        : undefined;
+      if (!group) {
+        appliedSeriesGroupId = `browser-series-${candidate.candidateId}-${seriesGroups.length + 1}`;
+        group = {
+          seriesGroupId: appliedSeriesGroupId,
+          name: request.seriesName?.trim() || "연작",
+          revision: 0,
+          members: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+        seriesGroups.push(group);
+      }
+      const memberIds = new Set(group.members.map((member) => member.galleryId));
+      const additions = [candidate.parent, candidate.candidate]
+        .filter((member) => !memberIds.has(member.galleryId))
+        .map(cloneDuplicateGalleryRef);
+      seriesGroups = seriesGroups.map((item) => item.seriesGroupId === group?.seriesGroupId
+        ? {
+            ...item,
+            revision: item.revision + (additions.length ? 1 : 0),
+            members: [...item.members, ...additions],
+            updatedAt: now,
+          }
+        : item);
+    }
+
+    if (request.action === "series_unlink") {
+      const target = request.targetGalleryId;
+      seriesGroups = seriesGroups.map((group) => {
+        if (request.seriesGroupId && group.seriesGroupId !== request.seriesGroupId) return group;
+        const members = group.members.filter((member) => member.galleryId !== target);
+        return members.length === group.members.length
+          ? group
+          : { ...group, revision: group.revision + 1, members, updatedAt: now };
+      });
+      appliedSeriesGroupId = request.seriesGroupId
+        ?? seriesGroups.find((group) => group.members.some((member) => member.galleryId === target))?.seriesGroupId;
+    }
+
+    const decision = {
+      decisionId: `browser-decision-${this.nextDuplicateDecisionId++}`,
+      candidateId,
+      candidateRevision: candidate.revision,
+      action: request.action,
+      ...(request.targetGalleryId !== undefined ? { targetGalleryId: request.targetGalleryId } : {}),
+      ...(appliedSeriesGroupId ? { seriesGroupId: appliedSeriesGroupId } : {}),
+      createdAt: now,
+    };
+    const nextReview: DuplicateReview = {
+      ...review,
+      candidate,
+      decisions: [...review.decisions, decision],
+      seriesGroups,
+    };
+    this.duplicateReviews.set(candidateId, nextReview);
+    if (request.action === "hide_parent") this.duplicateHiddenGalleryIds.add(candidate.parent.galleryId);
+    if (request.action === "hide_candidate") this.duplicateHiddenGalleryIds.add(candidate.candidate.galleryId);
+    if (["hide_parent", "hide_candidate", "exclude_pair"].includes(request.action)) {
+      this.duplicateResolvedCandidates.add(candidateId);
+      this.duplicateSnapshotState = {
+        ...this.duplicateSnapshotState,
+        candidates: this.duplicateSnapshotState.candidates.filter((item) => item.candidateId !== candidateId),
+      };
+    } else {
+      this.duplicateSnapshotState = {
+        ...this.duplicateSnapshotState,
+        candidates: this.duplicateSnapshotState.candidates.map((item) =>
+          item.candidateId === candidateId ? cloneDuplicateCandidate(candidate) : item),
+      };
+    }
+    return ok(cloneDuplicateReview(nextReview));
   }
 
   async downloadQueueAdd(
@@ -648,10 +994,13 @@ class BrowserMockBackend implements BackendClient {
   }
 
   async thumbnailRequest(request: ThumbnailRequestDto): Promise<ApiResult<ThumbnailRequestToken>> {
-    if (!Number.isInteger(request.key.galleryId) || request.key.galleryId <= 0) {
+    if (request.key.kind !== "artifactPage" && (!Number.isInteger(request.key.galleryId) || request.key.galleryId <= 0)) {
       return validationError("key.galleryId", "must be a positive integer");
     }
-    if (request.key.kind === "galleryPage" && (!Number.isInteger(request.key.sourcePage) || request.key.sourcePage < 1)) {
+    if (request.key.kind === "artifactPage" && !request.key.entryId.trim()) {
+      return validationError("key.entryId", "must not be empty");
+    }
+    if (request.key.kind !== "galleryCover" && (!Number.isInteger(request.key.sourcePage) || request.key.sourcePage < 1)) {
       return validationError("key.sourcePage", "must be one-based");
     }
     const requestId = `browser-thumbnail-${this.nextThumbnailRequestId++}`;
@@ -662,7 +1011,9 @@ class BrowserMockBackend implements BackendClient {
       if (!this.pendingThumbnailRequests.delete(requestId)) return;
       const label = request.key.kind === "galleryCover"
         ? `G${request.key.galleryId} · COVER`
-        : `G${request.key.galleryId} · PAGE ${request.key.sourcePage}`;
+        : request.key.kind === "galleryPage"
+          ? `G${request.key.galleryId} · PAGE ${request.key.sourcePage}`
+          : `${request.key.entryId} · VERIFIED PAGE ${request.key.sourcePage}`;
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"><rect width="512" height="512" fill="#49656b"/><text x="28" y="470" fill="white" font-family="Segoe UI" font-size="24">${label}</text></svg>`;
       this.emit("thumbnail:ready", {
         ...token,
@@ -790,6 +1141,38 @@ class BrowserMockBackend implements BackendClient {
     this.searchHistory.set(fingerprint, entry);
   }
 
+  private advanceDuplicateScanFixture(generation: number, complete: boolean): void {
+    const current = this.duplicateSnapshotState.run;
+    if (generation !== this.duplicateGeneration || !current || current.state !== "running") return;
+
+    const now = new Date().toISOString();
+    let candidates = this.duplicateSnapshotState.candidates;
+    if (complete) {
+      const fixture = this.duplicateReviews.get("browser-duplicate-archive-tram")
+        ?? browserDuplicateReviewFixture(now);
+      this.duplicateReviews.set(fixture.candidate.candidateId, fixture);
+      candidates = this.duplicateResolvedCandidates.has(fixture.candidate.candidateId)
+        ? []
+        : [cloneDuplicateCandidate(fixture.candidate)];
+    }
+    const next: DuplicateScanRun = {
+      ...current,
+      revision: current.revision + 1,
+      state: complete ? "completed" : "running",
+      hashedArtifacts: complete ? current.totalArtifacts : 1,
+      comparedPairs: complete ? current.totalPairs : 0,
+      candidatesFound: candidates.length,
+      updatedAt: now,
+      ...(complete ? { finishedAt: now } : {}),
+    };
+    this.duplicateSnapshotState = {
+      ...this.duplicateSnapshotState,
+      run: next,
+      candidates,
+    };
+    this.emit("duplicate:changed", cloneDuplicateScanRun(next));
+  }
+
   private runAutoFindFixture(
     generation: number,
     favorite: FavoriteRecord,
@@ -811,6 +1194,7 @@ class BrowserMockBackend implements BackendClient {
     const discoveredAt = new Date().toISOString();
     const candidates = fixture.items
       .filter((gallery) => !downloaded.has(gallery.id))
+      .filter((gallery) => !this.duplicateHiddenGalleryIds.has(gallery.id))
       .filter((gallery) => !this.autoFindExclusions.has(gallery.id))
       .filter((gallery) => !existing.has(gallery.id))
       .map((gallery) => ({
@@ -958,6 +1342,26 @@ class TauriBackend implements BackendClient {
     reason: string,
   ): Promise<ApiResult<AutoFindExclusionResult>> {
     return invoke("auto_find_exclude", { galleryIds, reason });
+  }
+
+  duplicateSnapshot(): Promise<ApiResult<DuplicateSnapshot>> {
+    return invoke("duplicate_snapshot");
+  }
+
+  duplicateScanStart(): Promise<ApiResult<DuplicateScanRun>> {
+    return invoke("duplicate_scan_start");
+  }
+
+  duplicateScanCancel(): Promise<ApiResult<DuplicateScanRun>> {
+    return invoke("duplicate_scan_cancel");
+  }
+
+  duplicateReviewGet(candidateId: string): Promise<ApiResult<DuplicateReview>> {
+    return invoke("duplicate_review_get", { candidateId });
+  }
+
+  duplicateDecisionApply(request: DuplicateDecisionRequest): Promise<ApiResult<DuplicateReview>> {
+    return invoke("duplicate_decision_apply", { request });
   }
 
   downloadQueueAdd(

@@ -54,6 +54,10 @@
 | D-134 | Auto Find 취소는 run 상태와 cancellation token을 함께 사용하며, 앱 종료 중 run은 cancelled, 비정상 종료 뒤 남은 running run은 failed로 종결하고 부분 후보는 보존한다. | 2026-08-15 Milestone D 구현 |
 | D-135 | `GallerySummary`와 `GalleryDetail`은 시리즈·캐릭터를 항상 배열로 전달하고, 검색·상세·Related·Auto Find 복원과 favorite 표시가 같은 metadata를 사용한다. 기존 v10 후보는 v11 migration에서 빈 배열로 안전 보존한다. | 2026-08-15 Milestone D 구현 |
 | D-136 | 여러 단어 metadata는 favorite 값에는 정규화된 공백으로 저장하고 source 검색 token에는 underscore를 사용한다. `series:`와 `character:`는 각 Hitomi Nozomi namespace endpoint로 직렬화한다. | 2026-08-15 Milestone D source 계약 |
+| D-137 | 작품 중복 검사는 verified local artifact와 versioned HashProfile만 사용한다. metadata는 전수 pair 작업의 우선순위만 정하고 실제 SHA/perceptual/sequence evidence 없이 강한 후보를 만들지 않는다. | 2026-08-16 Milestone E 구현 |
+| D-138 | 작품 page matching은 단조 1:1 gap-tolerant alignment로 고정하고 blank·저정보·작은 장면 변화·일부 공통 panel은 강한 후보에서 제외한다. 재압축·해상도·번역 차이는 exact와 분리된 visual evidence다. | 2026-08-16 Milestone E 구현 |
+| D-139 | Review는 전역 thumbnail coordinator의 검증 local `artifactPage(entryId, sourcePage)`를 사용한다. 숨김·연작·pair 제외는 revision CAS와 append-only history로 적용하며 자동 파일 삭제를 하지 않는다. | 2026-08-16 Milestone E 구현 |
+| D-140 | E-Hentai relation은 적법한 session을 사용자가 명시적으로 제공한 경우에만 활성화한다. 기본 production provider는 비활성이고 cookie/session을 DB·manifest·로그에 저장하지 않는다. | 2026-08-16 Milestone E 안전 경계 |
 
 ## 제안
 

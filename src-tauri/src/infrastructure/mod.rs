@@ -1,4 +1,5 @@
 mod artifact_store;
+mod artifact_thumbnail;
 mod fixture_search;
 mod hitomi_live;
 mod migrations;
@@ -7,6 +8,7 @@ pub mod telemetry;
 mod windows_folder_picker;
 
 pub use artifact_store::FilesystemArtifactStore;
+pub use artifact_thumbnail::CompositeThumbnailResolver;
 pub use fixture_search::FixtureSearchRepository;
 pub use hitomi_live::{HitomiLiveAdapter, HitomiLiveConfig};
 pub use migrations::{MigrationReport, MigrationRunner, MIGRATIONS};

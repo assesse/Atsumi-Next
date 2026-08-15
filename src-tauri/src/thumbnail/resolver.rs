@@ -146,6 +146,10 @@ impl ThumbnailResolver for FixtureThumbnailResolver {
                 gallery_id,
                 source_page,
             } => format!("G{gallery_id} · PAGE {source_page}"),
+            ThumbnailKey::ArtifactPage {
+                entry_id,
+                source_page,
+            } => format!("{entry_id} · PAGE {source_page}"),
         };
         let svg = format!(
             concat!(

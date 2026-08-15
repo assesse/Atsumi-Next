@@ -16,19 +16,24 @@ use crate::{
         ArtifactRepository, AutomationRepository, DownloadArtifactPlan, DownloadCheckpoint,
         DownloadMutationOutcome, DownloadPageAttempt, DownloadPageAttemptResult,
         DownloadPipelineRepository, DownloadPrepared, DownloadQueueAddOutcome, DownloadQueueRecord,
-        DownloadRepository, QuarantineSaga, QuarantineSagaState, RepositoryError, StateRepository,
-        StoredPage,
+        DownloadRepository, DuplicateRepository, QuarantineSaga, QuarantineSagaState,
+        RepositoryError, StateRepository, StoredPage,
     },
     domain::{
         ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
         ArtifactStorageFormat, AutoFindCandidate, AutoFindCandidateRecord, AutoFindExclusionResult,
         AutoFindRun, AutoFindRunState, AutoFindSnapshot, DownloadArtifact, DownloadArtifactState,
         DownloadChangedEvent, DownloadEntry, DownloadEntryId, DownloadJobDescriptor,
-        DownloadJobProjection, DownloadListRequest, DownloadPage, DownloadReviewKind, FavoriteKey,
-        FavoriteMutationResult, FavoriteNamespace, FavoriteRecord, FixtureDownloadJobStep, Gallery,
-        GalleryId, GalleryMetadata, GallerySummary, JobEvent, JobRef, JobState, Language,
+        DownloadJobProjection, DownloadListRequest, DownloadPage, DownloadReviewKind,
+        DuplicateCandidate, DuplicateCandidateRecord, DuplicateDecisionAction,
+        DuplicateDecisionApplyOutcome, DuplicateDecisionHistory, DuplicateDecisionRequest,
+        DuplicateEvidence, DuplicateEvidenceKind, DuplicateGalleryRef, DuplicatePageHash,
+        DuplicatePagePair, DuplicateRelation, DuplicateReview, DuplicateScanRun,
+        DuplicateScanState, DuplicateSnapshot, FavoriteKey, FavoriteMutationResult,
+        FavoriteNamespace, FavoriteRecord, FixtureDownloadJobStep, Gallery, GalleryId,
+        GalleryMetadata, GallerySummary, HashProfile, JobEvent, JobRef, JobState, Language,
         PageArtifact, PageArtifactState, SearchHistoryEntry, SearchRequest, SearchSort,
-        SettingsSnapshot, SourcePageNumber, WindowPlacementSnapshot,
+        SeriesGroup, SettingsSnapshot, SourcePageNumber, WindowPlacementSnapshot,
     },
 };
 
@@ -498,6 +503,15 @@ impl AutomationRepository for SqliteRepository {
                         SELECT 1 FROM auto_find_exclusions WHERE gallery_id = ?1
                         UNION ALL
                         SELECT 1 FROM download_entries WHERE gallery_id = ?1
+                        UNION ALL
+                        SELECT 1 FROM duplicate_hidden_galleries WHERE gallery_id = ?1
+                        UNION ALL
+                        SELECT 1 FROM duplicate_candidates
+                        WHERE resolved = 1
+                          AND (parent_gallery_id = ?1 OR candidate_gallery_id = ?1)
+                        UNION ALL
+                        SELECT 1 FROM duplicate_pair_exclusions
+                        WHERE parent_gallery_id = ?1 OR candidate_gallery_id = ?1
                     )
                 "#,
                 [candidate.gallery.id.get()],
@@ -2778,6 +2792,1507 @@ impl DownloadPipelineRepository for SqliteRepository {
     }
 }
 
+impl DuplicateRepository for SqliteRepository {
+    fn duplicate_artifact_bundles(&self) -> Result<Vec<ArtifactBundle>, RepositoryError> {
+        let bundles = <Self as DownloadPipelineRepository>::pipeline_artifact_bundles(self)?;
+        Ok(bundles
+            .into_iter()
+            .filter(duplicate_bundle_is_verified)
+            .collect())
+    }
+
+    fn duplicate_page_hash_get(
+        &self,
+        entry_id: &str,
+        source_page_number: SourcePageNumber,
+        profile_version: u32,
+        artifact_sha256: &str,
+    ) -> Result<Option<DuplicatePageHash>, RepositoryError> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                r#"
+                    SELECT entry_id, gallery_id, source_page_number, profile_version,
+                           artifact_sha256, coarse_d_hash_hex, detail_d_hash_hex,
+                           p_hash_hex, mean_luma, std_dev, non_uniform_ratio,
+                           edge_density, width, height, low_information
+                    FROM duplicate_page_hashes
+                    WHERE entry_id = ?1 AND source_page_number = ?2
+                      AND profile_version = ?3 AND artifact_sha256 = ?4
+                "#,
+                params![
+                    entry_id,
+                    i64::from(source_page_number.get()),
+                    i64::from(profile_version),
+                    artifact_sha256,
+                ],
+                stored_duplicate_page_hash,
+            )
+            .optional()
+            .map_err(map_sqlite_error)?
+            .map(StoredDuplicatePageHash::try_into_domain)
+            .transpose()
+    }
+
+    fn duplicate_page_hash_upsert(&self, hash: &DuplicatePageHash) -> Result<(), RepositoryError> {
+        validate_detail_hash(&hash.detail_d_hash_hex)?;
+        let connection = self.connection()?;
+        connection
+            .execute(
+                r#"
+                    INSERT INTO duplicate_page_hashes (
+                        entry_id, gallery_id, source_page_number, profile_version,
+                        artifact_sha256, coarse_d_hash_hex, detail_d_hash_hex,
+                        p_hash_hex, mean_luma, std_dev, non_uniform_ratio,
+                        edge_density, width, height, low_information, computed_at
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                        ?12, ?13, ?14, ?15,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                    ON CONFLICT(entry_id, source_page_number, profile_version) DO UPDATE SET
+                        gallery_id = excluded.gallery_id,
+                        artifact_sha256 = excluded.artifact_sha256,
+                        coarse_d_hash_hex = excluded.coarse_d_hash_hex,
+                        detail_d_hash_hex = excluded.detail_d_hash_hex,
+                        p_hash_hex = excluded.p_hash_hex,
+                        mean_luma = excluded.mean_luma,
+                        std_dev = excluded.std_dev,
+                        non_uniform_ratio = excluded.non_uniform_ratio,
+                        edge_density = excluded.edge_density,
+                        width = excluded.width,
+                        height = excluded.height,
+                        low_information = excluded.low_information,
+                        computed_at = excluded.computed_at
+                "#,
+                params![
+                    hash.entry_id,
+                    hash.gallery_id.get(),
+                    i64::from(hash.source_page_number.get()),
+                    i64::from(hash.profile_version),
+                    hash.artifact_sha256.as_str(),
+                    format!("{:016x}", hash.coarse_d_hash),
+                    hash.detail_d_hash_hex.to_ascii_lowercase(),
+                    format!("{:016x}", hash.p_hash),
+                    hash.mean_luma,
+                    hash.std_dev,
+                    hash.non_uniform_ratio,
+                    hash.edge_density,
+                    i64::from(hash.width),
+                    i64::from(hash.height),
+                    hash.low_information,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        Ok(())
+    }
+
+    fn duplicate_recover_interrupted(&self) -> Result<usize, RepositoryError> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                r#"
+                    UPDATE duplicate_scan_runs
+                    SET revision = revision + 1,
+                        state = 'failed',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        error_code = 'DUPLICATE_SCAN_INTERRUPTED',
+                        error_message = 'The previous duplicate scan stopped before completion'
+                    WHERE state = 'running'
+                "#,
+                [],
+            )
+            .map_err(map_sqlite_error)
+    }
+
+    fn duplicate_scan_start(
+        &self,
+        profile_version: u32,
+        total_artifacts: u32,
+        total_pairs: u64,
+    ) -> Result<DuplicateScanRun, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        if let Some(run) = read_running_duplicate_scan(&transaction)? {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(run);
+        }
+        let run_id = format!("duplicate-scan-{}", Uuid::new_v4());
+        transaction
+            .execute(
+                r#"
+                    INSERT INTO duplicate_scan_runs (
+                        run_id, revision, state, profile_version,
+                        total_artifacts, hashed_artifacts, total_pairs,
+                        compared_pairs, candidates_found, started_at, updated_at
+                    ) VALUES (
+                        ?1, 0, 'running', ?2, ?3, 0, ?4, 0, 0,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                "#,
+                params![
+                    run_id,
+                    i64::from(profile_version),
+                    i64::from(total_artifacts),
+                    to_sql_integer(total_pairs, "duplicate total pair count")?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        let run = read_duplicate_scan(&transaction, &run_id)?.ok_or_else(|| {
+            RepositoryError::Corrupt("duplicate scan start did not produce a run".into())
+        })?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(run)
+    }
+
+    fn duplicate_scan_progress(
+        &self,
+        run_id: &str,
+        hashed_artifacts: u32,
+        compared_pairs: u64,
+    ) -> Result<Option<DuplicateScanRun>, RepositoryError> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                r#"
+                    UPDATE duplicate_scan_runs
+                    SET revision = revision + 1,
+                        hashed_artifacts = max(hashed_artifacts, ?1),
+                        compared_pairs = max(compared_pairs, ?2),
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE run_id = ?3 AND state = 'running'
+                      AND ?1 BETWEEN 0 AND total_artifacts
+                      AND ?2 BETWEEN 0 AND total_pairs
+                "#,
+                params![
+                    i64::from(hashed_artifacts),
+                    to_sql_integer(compared_pairs, "duplicate compared pair count")?,
+                    run_id,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        read_duplicate_scan(&connection, run_id)
+    }
+
+    fn duplicate_candidate_replace(
+        &self,
+        record: &DuplicateCandidateRecord,
+    ) -> Result<Option<DuplicateScanRun>, RepositoryError> {
+        validate_duplicate_candidate_record(record)?;
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let Some(profile_version) = running_duplicate_profile(&transaction, &record.run_id)? else {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(None);
+        };
+        let parent_id = record.candidate.parent.gallery_id.get();
+        let candidate_id = record.candidate.candidate.gallery_id.get();
+        let rejected: bool = transaction
+            .query_row(
+                r#"
+                    SELECT EXISTS (
+                        SELECT 1 FROM duplicate_hidden_galleries
+                        WHERE gallery_id IN (?1, ?2)
+                        UNION ALL
+                        SELECT 1 FROM duplicate_pair_exclusions
+                        WHERE parent_gallery_id = ?1 AND candidate_gallery_id = ?2
+                        UNION ALL
+                        SELECT 1 FROM duplicate_candidates
+                        WHERE profile_version = ?3
+                          AND parent_gallery_id = ?1 AND candidate_gallery_id = ?2
+                          AND resolved = 1
+                    )
+                "#,
+                params![parent_id, candidate_id, i64::from(profile_version)],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite_error)?;
+        if rejected {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(None);
+        }
+
+        let existing = transaction
+            .query_row(
+                r#"
+                    SELECT candidate_id, revision, last_seen_run_id
+                    FROM duplicate_candidates
+                    WHERE profile_version = ?1
+                      AND parent_gallery_id = ?2 AND candidate_gallery_id = ?3
+                "#,
+                params![i64::from(profile_version), parent_id, candidate_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(map_sqlite_error)?;
+        let (stored_candidate_id, first_seen_in_run) =
+            if let Some((id, revision, last_run)) = existing {
+                transaction
+                    .execute(
+                        r#"
+                        UPDATE duplicate_candidates
+                        SET revision = ?1, last_seen_run_id = ?2,
+                            parent_entry_id = ?3, candidate_entry_id = ?4,
+                            relation = ?5, confidence = ?6, matched_pages = ?7,
+                            parent_coverage = ?8, candidate_coverage = ?9,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        WHERE candidate_id = ?10 AND resolved = 0
+                    "#,
+                        params![
+                            next_stored_revision(revision, "duplicate candidate revision")?,
+                            record.run_id,
+                            record.candidate.parent.entry_id,
+                            record.candidate.candidate.entry_id,
+                            record.candidate.relation.as_str(),
+                            record.candidate.confidence,
+                            i64::from(record.candidate.matched_pages),
+                            record.candidate.parent_coverage,
+                            record.candidate.candidate_coverage,
+                            id,
+                        ],
+                    )
+                    .map_err(map_sqlite_error)?;
+                (id, last_run != record.run_id)
+            } else {
+                transaction
+                    .execute(
+                        r#"
+                        INSERT INTO duplicate_candidates (
+                            candidate_id, revision, last_seen_run_id, profile_version,
+                            parent_gallery_id, parent_entry_id,
+                            candidate_gallery_id, candidate_entry_id,
+                            relation, confidence, matched_pages,
+                            parent_coverage, candidate_coverage, resolved,
+                            created_at, updated_at
+                        ) VALUES (
+                            ?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                            ?11, ?12, 0,
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    "#,
+                        params![
+                            record.candidate.candidate_id,
+                            record.run_id,
+                            i64::from(profile_version),
+                            parent_id,
+                            record.candidate.parent.entry_id,
+                            candidate_id,
+                            record.candidate.candidate.entry_id,
+                            record.candidate.relation.as_str(),
+                            record.candidate.confidence,
+                            i64::from(record.candidate.matched_pages),
+                            record.candidate.parent_coverage,
+                            record.candidate.candidate_coverage,
+                        ],
+                    )
+                    .map_err(map_sqlite_error)?;
+                (record.candidate.candidate_id.clone(), true)
+            };
+
+        transaction
+            .execute(
+                "DELETE FROM duplicate_evidence WHERE candidate_id = ?1",
+                [&stored_candidate_id],
+            )
+            .map_err(map_sqlite_error)?;
+        transaction
+            .execute(
+                "DELETE FROM duplicate_page_pairs WHERE candidate_id = ?1",
+                [&stored_candidate_id],
+            )
+            .map_err(map_sqlite_error)?;
+        for evidence in &record.evidence {
+            transaction
+                .execute(
+                    r#"
+                        INSERT INTO duplicate_evidence (
+                            evidence_id, candidate_id, kind, confidence,
+                            matched_pages, description
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    "#,
+                    params![
+                        evidence.evidence_id,
+                        stored_candidate_id,
+                        evidence.kind.as_str(),
+                        evidence.confidence,
+                        i64::from(evidence.matched_pages),
+                        evidence.description,
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
+        }
+        for pair in &record.page_pairs {
+            transaction
+                .execute(
+                    r#"
+                        INSERT INTO duplicate_page_pairs (
+                            candidate_id, parent_source_page, candidate_source_page,
+                            exact_sha256, d_hash_distance, p_hash_distance,
+                            detail_hash_distance, edge_similarity,
+                            visual_similarity, low_information
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                    "#,
+                    params![
+                        stored_candidate_id,
+                        i64::from(pair.parent_source_page),
+                        i64::from(pair.candidate_source_page),
+                        pair.exact_sha256,
+                        i64::from(pair.d_hash_distance),
+                        i64::from(pair.p_hash_distance),
+                        i64::from(pair.detail_hash_distance),
+                        pair.edge_similarity,
+                        pair.visual_similarity,
+                        pair.low_information,
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
+        }
+        if first_seen_in_run {
+            transaction
+                .execute(
+                    r#"
+                        UPDATE duplicate_scan_runs
+                        SET revision = revision + 1,
+                            candidates_found = candidates_found + 1,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        WHERE run_id = ?1 AND state = 'running'
+                    "#,
+                    [&record.run_id],
+                )
+                .map_err(map_sqlite_error)?;
+        }
+        let run = read_duplicate_scan(&transaction, &record.run_id)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(run)
+    }
+
+    fn duplicate_scan_finish(
+        &self,
+        run_id: &str,
+        state: DuplicateScanState,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<Option<DuplicateScanRun>, RepositoryError> {
+        if state == DuplicateScanState::Running {
+            return Err(RepositoryError::Other(
+                "a duplicate scan cannot finish in the running state".into(),
+            ));
+        }
+        let connection = self.connection()?;
+        connection
+            .execute(
+                r#"
+                    UPDATE duplicate_scan_runs
+                    SET revision = revision + 1, state = ?1,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        error_code = ?2, error_message = ?3
+                    WHERE run_id = ?4 AND state = 'running'
+                "#,
+                params![state.as_str(), error_code, error_message, run_id],
+            )
+            .map_err(map_sqlite_error)?;
+        read_duplicate_scan(&connection, run_id)
+    }
+
+    fn duplicate_scan_is_running(&self, run_id: &str) -> Result<bool, RepositoryError> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM duplicate_scan_runs WHERE run_id = ?1 AND state = 'running')",
+                [run_id],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite_error)
+    }
+
+    fn duplicate_snapshot(&self) -> Result<DuplicateSnapshot, RepositoryError> {
+        let connection = self.connection()?;
+        read_duplicate_snapshot(&connection)
+    }
+
+    fn duplicate_review_get(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<DuplicateReview>, RepositoryError> {
+        let connection = self.connection()?;
+        read_duplicate_review(&connection, candidate_id)
+    }
+
+    fn duplicate_decision_apply(
+        &self,
+        request: &DuplicateDecisionRequest,
+    ) -> Result<DuplicateDecisionApplyOutcome, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let Some(candidate) = read_duplicate_candidate(&transaction, &request.candidate_id)? else {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(DuplicateDecisionApplyOutcome::CandidateNotFound);
+        };
+        if candidate.candidate.revision != request.expected_revision {
+            let actual_revision = candidate.candidate.revision;
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(DuplicateDecisionApplyOutcome::RevisionConflict { actual_revision });
+        }
+        let next_revision = request.expected_revision.checked_add(1).ok_or_else(|| {
+            RepositoryError::Other("duplicate candidate revision is exhausted".into())
+        })?;
+        let decision_id = format!("duplicate-decision-{}", Uuid::new_v4());
+        let (target_gallery_id, series_group_id) = apply_duplicate_decision_side_effect(
+            &transaction,
+            &candidate.candidate,
+            request,
+            &decision_id,
+        )?;
+        let changed = transaction
+            .execute(
+                r#"
+                    UPDATE duplicate_candidates
+                    SET revision = ?1,
+                        resolved = CASE WHEN ?4 THEN 1 ELSE resolved END,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE candidate_id = ?2 AND revision = ?3
+                "#,
+                params![
+                    to_sql_integer(next_revision, "duplicate candidate revision")?,
+                    request.candidate_id,
+                    to_sql_integer(request.expected_revision, "expected duplicate revision")?,
+                    matches!(
+                        request.action,
+                        DuplicateDecisionAction::HideParent
+                            | DuplicateDecisionAction::HideCandidate
+                            | DuplicateDecisionAction::ExcludePair
+                    ),
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if changed != 1 {
+            let actual_revision = transaction
+                .query_row(
+                    "SELECT revision FROM duplicate_candidates WHERE candidate_id = ?1",
+                    [&request.candidate_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(map_sqlite_error)?
+                .map(|value| stored_u64(value, "duplicate candidate revision"))
+                .transpose()?
+                .unwrap_or(request.expected_revision);
+            transaction.rollback().map_err(map_sqlite_error)?;
+            return Ok(DuplicateDecisionApplyOutcome::RevisionConflict { actual_revision });
+        }
+        transaction
+            .execute(
+                r#"
+                    INSERT INTO duplicate_decisions (
+                        decision_id, candidate_id, candidate_revision, action,
+                        target_gallery_id, series_group_id, created_at
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                "#,
+                params![
+                    decision_id,
+                    request.candidate_id,
+                    to_sql_integer(next_revision, "duplicate decision revision")?,
+                    request.action.as_str(),
+                    target_gallery_id,
+                    series_group_id,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        let review =
+            read_duplicate_review(&transaction, &request.candidate_id)?.ok_or_else(|| {
+                RepositoryError::Corrupt("decided duplicate candidate disappeared".into())
+            })?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(DuplicateDecisionApplyOutcome::Applied(Box::new(review)))
+    }
+}
+
+fn duplicate_bundle_is_verified(bundle: &ArtifactBundle) -> bool {
+    bundle.artifact.state == DownloadArtifactState::Complete
+        && bundle.artifact.manifest_relative_path.is_some()
+        && bundle.artifact.manifest_schema_version.is_some()
+        && bundle.artifact.writer_version.is_some()
+        && bundle.artifact.completed_at.is_some()
+        && !bundle.pages.is_empty()
+        && bundle.pages.iter().all(|page| {
+            page.state != PageArtifactState::Quarantined
+                && (page.excluded
+                    || (page.state == PageArtifactState::Present
+                        && page.byte_length.is_some()
+                        && page.sha256.is_some()
+                        && page.storage_format.is_some()
+                        && page.source_revision.is_some()
+                        && page.verified_at.is_some()))
+        })
+        && bundle.pages.iter().any(|page| {
+            !page.excluded
+                && page.state == PageArtifactState::Present
+                && page.byte_length.is_some()
+                && page.sha256.is_some()
+                && page.storage_format.is_some()
+                && page.source_revision.is_some()
+                && page.verified_at.is_some()
+        })
+}
+
+fn validate_detail_hash(value: &str) -> Result<(), RepositoryError> {
+    if value.len() != 256 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RepositoryError::Other(
+            "duplicate detail hash must contain exactly 256 hexadecimal characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_u64_hex(value: &str, label: &str) -> Result<u64, RepositoryError> {
+    if value.len() != 16 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RepositoryError::Corrupt(format!(
+            "{label} is not a 64-bit hexadecimal value"
+        )));
+    }
+    u64::from_str_radix(value, 16)
+        .map_err(|_| RepositoryError::Corrupt(format!("{label} cannot be decoded")))
+}
+
+struct StoredDuplicatePageHash {
+    entry_id: String,
+    gallery_id: i64,
+    source_page_number: i64,
+    profile_version: i64,
+    artifact_sha256: String,
+    coarse_d_hash_hex: String,
+    detail_d_hash_hex: String,
+    p_hash_hex: String,
+    mean_luma: f64,
+    std_dev: f64,
+    non_uniform_ratio: f64,
+    edge_density: f64,
+    width: i64,
+    height: i64,
+    low_information: bool,
+}
+
+impl StoredDuplicatePageHash {
+    fn try_into_domain(self) -> Result<DuplicatePageHash, RepositoryError> {
+        validate_detail_hash(&self.detail_d_hash_hex)
+            .map_err(|error| RepositoryError::Corrupt(error.to_string()))?;
+        Ok(DuplicatePageHash {
+            entry_id: self.entry_id,
+            gallery_id: GalleryId::new(self.gallery_id).map_err(domain_corruption)?,
+            source_page_number: SourcePageNumber::new(stored_u32(
+                self.source_page_number,
+                "duplicate hash source page number",
+            )?)
+            .map_err(domain_corruption)?,
+            profile_version: stored_u32(self.profile_version, "duplicate hash profile version")?,
+            artifact_sha256: ArtifactSha256::new(self.artifact_sha256)
+                .map_err(domain_corruption)?,
+            coarse_d_hash: parse_u64_hex(&self.coarse_d_hash_hex, "duplicate coarse dHash")?,
+            detail_d_hash_hex: self.detail_d_hash_hex,
+            p_hash: parse_u64_hex(&self.p_hash_hex, "duplicate pHash")?,
+            mean_luma: self.mean_luma,
+            std_dev: self.std_dev,
+            non_uniform_ratio: self.non_uniform_ratio,
+            edge_density: self.edge_density,
+            width: stored_u32(self.width, "duplicate hash width")?,
+            height: stored_u32(self.height, "duplicate hash height")?,
+            low_information: self.low_information,
+        })
+    }
+}
+
+fn stored_duplicate_page_hash(row: &Row<'_>) -> rusqlite::Result<StoredDuplicatePageHash> {
+    Ok(StoredDuplicatePageHash {
+        entry_id: row.get(0)?,
+        gallery_id: row.get(1)?,
+        source_page_number: row.get(2)?,
+        profile_version: row.get(3)?,
+        artifact_sha256: row.get(4)?,
+        coarse_d_hash_hex: row.get(5)?,
+        detail_d_hash_hex: row.get(6)?,
+        p_hash_hex: row.get(7)?,
+        mean_luma: row.get(8)?,
+        std_dev: row.get(9)?,
+        non_uniform_ratio: row.get(10)?,
+        edge_density: row.get(11)?,
+        width: row.get(12)?,
+        height: row.get(13)?,
+        low_information: row.get(14)?,
+    })
+}
+
+fn read_running_duplicate_scan(
+    connection: &Connection,
+) -> Result<Option<DuplicateScanRun>, RepositoryError> {
+    connection
+        .query_row(
+            r#"
+                SELECT run_id, revision, state, total_artifacts,
+                       hashed_artifacts, total_pairs, compared_pairs,
+                       candidates_found, started_at, updated_at, finished_at,
+                       error_code, error_message
+                FROM duplicate_scan_runs WHERE state = 'running' LIMIT 1
+            "#,
+            [],
+            stored_duplicate_scan,
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map(StoredDuplicateScan::try_into_domain)
+        .transpose()
+}
+
+fn read_duplicate_scan(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Option<DuplicateScanRun>, RepositoryError> {
+    connection
+        .query_row(
+            r#"
+                SELECT run_id, revision, state, total_artifacts,
+                       hashed_artifacts, total_pairs, compared_pairs,
+                       candidates_found, started_at, updated_at, finished_at,
+                       error_code, error_message
+                FROM duplicate_scan_runs WHERE run_id = ?1
+            "#,
+            [run_id],
+            stored_duplicate_scan,
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map(StoredDuplicateScan::try_into_domain)
+        .transpose()
+}
+
+fn running_duplicate_profile(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Option<u32>, RepositoryError> {
+    connection
+        .query_row(
+            "SELECT profile_version FROM duplicate_scan_runs WHERE run_id = ?1 AND state = 'running'",
+            [run_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map(|value| stored_u32(value, "duplicate scan profile version"))
+        .transpose()
+}
+
+struct StoredDuplicateScan {
+    run_id: String,
+    revision: i64,
+    state: String,
+    total_artifacts: i64,
+    hashed_artifacts: i64,
+    total_pairs: i64,
+    compared_pairs: i64,
+    candidates_found: i64,
+    started_at: String,
+    updated_at: String,
+    finished_at: Option<String>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+impl StoredDuplicateScan {
+    fn try_into_domain(self) -> Result<DuplicateScanRun, RepositoryError> {
+        Ok(DuplicateScanRun {
+            run_id: self.run_id,
+            revision: stored_u64(self.revision, "duplicate scan revision")?,
+            state: DuplicateScanState::from_database(&self.state).ok_or_else(|| {
+                RepositoryError::Corrupt(format!(
+                    "duplicate scan state {:?} is unsupported",
+                    self.state
+                ))
+            })?,
+            total_artifacts: stored_u32(self.total_artifacts, "duplicate scan artifact count")?,
+            hashed_artifacts: stored_u32(
+                self.hashed_artifacts,
+                "duplicate scan hashed artifact count",
+            )?,
+            total_pairs: stored_u64(self.total_pairs, "duplicate scan total pair count")?,
+            compared_pairs: stored_u64(self.compared_pairs, "duplicate scan compared pair count")?,
+            candidates_found: stored_u32(self.candidates_found, "duplicate scan candidate count")?,
+            started_at: self.started_at,
+            updated_at: self.updated_at,
+            finished_at: self.finished_at,
+            error_code: self.error_code,
+            error_message: self.error_message,
+        })
+    }
+}
+
+fn stored_duplicate_scan(row: &Row<'_>) -> rusqlite::Result<StoredDuplicateScan> {
+    Ok(StoredDuplicateScan {
+        run_id: row.get(0)?,
+        revision: row.get(1)?,
+        state: row.get(2)?,
+        total_artifacts: row.get(3)?,
+        hashed_artifacts: row.get(4)?,
+        total_pairs: row.get(5)?,
+        compared_pairs: row.get(6)?,
+        candidates_found: row.get(7)?,
+        started_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        finished_at: row.get(10)?,
+        error_code: row.get(11)?,
+        error_message: row.get(12)?,
+    })
+}
+
+fn validate_duplicate_candidate_record(
+    record: &DuplicateCandidateRecord,
+) -> Result<(), RepositoryError> {
+    let candidate = &record.candidate;
+    if record.run_id.trim().is_empty()
+        || candidate.candidate_id.trim().is_empty()
+        || candidate.parent.gallery_id.get() >= candidate.candidate.gallery_id.get()
+        || candidate.parent.entry_id.trim().is_empty()
+        || candidate.candidate.entry_id.trim().is_empty()
+        || candidate.matched_pages == 0
+        || !(0.0..=1.0).contains(&candidate.confidence)
+        || !(0.0..=1.0).contains(&candidate.parent_coverage)
+        || !(0.0..=1.0).contains(&candidate.candidate_coverage)
+    {
+        return Err(RepositoryError::Other(
+            "duplicate candidate record is invalid or not canonically ordered".into(),
+        ));
+    }
+    if record.evidence.iter().any(|evidence| {
+        evidence.evidence_id.trim().is_empty()
+            || evidence.description.trim().is_empty()
+            || !(0.0..=1.0).contains(&evidence.confidence)
+    }) || record.page_pairs.iter().any(|pair| {
+        pair.parent_source_page == 0
+            || pair.candidate_source_page == 0
+            || !(0.0..=1.0).contains(&pair.edge_similarity)
+            || !(0.0..=1.0).contains(&pair.visual_similarity)
+    }) {
+        return Err(RepositoryError::Other(
+            "duplicate candidate evidence is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+struct LoadedDuplicateCandidate {
+    candidate: DuplicateCandidate,
+}
+
+struct StoredDuplicateCandidate {
+    candidate_id: String,
+    revision: i64,
+    parent_gallery_id: i64,
+    parent_entry_id: String,
+    parent_title: String,
+    parent_artist: Option<String>,
+    parent_group: Option<String>,
+    parent_page_count: i64,
+    candidate_gallery_id: i64,
+    candidate_entry_id: String,
+    candidate_title: String,
+    candidate_artist: Option<String>,
+    candidate_group: Option<String>,
+    candidate_page_count: i64,
+    relation: String,
+    confidence: f64,
+    matched_pages: i64,
+    parent_coverage: f64,
+    candidate_coverage: f64,
+    created_at: String,
+    updated_at: String,
+}
+
+impl StoredDuplicateCandidate {
+    fn try_into_domain(self) -> Result<LoadedDuplicateCandidate, RepositoryError> {
+        Ok(LoadedDuplicateCandidate {
+            candidate: DuplicateCandidate {
+                candidate_id: self.candidate_id,
+                revision: stored_u64(self.revision, "duplicate candidate revision")?,
+                parent: DuplicateGalleryRef {
+                    gallery_id: GalleryId::new(self.parent_gallery_id)
+                        .map_err(domain_corruption)?,
+                    entry_id: self.parent_entry_id,
+                    title: self.parent_title,
+                    artist: self.parent_artist,
+                    group: self.parent_group,
+                    page_count: stored_u32(self.parent_page_count, "duplicate parent page count")?,
+                },
+                candidate: DuplicateGalleryRef {
+                    gallery_id: GalleryId::new(self.candidate_gallery_id)
+                        .map_err(domain_corruption)?,
+                    entry_id: self.candidate_entry_id,
+                    title: self.candidate_title,
+                    artist: self.candidate_artist,
+                    group: self.candidate_group,
+                    page_count: stored_u32(
+                        self.candidate_page_count,
+                        "duplicate candidate page count",
+                    )?,
+                },
+                relation: DuplicateRelation::from_database(&self.relation).ok_or_else(|| {
+                    RepositoryError::Corrupt(format!(
+                        "duplicate relation {:?} is unsupported",
+                        self.relation
+                    ))
+                })?,
+                confidence: self.confidence,
+                matched_pages: stored_u32(self.matched_pages, "duplicate matched page count")?,
+                parent_coverage: self.parent_coverage,
+                candidate_coverage: self.candidate_coverage,
+                created_at: self.created_at,
+                updated_at: self.updated_at,
+            },
+        })
+    }
+}
+
+const DUPLICATE_CANDIDATE_SELECT: &str = r#"
+    SELECT c.candidate_id, c.revision,
+           c.parent_gallery_id, c.parent_entry_id,
+           pg.title, pg.primary_artist, pg.primary_group, pa.expected_page_count,
+           c.candidate_gallery_id, c.candidate_entry_id,
+           cg.title, cg.primary_artist, cg.primary_group, ca.expected_page_count,
+           c.relation, c.confidence, c.matched_pages,
+           c.parent_coverage, c.candidate_coverage, c.created_at, c.updated_at
+    FROM duplicate_candidates c
+    JOIN galleries pg ON pg.gallery_id = c.parent_gallery_id
+    JOIN download_artifacts pa
+      ON pa.entry_id = c.parent_entry_id AND pa.gallery_id = c.parent_gallery_id
+    JOIN galleries cg ON cg.gallery_id = c.candidate_gallery_id
+    JOIN download_artifacts ca
+      ON ca.entry_id = c.candidate_entry_id AND ca.gallery_id = c.candidate_gallery_id
+"#;
+
+fn stored_duplicate_candidate(row: &Row<'_>) -> rusqlite::Result<StoredDuplicateCandidate> {
+    Ok(StoredDuplicateCandidate {
+        candidate_id: row.get(0)?,
+        revision: row.get(1)?,
+        parent_gallery_id: row.get(2)?,
+        parent_entry_id: row.get(3)?,
+        parent_title: row.get(4)?,
+        parent_artist: row.get(5)?,
+        parent_group: row.get(6)?,
+        parent_page_count: row.get(7)?,
+        candidate_gallery_id: row.get(8)?,
+        candidate_entry_id: row.get(9)?,
+        candidate_title: row.get(10)?,
+        candidate_artist: row.get(11)?,
+        candidate_group: row.get(12)?,
+        candidate_page_count: row.get(13)?,
+        relation: row.get(14)?,
+        confidence: row.get(15)?,
+        matched_pages: row.get(16)?,
+        parent_coverage: row.get(17)?,
+        candidate_coverage: row.get(18)?,
+        created_at: row.get(19)?,
+        updated_at: row.get(20)?,
+    })
+}
+
+fn read_duplicate_candidate(
+    connection: &Connection,
+    candidate_id: &str,
+) -> Result<Option<LoadedDuplicateCandidate>, RepositoryError> {
+    let sql = format!("{DUPLICATE_CANDIDATE_SELECT} WHERE c.candidate_id = ?1");
+    connection
+        .query_row(&sql, [candidate_id], stored_duplicate_candidate)
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map(StoredDuplicateCandidate::try_into_domain)
+        .transpose()
+}
+
+fn read_duplicate_candidates_for_run(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Vec<DuplicateCandidate>, RepositoryError> {
+    let sql = format!(
+        r#"
+            {DUPLICATE_CANDIDATE_SELECT}
+            WHERE c.last_seen_run_id = ?1 AND c.resolved = 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM duplicate_hidden_galleries hidden
+                  WHERE hidden.gallery_id IN (
+                      c.parent_gallery_id, c.candidate_gallery_id
+                  )
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM duplicate_pair_exclusions exclusion
+                  WHERE exclusion.parent_gallery_id = c.parent_gallery_id
+                    AND exclusion.candidate_gallery_id = c.candidate_gallery_id
+              )
+            ORDER BY c.confidence DESC, c.updated_at DESC, c.candidate_id ASC
+        "#
+    );
+    let mut statement = connection.prepare(&sql).map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([run_id], stored_duplicate_candidate)
+        .map_err(map_sqlite_error)?;
+    let mut candidates = Vec::new();
+    for row in rows {
+        candidates.push(row.map_err(map_sqlite_error)?.try_into_domain()?.candidate);
+    }
+    Ok(candidates)
+}
+
+fn read_duplicate_hash_profile(
+    connection: &Connection,
+    profile_version: u32,
+) -> Result<HashProfile, RepositoryError> {
+    let stored = connection
+        .query_row(
+            r#"
+                SELECT profile_version, algorithm_version, d_hash_bits, p_hash_bits,
+                       visual_match_threshold, low_information_std_dev_threshold
+                FROM duplicate_hash_profiles WHERE profile_version = ?1
+            "#,
+            [i64::from(profile_version)],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, f64>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .ok_or_else(|| {
+            RepositoryError::Corrupt(format!(
+                "duplicate hash profile {profile_version} is missing"
+            ))
+        })?;
+    Ok(HashProfile {
+        profile_version: stored_u32(stored.0, "duplicate hash profile version")?,
+        algorithm_version: stored_u32(stored.1, "duplicate hash algorithm version")?,
+        d_hash_bits: stored_u32(stored.2, "duplicate dHash bit count")?,
+        p_hash_bits: stored_u32(stored.3, "duplicate pHash bit count")?,
+        visual_match_threshold: stored.4,
+        low_information_std_dev_threshold: stored.5,
+    })
+}
+
+fn read_duplicate_snapshot(connection: &Connection) -> Result<DuplicateSnapshot, RepositoryError> {
+    let latest = connection
+        .query_row(
+            r#"
+                SELECT run_id, profile_version FROM duplicate_scan_runs
+                ORDER BY started_at DESC, run_id DESC LIMIT 1
+            "#,
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    let (run, candidates, profile_version) = if let Some((run_id, profile)) = latest {
+        let run = read_duplicate_scan(connection, &run_id)?
+            .ok_or_else(|| RepositoryError::Corrupt("latest duplicate scan disappeared".into()))?;
+        let candidates = read_duplicate_candidates_for_run(connection, &run_id)?;
+        (
+            Some(run),
+            candidates,
+            stored_u32(profile, "duplicate scan profile version")?,
+        )
+    } else {
+        (None, Vec::new(), HashProfile::current().profile_version)
+    };
+    Ok(DuplicateSnapshot {
+        profile: read_duplicate_hash_profile(connection, profile_version)?,
+        run,
+        candidates,
+    })
+}
+
+fn read_duplicate_review(
+    connection: &Connection,
+    candidate_id: &str,
+) -> Result<Option<DuplicateReview>, RepositoryError> {
+    let Some(candidate) = read_duplicate_candidate(connection, candidate_id)? else {
+        return Ok(None);
+    };
+    let mut evidence_statement = connection
+        .prepare(
+            r#"
+                SELECT evidence_id, kind, confidence, matched_pages, description
+                FROM duplicate_evidence WHERE candidate_id = ?1
+                ORDER BY kind ASC, evidence_id ASC
+            "#,
+        )
+        .map_err(map_sqlite_error)?;
+    let evidence_rows = evidence_statement
+        .query_map([candidate_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(map_sqlite_error)?;
+    let mut evidence = Vec::new();
+    for row in evidence_rows {
+        let row = row.map_err(map_sqlite_error)?;
+        evidence.push(DuplicateEvidence {
+            evidence_id: row.0,
+            kind: DuplicateEvidenceKind::from_database(&row.1).ok_or_else(|| {
+                RepositoryError::Corrupt(format!(
+                    "duplicate evidence kind {:?} is unsupported",
+                    row.1
+                ))
+            })?,
+            confidence: row.2,
+            matched_pages: stored_u32(row.3, "duplicate evidence page count")?,
+            description: row.4,
+        });
+    }
+
+    let mut pair_statement = connection
+        .prepare(
+            r#"
+                SELECT parent_source_page, candidate_source_page, exact_sha256,
+                       d_hash_distance, p_hash_distance, detail_hash_distance,
+                       edge_similarity, visual_similarity, low_information
+                FROM duplicate_page_pairs WHERE candidate_id = ?1
+                ORDER BY parent_source_page ASC, candidate_source_page ASC
+            "#,
+        )
+        .map_err(map_sqlite_error)?;
+    let pair_rows = pair_statement
+        .query_map([candidate_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, f64>(7)?,
+                row.get::<_, bool>(8)?,
+            ))
+        })
+        .map_err(map_sqlite_error)?;
+    let mut page_pairs = Vec::new();
+    for row in pair_rows {
+        let row = row.map_err(map_sqlite_error)?;
+        page_pairs.push(DuplicatePagePair {
+            parent_source_page: stored_u32(row.0, "duplicate parent source page")?,
+            candidate_source_page: stored_u32(row.1, "duplicate candidate source page")?,
+            exact_sha256: row.2,
+            d_hash_distance: stored_u32(row.3, "duplicate dHash distance")?,
+            p_hash_distance: stored_u32(row.4, "duplicate pHash distance")?,
+            detail_hash_distance: stored_u32(row.5, "duplicate detail hash distance")?,
+            edge_similarity: row.6,
+            visual_similarity: row.7,
+            low_information: row.8,
+        });
+    }
+
+    let mut decision_statement = connection
+        .prepare(
+            r#"
+                SELECT decision_id, candidate_id, candidate_revision, action,
+                       target_gallery_id, series_group_id, created_at
+                FROM duplicate_decisions WHERE candidate_id = ?1
+                ORDER BY created_at ASC, decision_id ASC
+            "#,
+        )
+        .map_err(map_sqlite_error)?;
+    let decision_rows = decision_statement
+        .query_map([candidate_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(map_sqlite_error)?;
+    let mut decisions = Vec::new();
+    for row in decision_rows {
+        let row = row.map_err(map_sqlite_error)?;
+        decisions.push(DuplicateDecisionHistory {
+            decision_id: row.0,
+            candidate_id: row.1,
+            candidate_revision: stored_u64(row.2, "duplicate decision revision")?,
+            action: DuplicateDecisionAction::from_database(&row.3).ok_or_else(|| {
+                RepositoryError::Corrupt(format!(
+                    "duplicate decision action {:?} is unsupported",
+                    row.3
+                ))
+            })?,
+            target_gallery_id: row
+                .4
+                .map(GalleryId::new)
+                .transpose()
+                .map_err(domain_corruption)?,
+            series_group_id: row.5,
+            created_at: row.6,
+        });
+    }
+
+    Ok(Some(DuplicateReview {
+        candidate: candidate.candidate,
+        evidence,
+        page_pairs,
+        decisions,
+        series_groups: read_duplicate_series_groups(connection)?,
+    }))
+}
+
+fn read_duplicate_series_groups(
+    connection: &Connection,
+) -> Result<Vec<SeriesGroup>, RepositoryError> {
+    let groups = {
+        let mut statement = connection
+            .prepare(
+                r#"
+                    SELECT series_group_id, name, revision, created_at, updated_at
+                    FROM duplicate_series_groups
+                    ORDER BY name COLLATE NOCASE ASC, series_group_id ASC
+                "#,
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(map_sqlite_error)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(map_sqlite_error)?
+    };
+    let mut result = Vec::with_capacity(groups.len());
+    for (series_group_id, name, revision, created_at, updated_at) in groups {
+        let mut statement = connection
+            .prepare(
+                r#"
+                    SELECT m.gallery_id, m.entry_id, g.title,
+                           g.primary_artist, g.primary_group, a.expected_page_count
+                    FROM duplicate_series_members m
+                    JOIN galleries g ON g.gallery_id = m.gallery_id
+                    JOIN download_artifacts a
+                      ON a.entry_id = m.entry_id AND a.gallery_id = m.gallery_id
+                    WHERE m.series_group_id = ?1
+                    ORDER BY m.created_at ASC, m.gallery_id ASC
+                "#,
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map([&series_group_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(map_sqlite_error)?;
+        let mut members = Vec::new();
+        for row in rows {
+            let row = row.map_err(map_sqlite_error)?;
+            members.push(DuplicateGalleryRef {
+                gallery_id: GalleryId::new(row.0).map_err(domain_corruption)?,
+                entry_id: row.1,
+                title: row.2,
+                artist: row.3,
+                group: row.4,
+                page_count: stored_u32(row.5, "duplicate series member page count")?,
+            });
+        }
+        result.push(SeriesGroup {
+            series_group_id,
+            name,
+            revision: stored_u64(revision, "duplicate series revision")?,
+            members,
+            created_at,
+            updated_at,
+        });
+    }
+    Ok(result)
+}
+
+fn duplicate_decision_target(
+    candidate: &DuplicateCandidate,
+    requested: Option<i64>,
+    required: GalleryId,
+) -> Result<GalleryId, RepositoryError> {
+    match requested {
+        Some(value) => {
+            let target = GalleryId::new(value).map_err(domain_corruption)?;
+            if target != required {
+                return Err(RepositoryError::Other(
+                    "duplicate decision target does not match its action".into(),
+                ));
+            }
+            Ok(target)
+        }
+        None => {
+            let _ = candidate;
+            Ok(required)
+        }
+    }
+}
+
+fn duplicate_series_target(
+    candidate: &DuplicateCandidate,
+    requested: Option<i64>,
+) -> Result<(GalleryId, &str), RepositoryError> {
+    let value = requested.ok_or_else(|| {
+        RepositoryError::Other("a series decision requires targetGalleryId".into())
+    })?;
+    let target = GalleryId::new(value).map_err(domain_corruption)?;
+    if target == candidate.parent.gallery_id {
+        Ok((target, &candidate.parent.entry_id))
+    } else if target == candidate.candidate.gallery_id {
+        Ok((target, &candidate.candidate.entry_id))
+    } else {
+        Err(RepositoryError::Other(
+            "series target must be one of the duplicate candidate galleries".into(),
+        ))
+    }
+}
+
+fn validated_series_name(value: Option<&str>) -> Result<Option<String>, RepositoryError> {
+    value
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty() || value.chars().count() > 200 {
+                return Err(RepositoryError::Other(
+                    "seriesName must contain between 1 and 200 characters".into(),
+                ));
+            }
+            Ok(value.to_owned())
+        })
+        .transpose()
+}
+
+fn validated_series_group_id(value: &str) -> Result<String, RepositoryError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(RepositoryError::Other(
+            "seriesGroupId must not be empty".into(),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn apply_duplicate_decision_side_effect(
+    transaction: &Transaction<'_>,
+    candidate: &DuplicateCandidate,
+    request: &DuplicateDecisionRequest,
+    decision_id: &str,
+) -> Result<(Option<i64>, Option<String>), RepositoryError> {
+    match request.action {
+        DuplicateDecisionAction::HideParent | DuplicateDecisionAction::HideCandidate => {
+            if request.series_group_id.is_some() || request.series_name.is_some() {
+                return Err(RepositoryError::Other(
+                    "hide decisions do not accept series fields".into(),
+                ));
+            }
+            let required = if request.action == DuplicateDecisionAction::HideParent {
+                candidate.parent.gallery_id
+            } else {
+                candidate.candidate.gallery_id
+            };
+            let target = duplicate_decision_target(candidate, request.target_gallery_id, required)?;
+            transaction
+                .execute(
+                    r#"
+                        INSERT INTO duplicate_hidden_galleries (
+                            gallery_id, decision_id, created_at
+                        ) VALUES (
+                            ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                        ON CONFLICT(gallery_id) DO UPDATE SET
+                            decision_id = excluded.decision_id,
+                            created_at = excluded.created_at
+                    "#,
+                    params![target.get(), decision_id],
+                )
+                .map_err(map_sqlite_error)?;
+            Ok((Some(target.get()), None))
+        }
+        DuplicateDecisionAction::ExcludePair => {
+            if request.target_gallery_id.is_some()
+                || request.series_group_id.is_some()
+                || request.series_name.is_some()
+            {
+                return Err(RepositoryError::Other(
+                    "exclude_pair does not accept target or series fields".into(),
+                ));
+            }
+            transaction
+                .execute(
+                    r#"
+                        INSERT INTO duplicate_pair_exclusions (
+                            parent_gallery_id, candidate_gallery_id,
+                            decision_id, created_at
+                        ) VALUES (
+                            ?1, ?2, ?3,
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                        ON CONFLICT(parent_gallery_id, candidate_gallery_id) DO UPDATE SET
+                            decision_id = excluded.decision_id,
+                            created_at = excluded.created_at
+                    "#,
+                    params![
+                        candidate.parent.gallery_id.get(),
+                        candidate.candidate.gallery_id.get(),
+                        decision_id,
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
+            Ok((None, None))
+        }
+        DuplicateDecisionAction::SeriesLink => {
+            if request.target_gallery_id.is_some() {
+                return Err(RepositoryError::Other(
+                    "series_link atomically links both galleries and does not accept targetGalleryId"
+                        .into(),
+                ));
+            }
+            let series_name = validated_series_name(request.series_name.as_deref())?;
+            let series_group_id = request
+                .series_group_id
+                .as_deref()
+                .map(validated_series_group_id)
+                .transpose()?
+                .unwrap_or_else(|| format!("duplicate-series-{}", Uuid::new_v4()));
+            let group_exists: bool = transaction
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM duplicate_series_groups WHERE series_group_id = ?1)",
+                    [&series_group_id],
+                    |row| row.get(0),
+                )
+                .map_err(map_sqlite_error)?;
+            if !group_exists {
+                let name = series_name.as_deref().ok_or_else(|| {
+                    RepositoryError::Other(
+                        "seriesName is required when creating a series group".into(),
+                    )
+                })?;
+                transaction
+                    .execute(
+                        r#"
+                            INSERT INTO duplicate_series_groups (
+                                series_group_id, name, revision, created_at, updated_at
+                            ) VALUES (
+                                ?1, ?2, 0,
+                                strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                            )
+                        "#,
+                        params![series_group_id, name],
+                    )
+                    .map_err(map_sqlite_error)?;
+            }
+            for member in [&candidate.parent, &candidate.candidate] {
+                transaction
+                    .execute(
+                        r#"
+                            INSERT OR IGNORE INTO duplicate_series_members (
+                                series_group_id, gallery_id, entry_id, created_at
+                            ) VALUES (
+                                ?1, ?2, ?3,
+                                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                            )
+                        "#,
+                        params![series_group_id, member.gallery_id.get(), member.entry_id,],
+                    )
+                    .map_err(map_sqlite_error)?;
+            }
+            transaction
+                .execute(
+                    r#"
+                        UPDATE duplicate_series_groups
+                        SET name = COALESCE(?1, name),
+                            revision = revision + 1,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        WHERE series_group_id = ?2
+                    "#,
+                    params![series_name, series_group_id],
+                )
+                .map_err(map_sqlite_error)?;
+            Ok((None, Some(series_group_id)))
+        }
+        DuplicateDecisionAction::SeriesUnlink => {
+            if request.series_name.is_some() {
+                return Err(RepositoryError::Other(
+                    "series_unlink does not accept seriesName".into(),
+                ));
+            }
+            let (target, _) = duplicate_series_target(candidate, request.target_gallery_id)?;
+            let series_group_id =
+                validated_series_group_id(request.series_group_id.as_deref().ok_or_else(
+                    || RepositoryError::Other("series_unlink requires seriesGroupId".into()),
+                )?)?;
+            let removed = transaction
+                .execute(
+                    r#"
+                        DELETE FROM duplicate_series_members
+                        WHERE series_group_id = ?1 AND gallery_id = ?2
+                    "#,
+                    params![series_group_id, target.get()],
+                )
+                .map_err(map_sqlite_error)?;
+            if removed == 0 {
+                return Err(RepositoryError::Other(
+                    "the gallery is not a member of the requested series group".into(),
+                ));
+            }
+            transaction
+                .execute(
+                    r#"
+                        UPDATE duplicate_series_groups
+                        SET revision = revision + 1,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        WHERE series_group_id = ?1
+                    "#,
+                    [&series_group_id],
+                )
+                .map_err(map_sqlite_error)?;
+            Ok((Some(target.get()), Some(series_group_id)))
+        }
+    }
+}
+
 struct StoredPipelineTarget {
     job_id: String,
     entry_id: String,
@@ -3813,6 +5328,21 @@ fn read_auto_find_snapshot(connection: &Connection) -> Result<AutoFindSnapshot, 
                       SELECT 1 FROM download_entries download
                       WHERE download.gallery_id = candidate.gallery_id
                   )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM duplicate_hidden_galleries hidden
+                      WHERE hidden.gallery_id = candidate.gallery_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM duplicate_candidates decided
+                      WHERE decided.resolved = 1
+                        AND (decided.parent_gallery_id = candidate.gallery_id
+                             OR decided.candidate_gallery_id = candidate.gallery_id)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM duplicate_pair_exclusions pair_exclusion
+                      WHERE pair_exclusion.parent_gallery_id = candidate.gallery_id
+                         OR pair_exclusion.candidate_gallery_id = candidate.gallery_id
+                  )
                 ORDER BY published_rank DESC, gallery_id DESC
             "#,
         )
@@ -4043,6 +5573,620 @@ fn map_migration_error(error: MigrationError) -> RepositoryError {
         MigrationError::NonContiguousHistory { .. } | MigrationError::NameMismatch { .. } => {
             RepositoryError::Corrupt(error.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod duplicate_repository_tests {
+    use std::{
+        sync::{mpsc, Arc, Condvar},
+        thread,
+        time::Instant,
+    };
+
+    use image::{codecs::webp::WebPEncoder, ExtendedColorType, ImageEncoder};
+
+    use super::*;
+    use crate::{
+        application::{ArtifactStore, DuplicateRelationProvider, DuplicateSupervisor},
+        domain::ExternalRelationEvidence,
+        infrastructure::FilesystemArtifactStore,
+    };
+
+    fn seed_verified_gallery(repository: &SqliteRepository, gallery_id: i64, entry_id: &str) {
+        let connection = repository.connection().expect("lock test repository");
+        connection
+            .execute(
+                r#"
+                    INSERT INTO galleries (
+                        gallery_id, revision, title, primary_artist,
+                        source_page_count, primary_group
+                    ) VALUES (?1, 0, ?2, ?3, 1, ?4)
+                "#,
+                params![
+                    gallery_id,
+                    format!("Gallery {gallery_id}"),
+                    format!("Artist {gallery_id}"),
+                    format!("Group {gallery_id}"),
+                ],
+            )
+            .expect("insert gallery");
+        connection
+            .execute(
+                r#"
+                    INSERT INTO download_entries (
+                        entry_id, gallery_id, revision, state, progress,
+                        created_at, updated_at
+                    ) VALUES (?1, ?2, 0, 'completed', 100.0, ?3, ?3)
+                "#,
+                params![entry_id, gallery_id, "2026-08-15T00:00:00.000Z"],
+            )
+            .expect("insert download entry");
+        connection
+            .execute(
+                r#"
+                    INSERT INTO download_artifacts (
+                        entry_id, gallery_id, revision, relative_directory,
+                        expected_page_count, state, manifest_relative_path,
+                        manifest_schema_version, writer_version,
+                        hash_profile_version, completed_at
+                    ) VALUES (
+                        ?1, ?2, 1, ?3, 1, 'complete', ?4, 1,
+                        'duplicate-repository-test', 1, ?5
+                    )
+                "#,
+                params![
+                    entry_id,
+                    gallery_id,
+                    format!("gallery-{gallery_id}"),
+                    format!("gallery-{gallery_id}/manifest.json"),
+                    "2026-08-15T00:00:00.000Z",
+                ],
+            )
+            .expect("insert complete artifact");
+        connection
+            .execute(
+                r#"
+                    INSERT INTO download_pages (
+                        entry_id, gallery_id, source_page_number, relative_path,
+                        state, byte_length, sha256, storage_format,
+                        source_revision, verified_at, excluded
+                    ) VALUES (
+                        ?1, ?2, 1, ?3, 'present', 128, ?4, 'webp',
+                        'source-v1', ?5, 0
+                    )
+                "#,
+                params![
+                    entry_id,
+                    gallery_id,
+                    format!("gallery-{gallery_id}/page-1.webp"),
+                    format!("{gallery_id:064x}"),
+                    "2026-08-15T00:00:00.000Z",
+                ],
+            )
+            .expect("insert verified page");
+    }
+
+    fn candidate_record(run_id: &str) -> DuplicateCandidateRecord {
+        DuplicateCandidateRecord {
+            run_id: run_id.to_owned(),
+            candidate: DuplicateCandidate {
+                candidate_id: "candidate-1-2".into(),
+                revision: 0,
+                parent: DuplicateGalleryRef {
+                    gallery_id: GalleryId::new(1).unwrap(),
+                    entry_id: "entry-1".into(),
+                    title: "ignored scanner title".into(),
+                    artist: None,
+                    group: None,
+                    page_count: 1,
+                },
+                candidate: DuplicateGalleryRef {
+                    gallery_id: GalleryId::new(2).unwrap(),
+                    entry_id: "entry-2".into(),
+                    title: "ignored scanner title".into(),
+                    artist: None,
+                    group: None,
+                    page_count: 1,
+                },
+                relation: DuplicateRelation::Exact,
+                confidence: 1.0,
+                matched_pages: 1,
+                parent_coverage: 1.0,
+                candidate_coverage: 1.0,
+                created_at: "ignored".into(),
+                updated_at: "ignored".into(),
+            },
+            evidence: vec![DuplicateEvidence {
+                evidence_id: "evidence-1-2-sha".into(),
+                kind: DuplicateEvidenceKind::ExactSha256,
+                confidence: 1.0,
+                matched_pages: 1,
+                description: "Verified page SHA-256 matches".into(),
+            }],
+            page_pairs: vec![DuplicatePagePair {
+                parent_source_page: 1,
+                candidate_source_page: 1,
+                exact_sha256: true,
+                d_hash_distance: 0,
+                p_hash_distance: 0,
+                detail_hash_distance: 0,
+                edge_similarity: 1.0,
+                visual_similarity: 1.0,
+                low_information: false,
+            }],
+        }
+    }
+
+    fn auto_candidate(run_id: &str, gallery_id: i64) -> AutoFindCandidateRecord {
+        AutoFindCandidateRecord {
+            run_id: run_id.into(),
+            gallery: GallerySummary {
+                id: GalleryId::new(gallery_id).unwrap(),
+                title: format!("Auto gallery {gallery_id}"),
+                artist: "Artist".into(),
+                group: None,
+                pages: 10,
+                language: Language::English,
+                tags: vec!["tag".into()],
+                series: Vec::new(),
+                characters: Vec::new(),
+                published_rank: 1,
+                popularity: 1,
+                thumbnail_key: None,
+                thumbnail_width: 100,
+                thumbnail_height: 150,
+            },
+            matched_favorite: FavoriteKey {
+                namespace: FavoriteNamespace::Artist,
+                value: "artist".into(),
+            },
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingRelationProvider {
+        state: Mutex<BlockingRelationState>,
+        changed: Condvar,
+    }
+
+    #[derive(Default)]
+    struct BlockingRelationState {
+        entered: bool,
+        released: bool,
+        active: usize,
+        max_active: usize,
+    }
+
+    impl BlockingRelationProvider {
+        fn wait_until_entered(&self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut state = self.state.lock().unwrap();
+            while !state.entered {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .expect("duplicate relation provider was not reached");
+                let (next, timeout) = self.changed.wait_timeout(state, remaining).unwrap();
+                state = next;
+                assert!(
+                    !timeout.timed_out(),
+                    "duplicate relation provider was not reached"
+                );
+            }
+        }
+
+        fn release(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.released = true;
+            self.changed.notify_all();
+        }
+
+        fn max_active(&self) -> usize {
+            self.state.lock().unwrap().max_active
+        }
+    }
+
+    impl DuplicateRelationProvider for BlockingRelationProvider {
+        fn enabled(&self) -> bool {
+            true
+        }
+
+        fn relation(
+            &self,
+            _parent_gallery_id: GalleryId,
+            _candidate_gallery_id: GalleryId,
+        ) -> Result<Option<ExternalRelationEvidence>, RepositoryError> {
+            let mut state = self.state.lock().unwrap();
+            state.active += 1;
+            state.max_active = state.max_active.max(state.active);
+            state.entered = true;
+            self.changed.notify_all();
+            while !state.released {
+                state = self.changed.wait(state).unwrap();
+            }
+            state.active -= 1;
+            Ok(None)
+        }
+    }
+
+    fn materialize_verified_page(
+        repository: &SqliteRepository,
+        root: &Path,
+        gallery_id: i64,
+        entry_id: &str,
+        bytes: &[u8],
+    ) {
+        seed_verified_gallery(repository, gallery_id, entry_id);
+        let directory = root.join(format!("gallery-{gallery_id}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("page-1.webp"), bytes).unwrap();
+        repository
+            .connection()
+            .unwrap()
+            .execute(
+                r#"
+                    UPDATE download_pages
+                    SET byte_length = ?1, sha256 = ?2
+                    WHERE entry_id = ?3 AND source_page_number = 1
+                "#,
+                params![
+                    i64::try_from(bytes.len()).unwrap(),
+                    format!("{:x}", Sha256::digest(bytes)),
+                    entry_id,
+                ],
+            )
+            .unwrap();
+    }
+
+    fn patterned_webp() -> Vec<u8> {
+        let mut rgba = vec![0_u8; 256 * 256 * 4];
+        for y in 0..256_usize {
+            for x in 0..256_usize {
+                let offset = (y * 256 + x) * 4;
+                rgba[offset] = ((x * 3 + y) % 256) as u8;
+                rgba[offset + 1] = ((x + y * 5) % 256) as u8;
+                rgba[offset + 2] = if (x / 24 + y / 31) % 2 == 0 { 30 } else { 220 };
+                rgba[offset + 3] = 255;
+            }
+        }
+        let mut bytes = Vec::new();
+        WebPEncoder::new_lossless(&mut bytes)
+            .write_image(&rgba, 256, 256, ExtendedColorType::Rgba8)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn duplicate_hash_scan_review_and_decision_are_transactional() {
+        let repository = SqliteRepository::open_in_memory().expect("open repository");
+        seed_verified_gallery(&repository, 1, "entry-1");
+        seed_verified_gallery(&repository, 2, "entry-2");
+
+        let bundles = repository
+            .duplicate_artifact_bundles()
+            .expect("enumerate verified artifacts");
+        assert_eq!(bundles.len(), 2);
+
+        let page_hash = DuplicatePageHash {
+            entry_id: "entry-1".into(),
+            gallery_id: GalleryId::new(1).unwrap(),
+            source_page_number: SourcePageNumber::new(1).unwrap(),
+            profile_version: 1,
+            artifact_sha256: ArtifactSha256::new(format!("{:064x}", 1)).unwrap(),
+            coarse_d_hash: u64::MAX,
+            detail_d_hash_hex: "ab".repeat(128),
+            p_hash: 0x0123_4567_89ab_cdef,
+            mean_luma: 127.0,
+            std_dev: 48.0,
+            non_uniform_ratio: 0.9,
+            edge_density: 0.4,
+            width: 1200,
+            height: 1800,
+            low_information: false,
+        };
+        repository
+            .duplicate_page_hash_upsert(&page_hash)
+            .expect("cache page hash");
+        assert_eq!(
+            repository
+                .duplicate_page_hash_get(
+                    "entry-1",
+                    SourcePageNumber::new(1).unwrap(),
+                    1,
+                    page_hash.artifact_sha256.as_str(),
+                )
+                .expect("load cached page hash"),
+            Some(page_hash)
+        );
+
+        let run = repository
+            .duplicate_scan_start(1, 2, 1)
+            .expect("start duplicate scan");
+        repository
+            .duplicate_scan_progress(&run.run_id, 2, 1)
+            .expect("advance duplicate scan");
+        repository
+            .duplicate_candidate_replace(&candidate_record(&run.run_id))
+            .expect("store duplicate candidate")
+            .expect("candidate changes run");
+        let snapshot = repository.duplicate_snapshot().expect("load snapshot");
+        assert_eq!(snapshot.candidates.len(), 1);
+        assert_eq!(snapshot.candidates[0].parent.title, "Gallery 1");
+        assert_eq!(snapshot.run.as_ref().unwrap().candidates_found, 1);
+        let review = repository
+            .duplicate_review_get("candidate-1-2")
+            .expect("load review")
+            .expect("candidate exists");
+        assert_eq!(review.evidence.len(), 1);
+        assert_eq!(review.page_pairs[0].parent_source_page, 1);
+
+        let expected_revision = review.candidate.revision;
+        let applied = repository
+            .duplicate_decision_apply(&DuplicateDecisionRequest {
+                candidate_id: "candidate-1-2".into(),
+                expected_revision,
+                action: DuplicateDecisionAction::ExcludePair,
+                target_gallery_id: None,
+                series_group_id: None,
+                series_name: None,
+            })
+            .expect("apply exclusion decision");
+        let DuplicateDecisionApplyOutcome::Applied(decided) = applied else {
+            panic!("decision should apply");
+        };
+        assert_eq!(decided.decisions.len(), 1);
+        assert_eq!(
+            decided.decisions[0].action,
+            DuplicateDecisionAction::ExcludePair
+        );
+        assert!(repository
+            .duplicate_snapshot()
+            .expect("load filtered snapshot")
+            .candidates
+            .is_empty());
+        assert!(repository
+            .duplicate_candidate_replace(&candidate_record(&run.run_id))
+            .expect("excluded pair is ignored")
+            .is_none());
+
+        let stale = repository
+            .duplicate_decision_apply(&DuplicateDecisionRequest {
+                candidate_id: "candidate-1-2".into(),
+                expected_revision,
+                action: DuplicateDecisionAction::ExcludePair,
+                target_gallery_id: None,
+                series_group_id: None,
+                series_name: None,
+            })
+            .expect("stale decision has typed outcome");
+        assert!(matches!(
+            stale,
+            DuplicateDecisionApplyOutcome::RevisionConflict {
+                actual_revision
+            } if actual_revision == expected_revision + 1
+        ));
+    }
+
+    #[test]
+    fn duplicate_recovery_is_idempotent_and_only_fails_running_scans() {
+        let repository = SqliteRepository::open_in_memory().expect("open repository");
+        let run = repository
+            .duplicate_scan_start(1, 0, 0)
+            .expect("start scan");
+        assert!(repository
+            .duplicate_scan_is_running(&run.run_id)
+            .expect("check running scan"));
+        assert_eq!(repository.duplicate_recover_interrupted().unwrap(), 1);
+        assert_eq!(repository.duplicate_recover_interrupted().unwrap(), 0);
+        let recovered = repository.duplicate_snapshot().unwrap().run.unwrap();
+        assert_eq!(recovered.state, DuplicateScanState::Failed);
+        assert_eq!(
+            recovered.error_code.as_deref(),
+            Some("DUPLICATE_SCAN_INTERRUPTED")
+        );
+    }
+
+    #[test]
+    fn series_decisions_are_atomic_and_revision_guarded() {
+        let repository = SqliteRepository::open_in_memory().expect("open repository");
+        seed_verified_gallery(&repository, 1, "entry-1");
+        seed_verified_gallery(&repository, 2, "entry-2");
+        let run = repository.duplicate_scan_start(1, 2, 1).unwrap();
+        repository
+            .duplicate_candidate_replace(&candidate_record(&run.run_id))
+            .unwrap();
+
+        let first = repository
+            .duplicate_decision_apply(&DuplicateDecisionRequest {
+                candidate_id: "candidate-1-2".into(),
+                expected_revision: 0,
+                action: DuplicateDecisionAction::SeriesLink,
+                target_gallery_id: None,
+                series_group_id: None,
+                series_name: Some("A linked series".into()),
+            })
+            .unwrap();
+        let DuplicateDecisionApplyOutcome::Applied(first) = first else {
+            panic!("first series link should apply");
+        };
+        let group_id = first.series_groups[0].series_group_id.clone();
+        assert_eq!(first.series_groups[0].members.len(), 2);
+        assert_eq!(first.series_groups[0].revision, 1);
+        assert_eq!(first.decisions[0].target_gallery_id, None);
+        assert_eq!(repository.duplicate_snapshot().unwrap().candidates.len(), 1);
+
+        let second = repository
+            .duplicate_decision_apply(&DuplicateDecisionRequest {
+                candidate_id: "candidate-1-2".into(),
+                expected_revision: 1,
+                action: DuplicateDecisionAction::SeriesUnlink,
+                target_gallery_id: Some(1),
+                series_group_id: Some(group_id.clone()),
+                series_name: None,
+            })
+            .unwrap();
+        let DuplicateDecisionApplyOutcome::Applied(second) = second else {
+            panic!("series unlink should apply");
+        };
+        assert_eq!(second.candidate.revision, 2);
+        assert_eq!(second.decisions.len(), 2);
+        assert_eq!(second.series_groups[0].members.len(), 1);
+        assert_eq!(repository.duplicate_snapshot().unwrap().candidates.len(), 1);
+
+        assert!(matches!(
+            repository
+                .duplicate_decision_apply(&DuplicateDecisionRequest {
+                    candidate_id: "candidate-1-2".into(),
+                    expected_revision: 1,
+                    action: DuplicateDecisionAction::HideParent,
+                    target_gallery_id: None,
+                    series_group_id: None,
+                    series_name: None,
+                })
+                .unwrap(),
+            DuplicateDecisionApplyOutcome::RevisionConflict { actual_revision: 2 }
+        ));
+        assert!(matches!(
+            repository
+                .duplicate_decision_apply(&DuplicateDecisionRequest {
+                    candidate_id: "candidate-1-2".into(),
+                    expected_revision: 2,
+                    action: DuplicateDecisionAction::HideParent,
+                    target_gallery_id: None,
+                    series_group_id: None,
+                    series_name: None,
+                })
+                .unwrap(),
+            DuplicateDecisionApplyOutcome::Applied(_)
+        ));
+        assert!(repository
+            .duplicate_snapshot()
+            .unwrap()
+            .candidates
+            .is_empty());
+    }
+
+    #[test]
+    fn auto_find_add_and_snapshot_exclude_duplicate_visibility_state() {
+        let repository = SqliteRepository::open_in_memory().expect("open repository");
+        let run = repository.auto_find_start(1).unwrap();
+        {
+            let connection = repository.connection().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO duplicate_hidden_galleries (gallery_id, decision_id, created_at) VALUES (10, 'hidden-10', 'now')",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO duplicate_pair_exclusions (parent_gallery_id, candidate_gallery_id, decision_id, created_at) VALUES (11, 12, 'excluded-11-12', 'now')",
+                    [],
+                )
+                .unwrap();
+        }
+        assert!(repository
+            .auto_find_candidate_add(&auto_candidate(&run.run_id, 10))
+            .unwrap()
+            .is_none());
+        assert!(repository
+            .auto_find_candidate_add(&auto_candidate(&run.run_id, 11))
+            .unwrap()
+            .is_none());
+        assert!(repository
+            .auto_find_candidate_add(&auto_candidate(&run.run_id, 13))
+            .unwrap()
+            .is_some());
+        assert_eq!(repository.auto_find_snapshot().unwrap().candidates.len(), 1);
+        repository
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO duplicate_hidden_galleries (gallery_id, decision_id, created_at) VALUES (13, 'hidden-13', 'now')",
+                [],
+            )
+            .unwrap();
+        assert!(repository
+            .auto_find_snapshot()
+            .unwrap()
+            .candidates
+            .is_empty());
+    }
+
+    #[test]
+    fn duplicate_cancel_joins_worker_before_immediate_restart() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("downloads");
+        std::fs::create_dir_all(&root).unwrap();
+        let repository = Arc::new(SqliteRepository::open_in_memory().unwrap());
+        let bytes = patterned_webp();
+        materialize_verified_page(&repository, &root, 1, "entry-1", &bytes);
+        materialize_verified_page(&repository, &root, 2, "entry-2", &bytes);
+        repository
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE settings SET download_root = ?1 WHERE singleton = 1",
+                [root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+
+        let gate = Arc::new(BlockingRelationProvider::default());
+        let duplicate_repository: Arc<dyn DuplicateRepository> = repository.clone();
+        let settings_repository: Arc<dyn StateRepository> = repository.clone();
+        let artifact_store: Arc<dyn ArtifactStore> = Arc::new(FilesystemArtifactStore::new());
+        let relations: Arc<dyn DuplicateRelationProvider> = gate.clone();
+        let (events, _event_rx) = mpsc::channel();
+        let supervisor = DuplicateSupervisor::new(
+            duplicate_repository,
+            settings_repository,
+            artifact_store,
+            relations,
+            events,
+        );
+        let first = supervisor.start().expect("start first scan");
+        gate.wait_until_entered();
+
+        let cancelling = supervisor.clone();
+        let cancel = thread::spawn(move || cancelling.cancel().expect("cancel first scan"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = repository.duplicate_snapshot().unwrap();
+            if snapshot
+                .run
+                .as_ref()
+                .is_some_and(|run| run.state == DuplicateScanState::Cancelled)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cancel did not persist before worker join"
+            );
+            thread::yield_now();
+        }
+        gate.release();
+        assert_eq!(cancel.join().unwrap().state, DuplicateScanState::Cancelled);
+
+        let second = supervisor
+            .start()
+            .expect("restart after joined cancellation");
+        assert_ne!(first.run_id, second.run_id);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let run = repository.duplicate_snapshot().unwrap().run.unwrap();
+            if run.run_id == second.run_id && run.state != DuplicateScanState::Running {
+                assert_eq!(run.state, DuplicateScanState::Completed);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "replacement scan did not complete"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(gate.max_active(), 1);
+        supervisor.shutdown_and_wait();
     }
 }
 

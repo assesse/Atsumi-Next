@@ -252,7 +252,10 @@ impl HitomiLiveAdapter {
         priority: ThumbnailPriority,
     ) -> Result<ResolvedThumbnail, SourceContractError> {
         check_cancelled(cancellation)?;
-        let gallery_id = u64::try_from(key.gallery_id()).map_err(|_| {
+        let gallery_id = key.gallery_id().ok_or_else(|| {
+            SourceContractError::validation("thumbnailKey", "is not a live gallery key")
+        })?;
+        let gallery_id = u64::try_from(gallery_id).map_err(|_| {
             SourceContractError::validation("galleryId", "must be a positive integer")
         })?;
         let metadata = self.fetch_metadata(gallery_id)?;

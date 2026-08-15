@@ -4,7 +4,7 @@
 
 새 버전의 영속 데이터 기준은 SQLite 하나로 통합한다. 파일 시스템은 artifact의 실제 존재를 증명하며, DB와 불일치하면 reconciliation job이 해결한다.
 
-## 현재 구현 schema (v11)
+## 현재 구현 schema (v12)
 
 | 테이블 | 책임 |
 |---|---|
@@ -24,18 +24,21 @@
 | `auto_find_runs` | 명시적 작가 갱신의 상태·revision·진행률·안전 오류 |
 | `auto_find_candidates` | run별 `GallerySummary` snapshot(시리즈·캐릭터 포함)과 일치한 즐겨찾기 key |
 | `auto_find_exclusions` | gallery ID별 영속 후보 제외와 이유 |
+| `duplicate_hash_profiles` | versioned 작품 중복 hash·threshold 계약 |
+| `duplicate_page_hashes` | 검증 artifact page의 SHA-256·coarse/detail dHash·pHash·분산/edge feature cache |
+| `duplicate_scan_runs` | full scan 상태·revision·hash/pair 진행률·안전 오류 |
+| `duplicate_candidates` | profile별 gallery pair, relation, confidence, coverage와 해결 상태 |
+| `duplicate_evidence`·`duplicate_page_pairs` | typed 근거와 immutable source page one-to-one 정렬 |
+| `duplicate_hidden_galleries`·`duplicate_pair_exclusions` | 사용자 숨김과 오탐 pair 제외 |
+| `duplicate_series_groups`·`duplicate_series_members` | 원자적으로 관리되는 연작 묶음 |
+| `duplicate_decisions` | candidate revision별 append-only 사용자 판정 이력 |
 | `schema_migrations` | migration 적용 이력 |
 
-아래 테이블은 Phase 5~7에서 추가할 계획 schema다.
+아래 테이블은 Phase 6~7에서 추가할 계획 schema다.
 
 | 계획 테이블 | 책임 |
 |---|---|
 | `gallery_tags` | namespace가 보존된 tag 관계 |
-| `page_hashes` | versioned SHA-256, dHash, pHash |
-| `duplicate_candidates` | 후보쌍과 생성 상태 |
-| `duplicate_evidence` | 관계, 제목, 해시, 순서 근거 |
-| `duplicate_decisions` | 사용자 판정 이력 |
-| `series_groups` | 함께 처리할 연작 그룹 |
 | `internal_review_blocks` | 갤러리 내부 장면 토막 |
 | `page_exclusions` | 사용자가 제거한 원본 페이지 |
 | `thumbnail_cache_entries` | cache index와 접근 시각 |
@@ -57,6 +60,15 @@
 - `auto_find_candidates.series_json`과 `characters_json`을 `NOT NULL`, valid JSON, 기본값 `[]`로 additive하게 추가한다.
 - v10에서 저장된 run과 후보는 그대로 유지하고 새 namespace metadata만 빈 배열로 backfill한다. v10→v11 보존 migration test가 이 조건을 검증한다.
 - 새 후보는 source의 `GallerySummary.series`와 `characters`를 저장하며 snapshot 복원 뒤 카드·상세·Related가 같은 metadata와 favorite projection을 사용한다.
+
+### v12 추가 규칙
+
+- migration 이름은 `artifact_duplicate_evidence_and_decisions`다.
+- HashProfile 1/algorithm 1의 SHA-256, 64-bit coarse dHash·pHash, 1024-bit detail dHash, luma/variance/non-uniform/edge feature를 artifact SHA와 함께 저장한다. artifact byte hash나 profile version이 바뀌면 cache를 그대로 재사용하지 않는다.
+- scan run은 동시에 하나의 `running` row만 허용한다. 앱 시작 시 남은 run은 `failed/DUPLICATE_SCAN_INTERRUPTED`, 정상 종료·사용자 취소는 `cancelled`로 종결하고 이미 저장된 후보·판정은 보존한다.
+- 후보·evidence·source page pair 교체, revision CAS 판정, 숨김·연작·pair 제외 side effect와 append-only history는 각각 하나의 SQLite transaction이다.
+- `series_link`는 두 gallery를 한 group에 연결하고 후보를 resolve하지 않는다. `hide_*`와 `exclude_pair`만 후보를 resolved 처리하며 Auto Find의 insert/snapshot도 해당 영속 상태를 제외한다.
+- v1~v11 table/column 의미는 바꾸지 않는 additive migration이며 migration 전 backup과 future-schema 거부 규칙을 그대로 따른다.
 
 ## Classic 입력원
 

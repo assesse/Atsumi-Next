@@ -41,6 +41,17 @@ fn key_and_event_dtos_use_the_frontend_contract() {
     );
     assert!(ThumbnailKey::gallery_cover(0).is_err());
     assert!(ThumbnailKey::gallery_page(1, 0).is_err());
+    let artifact = ThumbnailKey::artifact_page("entry-73", 4).unwrap();
+    assert_eq!(
+        serde_json::to_value(&artifact).unwrap(),
+        serde_json::json!({
+            "kind": "artifactPage",
+            "entryId": "entry-73",
+            "sourcePage": 4
+        })
+    );
+    assert!(ThumbnailKey::artifact_page("", 1).is_err());
+    assert!(ThumbnailKey::artifact_page("entry-73", 0).is_err());
 
     let request = ThumbnailRequestDto {
         key,
@@ -459,11 +470,14 @@ impl ThumbnailResolver for RecordingResolver {
         key: &ThumbnailKey,
         _cancellation: &CancellationToken,
     ) -> Result<ResolvedThumbnail, ThumbnailResolveError> {
-        self.order.lock().unwrap().push(key.gallery_id());
+        let gallery_id = key
+            .gallery_id()
+            .expect("recording resolver uses gallery keys");
+        self.order.lock().unwrap().push(gallery_id);
         thread::sleep(self.latency);
         Ok(ResolvedThumbnail {
             content_type: "image/png".into(),
-            bytes: vec![key.gallery_id() as u8],
+            bytes: vec![gallery_id as u8],
             width: 1,
             height: 1,
             source_revision: None,

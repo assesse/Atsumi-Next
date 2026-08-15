@@ -734,6 +734,194 @@ pub const MIGRATIONS: &[Migration] = &[
                     CHECK (json_valid(characters_json));
         "#,
     },
+    Migration {
+        version: 12,
+        name: "artifact_duplicate_evidence_and_decisions",
+        sql: r#"
+            CREATE TABLE duplicate_hash_profiles (
+                profile_version INTEGER PRIMARY KEY CHECK (profile_version > 0),
+                algorithm_version INTEGER NOT NULL CHECK (algorithm_version > 0),
+                d_hash_bits INTEGER NOT NULL CHECK (d_hash_bits >= 64),
+                p_hash_bits INTEGER NOT NULL CHECK (p_hash_bits >= 64),
+                visual_match_threshold REAL NOT NULL
+                    CHECK (visual_match_threshold BETWEEN 0.0 AND 1.0),
+                low_information_std_dev_threshold REAL NOT NULL
+                    CHECK (low_information_std_dev_threshold >= 0.0),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0)
+            ) STRICT;
+            INSERT INTO duplicate_hash_profiles (
+                profile_version, algorithm_version, d_hash_bits, p_hash_bits,
+                visual_match_threshold, low_information_std_dev_threshold,
+                created_at
+            ) VALUES (
+                1, 1, 1024, 64, 0.80, 10.0,
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            );
+
+            CREATE TABLE duplicate_page_hashes (
+                entry_id TEXT NOT NULL,
+                gallery_id INTEGER NOT NULL CHECK (gallery_id > 0),
+                source_page_number INTEGER NOT NULL CHECK (source_page_number > 0),
+                profile_version INTEGER NOT NULL
+                    REFERENCES duplicate_hash_profiles(profile_version),
+                artifact_sha256 TEXT NOT NULL CHECK (length(artifact_sha256) = 64),
+                coarse_d_hash_hex TEXT NOT NULL CHECK (length(coarse_d_hash_hex) = 16),
+                detail_d_hash_hex TEXT NOT NULL CHECK (length(detail_d_hash_hex) = 256),
+                p_hash_hex TEXT NOT NULL CHECK (length(p_hash_hex) = 16),
+                mean_luma REAL NOT NULL CHECK (mean_luma BETWEEN 0.0 AND 255.0),
+                std_dev REAL NOT NULL CHECK (std_dev >= 0.0),
+                non_uniform_ratio REAL NOT NULL CHECK (non_uniform_ratio BETWEEN 0.0 AND 1.0),
+                edge_density REAL NOT NULL CHECK (edge_density BETWEEN 0.0 AND 1.0),
+                width INTEGER NOT NULL CHECK (width > 0),
+                height INTEGER NOT NULL CHECK (height > 0),
+                low_information INTEGER NOT NULL CHECK (low_information IN (0, 1)),
+                computed_at TEXT NOT NULL CHECK (length(computed_at) > 0),
+                PRIMARY KEY (entry_id, source_page_number, profile_version),
+                FOREIGN KEY (entry_id, source_page_number)
+                    REFERENCES download_pages(entry_id, source_page_number)
+                    ON DELETE CASCADE
+            ) STRICT;
+            CREATE INDEX duplicate_page_hashes_gallery_idx
+                ON duplicate_page_hashes(gallery_id, profile_version);
+
+            CREATE TABLE duplicate_scan_runs (
+                run_id TEXT PRIMARY KEY CHECK (length(trim(run_id)) > 0),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                state TEXT NOT NULL CHECK (state IN (
+                    'running', 'completed', 'failed', 'cancelled'
+                )),
+                profile_version INTEGER NOT NULL
+                    REFERENCES duplicate_hash_profiles(profile_version),
+                total_artifacts INTEGER NOT NULL CHECK (total_artifacts >= 0),
+                hashed_artifacts INTEGER NOT NULL
+                    CHECK (hashed_artifacts BETWEEN 0 AND total_artifacts),
+                total_pairs INTEGER NOT NULL CHECK (total_pairs >= 0),
+                compared_pairs INTEGER NOT NULL
+                    CHECK (compared_pairs BETWEEN 0 AND total_pairs),
+                candidates_found INTEGER NOT NULL CHECK (candidates_found >= 0),
+                started_at TEXT NOT NULL CHECK (length(started_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                finished_at TEXT,
+                error_code TEXT,
+                error_message TEXT
+            ) STRICT;
+            CREATE UNIQUE INDEX duplicate_scan_one_running_idx
+                ON duplicate_scan_runs(state) WHERE state = 'running';
+            CREATE INDEX duplicate_scan_recent_idx
+                ON duplicate_scan_runs(started_at DESC, run_id DESC);
+
+            CREATE TABLE duplicate_candidates (
+                candidate_id TEXT PRIMARY KEY CHECK (length(trim(candidate_id)) > 0),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                last_seen_run_id TEXT NOT NULL
+                    REFERENCES duplicate_scan_runs(run_id) ON DELETE CASCADE,
+                profile_version INTEGER NOT NULL
+                    REFERENCES duplicate_hash_profiles(profile_version),
+                parent_gallery_id INTEGER NOT NULL CHECK (parent_gallery_id > 0),
+                parent_entry_id TEXT NOT NULL
+                    REFERENCES download_entries(entry_id) ON DELETE CASCADE,
+                candidate_gallery_id INTEGER NOT NULL CHECK (candidate_gallery_id > 0),
+                candidate_entry_id TEXT NOT NULL
+                    REFERENCES download_entries(entry_id) ON DELETE CASCADE,
+                relation TEXT NOT NULL CHECK (relation IN (
+                    'exact', 'contains', 'partial', 'translation_visual'
+                )),
+                confidence REAL NOT NULL CHECK (confidence BETWEEN 0.0 AND 1.0),
+                matched_pages INTEGER NOT NULL CHECK (matched_pages > 0),
+                parent_coverage REAL NOT NULL CHECK (parent_coverage BETWEEN 0.0 AND 1.0),
+                candidate_coverage REAL NOT NULL CHECK (candidate_coverage BETWEEN 0.0 AND 1.0),
+                resolved INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0, 1)),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                CHECK (parent_gallery_id < candidate_gallery_id),
+                UNIQUE (profile_version, parent_gallery_id, candidate_gallery_id)
+            ) STRICT;
+            CREATE INDEX duplicate_candidates_run_idx
+                ON duplicate_candidates(last_seen_run_id, resolved, confidence DESC);
+
+            CREATE TABLE duplicate_evidence (
+                evidence_id TEXT PRIMARY KEY CHECK (length(trim(evidence_id)) > 0),
+                candidate_id TEXT NOT NULL
+                    REFERENCES duplicate_candidates(candidate_id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK (kind IN (
+                    'exact_sha256', 'visual_hash', 'sequence_alignment',
+                    'e_hentai_relation'
+                )),
+                confidence REAL NOT NULL CHECK (confidence BETWEEN 0.0 AND 1.0),
+                matched_pages INTEGER NOT NULL CHECK (matched_pages >= 0),
+                description TEXT NOT NULL CHECK (length(trim(description)) > 0)
+            ) STRICT;
+            CREATE INDEX duplicate_evidence_candidate_idx
+                ON duplicate_evidence(candidate_id, kind);
+
+            CREATE TABLE duplicate_page_pairs (
+                candidate_id TEXT NOT NULL
+                    REFERENCES duplicate_candidates(candidate_id) ON DELETE CASCADE,
+                parent_source_page INTEGER NOT NULL CHECK (parent_source_page > 0),
+                candidate_source_page INTEGER NOT NULL CHECK (candidate_source_page > 0),
+                exact_sha256 INTEGER NOT NULL CHECK (exact_sha256 IN (0, 1)),
+                d_hash_distance INTEGER NOT NULL CHECK (d_hash_distance >= 0),
+                p_hash_distance INTEGER NOT NULL CHECK (p_hash_distance >= 0),
+                detail_hash_distance INTEGER NOT NULL CHECK (detail_hash_distance >= 0),
+                edge_similarity REAL NOT NULL CHECK (edge_similarity BETWEEN 0.0 AND 1.0),
+                visual_similarity REAL NOT NULL CHECK (visual_similarity BETWEEN 0.0 AND 1.0),
+                low_information INTEGER NOT NULL CHECK (low_information IN (0, 1)),
+                PRIMARY KEY (
+                    candidate_id, parent_source_page, candidate_source_page
+                )
+            ) STRICT;
+
+            CREATE TABLE duplicate_hidden_galleries (
+                gallery_id INTEGER PRIMARY KEY CHECK (gallery_id > 0),
+                decision_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0)
+            ) STRICT;
+
+            CREATE TABLE duplicate_series_groups (
+                series_group_id TEXT PRIMARY KEY CHECK (length(trim(series_group_id)) > 0),
+                name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0)
+            ) STRICT;
+            CREATE TABLE duplicate_series_members (
+                series_group_id TEXT NOT NULL
+                    REFERENCES duplicate_series_groups(series_group_id) ON DELETE CASCADE,
+                gallery_id INTEGER NOT NULL CHECK (gallery_id > 0),
+                entry_id TEXT NOT NULL
+                    REFERENCES download_entries(entry_id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                PRIMARY KEY (series_group_id, gallery_id)
+            ) STRICT;
+            CREATE INDEX duplicate_series_gallery_idx
+                ON duplicate_series_members(gallery_id);
+
+            CREATE TABLE duplicate_pair_exclusions (
+                parent_gallery_id INTEGER NOT NULL CHECK (parent_gallery_id > 0),
+                candidate_gallery_id INTEGER NOT NULL CHECK (candidate_gallery_id > 0),
+                decision_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                PRIMARY KEY (parent_gallery_id, candidate_gallery_id),
+                CHECK (parent_gallery_id < candidate_gallery_id)
+            ) STRICT;
+
+            CREATE TABLE duplicate_decisions (
+                decision_id TEXT PRIMARY KEY CHECK (length(trim(decision_id)) > 0),
+                candidate_id TEXT NOT NULL
+                    REFERENCES duplicate_candidates(candidate_id),
+                candidate_revision INTEGER NOT NULL CHECK (candidate_revision > 0),
+                action TEXT NOT NULL CHECK (action IN (
+                    'hide_parent', 'hide_candidate', 'series_link',
+                    'series_unlink', 'exclude_pair'
+                )),
+                target_gallery_id INTEGER,
+                series_group_id TEXT,
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0)
+            ) STRICT;
+            CREATE INDEX duplicate_decisions_candidate_idx
+                ON duplicate_decisions(candidate_id, created_at ASC, decision_id ASC);
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -963,5 +1151,69 @@ mod tests {
                 actual
             } if actual == "renamed"
         ));
+    }
+
+    #[test]
+    fn duplicate_evidence_migration_is_additive_from_v11() {
+        let mut connection = Connection::open_in_memory().expect("open v11 migration database");
+        connection
+            .execute_batch(
+                r#"
+                    PRAGMA foreign_keys = ON;
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT (
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    ) STRICT;
+                "#,
+            )
+            .unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 11)
+        {
+            connection.execute_batch(migration.sql).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                    params![migration.version, migration.name],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                r#"
+                    INSERT INTO favorites (
+                        namespace, value, revision, created_at, updated_at
+                    ) VALUES ('artist', 'preserved', 0, 'before-v12', 'before-v12')
+                "#,
+                [],
+            )
+            .unwrap();
+
+        let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
+        assert_eq!(report.applied_versions, vec![12]);
+        assert_eq!(report.current_version, 12);
+        let favorite: String = connection
+            .query_row(
+                "SELECT value FROM favorites WHERE namespace = 'artist'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(favorite, "preserved");
+        let profile: (i64, i64, i64) = connection
+            .query_row(
+                r#"
+                    SELECT profile_version, d_hash_bits, p_hash_bits
+                    FROM duplicate_hash_profiles WHERE profile_version = 1
+                "#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(profile, (1, 1_024, 64));
     }
 }

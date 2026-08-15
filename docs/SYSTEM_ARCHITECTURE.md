@@ -174,9 +174,9 @@ type JobEvent = {
 - favorite 값은 사람이 읽는 정규화 공백으로 저장하고 source token을 만들 때 공백을 underscore로 바꾼다. `artist`, `group`, `series`, `character`, `tag` prefix는 명시적 Nozomi namespace로 직렬화되며 unknown prefix만 residual text filter로 남긴다.
 - run, 진행률, 후보 metadata snapshot과 gallery 제외는 SQLite에 기록한다. schema v11 후보에는 series/characters JSON도 들어가며 이전 v10 후보는 `[]` 기본값으로 보존한다. `auto-find:changed`는 시작·작가별 진행·최종 상태에서 보내는 bounded UI 갱신 신호일 뿐이며, 앱 재시작이나 event 유실 뒤에는 `auto_find_snapshot`으로 최신 run과 후보를 복원한다.
 - cancel token과 DB run state를 함께 확인해 취소 뒤 늦은 page를 저장하지 않는다. 정상 앱 종료는 active run을 `cancelled/AUTO_FIND_APP_EXIT`, 비정상 종료 뒤 startup recovery는 남은 run을 `failed/AUTO_FIND_INTERRUPTED`로 종결하고 부분 후보를 보존한다.
-- 후보 insert와 snapshot은 모든 download entry와 명시적 Auto Find exclusion을 제외한다. Phase 5의 숨김·중복 decision table이 생기기 전에는 해당 판정을 추측하지 않는다.
+- 후보 insert와 snapshot은 모든 download entry, 명시적 Auto Find exclusion, 작품 숨김, resolved duplicate decision과 pair 제외를 제외한다. 이 판정은 frontend flag가 아니라 schema v12의 SQLite record를 조회한다.
 - 전체/작가별 묶음, 결과 문자열 검색과 언어 filter는 이미 저장된 후보에 대한 frontend local projection이다. 이 조작은 source request를 만들지 않는다. 후보 일괄 다운로드는 기존 idempotent download queue use case를 재사용한다.
-- 전체 기간 조회는 source가 보고한 page를 순회하되 안전 상한은 작가당 250 page, page size는 200이다. 상한을 넘는 초대형 작가 결과와 Phase 5 decision 연동은 명시된 현재 제한이다.
+- 전체 기간 조회는 source가 보고한 page를 순회하되 안전 상한은 작가당 250 page, page size는 200이다. 상한을 넘는 초대형 작가 결과는 명시된 현재 제한이다.
 
 ## Download artifact pipeline
 
@@ -190,12 +190,14 @@ type JobEvent = {
 
 ## 해시와 중복
 
-- `HashProfile`에 알고리즘, 크기, 전처리, threshold, 버전을 기록한다.
-- exact SHA-256과 perceptual evidence를 분리한다.
-- 작품 후보 생성은 보수적으로 하고 다운로드 후 강한 근거로 보강한다.
-- 중복 판정은 boolean 하나가 아니라 evidence 목록이다.
-- 사용자의 숨김, 연작, 오탐 결정은 append-only decision history로 남긴다.
-- decision 적용은 파일, job, 해시와 후보 index를 한 use case에서 정리한다.
+- `HashProfile`에 알고리즘, 크기, 전처리, threshold, 버전을 기록한다. 현재 profile 1/algorithm 1은 64-bit coarse dHash·pHash, 1024-bit detail dHash, luma 분산·non-uniform·edge gate를 사용한다.
+- `DuplicateSupervisor`는 프로세스에 하나만 있고 검증 완료 local artifact만 읽는다. gallery별 최신 artifact를 선택하고 page SHA가 같은 profile cache와 일치할 때만 hash feature를 재사용한다.
+- 제목·작가·그룹·page count metadata는 candidate worklist 우선순위를 정한다. recall을 metadata에 의존시키지 않도록 zero-affinity pair도 전수 fallback으로 비교한다.
+- 최종 page evidence는 exact SHA와 perceptual match를 구분하고, 단조 1:1 gap-tolerant alignment로 포함·부분·번역·exact 관계를 판정한다. blank/저정보 page, 작은 장면 변화, 일부 공통 panel은 강한 후보를 만들지 않는다.
+- scan·candidate·evidence·page pair·decision·series·숨김·pair 제외는 SQLite canonical state다. `duplicate:changed`는 진행 신호이고 UI는 snapshot/review command로 복원한다.
+- 숨김, 양쪽 연작 연결/단일 member 해제, 오탐 pair 제외는 candidate revision CAS transaction과 append-only history로 적용한다. 자동 판정은 파일을 이동하거나 삭제하지 않는다.
+- Review thumbnail은 기존 전역 coordinator의 `ArtifactPage(entryId, sourcePage)`를 사용한다. local root containment, byte length, SHA-256과 WebP decode를 재검증한 뒤 bounded preview만 WebView로 전달한다.
+- E-Hentai relation은 optional port다. production 기본은 명시적 session이 없어 disabled provider이고, session/cookie를 DB·manifest·로그에 남기지 않는다.
 
 ## 삭제와 복구
 

@@ -15,14 +15,15 @@ use std::{
 };
 
 use application::{
-    ApplicationService, ArtifactStore, AutoFindSupervisor, AutomationRepository,
-    DownloadPipelineRepository, DownloadSourcePort, DownloadSupervisor, SearchRepository,
-    StateRepository,
+    ApplicationService, ArtifactRepository, ArtifactStore, AutoFindSupervisor,
+    AutomationRepository, DisabledDuplicateRelationProvider, DownloadPipelineRepository,
+    DownloadSourcePort, DownloadSupervisor, DuplicateRepository, DuplicateSupervisor,
+    SearchRepository, StateRepository,
 };
-use domain::{AutoFindRun, DownloadJobProjection};
+use domain::{AutoFindRun, DownloadJobProjection, DuplicateScanRun};
 use infrastructure::{
-    FilesystemArtifactStore, HitomiLiveAdapter, HitomiLiveConfig, SqliteRepository,
-    WindowsFolderPicker,
+    CompositeThumbnailResolver, FilesystemArtifactStore, HitomiLiveAdapter, HitomiLiveConfig,
+    SqliteRepository, WindowsFolderPicker,
 };
 use interface::AppState;
 use tauri::{
@@ -123,12 +124,24 @@ pub fn run() -> tauri::Result<()> {
                         }
                     }
                 })?;
+            let artifact_store: Arc<dyn ArtifactStore> =
+                Arc::new(FilesystemArtifactStore::new());
             let thumbnail_config = ThumbnailCoordinatorConfig {
                 max_concurrency: settings.concurrent_image_requests as usize,
                 request_start_interval: Duration::from_millis(settings.request_start_interval_ms),
                 ..ThumbnailCoordinatorConfig::default()
             };
-            let thumbnail_resolver: Arc<dyn ThumbnailResolver> = live_source.clone();
+            let remote_thumbnail_resolver: Arc<dyn ThumbnailResolver> = live_source.clone();
+            let artifact_repository: Arc<dyn ArtifactRepository> = repository.clone();
+            let thumbnail_settings: Arc<dyn StateRepository> = repository.clone();
+            let thumbnail_resolver: Arc<dyn ThumbnailResolver> = Arc::new(
+                CompositeThumbnailResolver::new(
+                    remote_thumbnail_resolver,
+                    artifact_repository,
+                    thumbnail_settings,
+                    Arc::clone(&artifact_store),
+                ),
+            );
             let thumbnails = ThumbnailCoordinator::new(thumbnail_resolver, thumbnail_config)?;
             let (thumbnail_completion_tx, thumbnail_completion_rx) =
                 mpsc::channel::<ThumbnailCompletionEventDto>();
@@ -142,10 +155,29 @@ pub fn run() -> tauri::Result<()> {
                         }
                     }
                 })?;
-            let artifact_store: Arc<dyn ArtifactStore> =
-                Arc::new(FilesystemArtifactStore::new());
+            let duplicate_repository: Arc<dyn DuplicateRepository> = repository.clone();
+            let duplicate_settings: Arc<dyn StateRepository> = repository.clone();
+            let (duplicate_event_tx, duplicate_event_rx) = mpsc::channel::<DuplicateScanRun>();
+            let duplicates = DuplicateSupervisor::new(
+                duplicate_repository,
+                duplicate_settings,
+                Arc::clone(&artifact_store),
+                Arc::new(DisabledDuplicateRelationProvider),
+                duplicate_event_tx,
+            );
+            let recovered_duplicate_runs = duplicates.recover_interrupted()?;
+            let duplicate_app = app.handle().clone();
+            thread::Builder::new()
+                .name("atsumi-duplicate-events".into())
+                .spawn(move || {
+                    while let Ok(run) = duplicate_event_rx.recv() {
+                        if let Err(error) = duplicate_app.emit("duplicate:changed", &run) {
+                            tracing::warn!(error = %error, "could not emit duplicate:changed");
+                        }
+                    }
+                })?;
             let download_repository: Arc<dyn DownloadPipelineRepository> = repository.clone();
-            let settings_repository: Arc<dyn StateRepository> = repository;
+            let settings_repository: Arc<dyn StateRepository> = repository.clone();
             let download_source: Arc<dyn DownloadSourcePort> = live_source;
             let (download_event_tx, download_event_rx) =
                 mpsc::channel::<DownloadJobProjection>();
@@ -196,6 +228,7 @@ pub fn run() -> tauri::Result<()> {
                 thumbnail_completion_tx,
                 downloads,
                 auto_find,
+                duplicates,
                 Arc::new(WindowsFolderPicker::new()),
                 artifact_store,
             ));
@@ -209,6 +242,7 @@ pub fn run() -> tauri::Result<()> {
                 app_version = env!("CARGO_PKG_VERSION"),
                 recovered_entries,
                 recovered_auto_find_runs,
+                recovered_duplicate_runs,
                 reconciled_artifacts,
                 reconcile_issues,
                 resumed_jobs,
@@ -231,6 +265,11 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::auto_find_refresh,
             interface::commands::auto_find_cancel,
             interface::commands::auto_find_exclude,
+            interface::commands::duplicate_snapshot,
+            interface::commands::duplicate_scan_start,
+            interface::commands::duplicate_scan_cancel,
+            interface::commands::duplicate_review_get,
+            interface::commands::duplicate_decision_apply,
             interface::commands::download_queue_add,
             interface::commands::download_entries_list,
             interface::commands::download_retry,

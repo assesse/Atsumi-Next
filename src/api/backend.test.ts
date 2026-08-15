@@ -465,3 +465,145 @@ describe("browser backend download contract", () => {
     }
   });
 });
+
+describe("browser backend duplicate review contract", () => {
+  it("persists scan progress, cancellation, deterministic evidence, and revision-CAS decisions", async () => {
+    vi.useFakeTimers();
+    const events: string[] = [];
+    const unsubscribe = await backend.on("duplicate:changed", (run) => events.push(`${run.state}:${run.revision}`));
+    try {
+      const initial = await backend.duplicateSnapshot();
+      expect(initial).toMatchObject({
+        ok: true,
+        data: {
+          profile: { profileVersion: 1, dHashBits: 1024, pHashBits: 64 },
+          candidates: [],
+        },
+      });
+
+      const started = await backend.duplicateScanStart();
+      expect(started).toMatchObject({ ok: true, data: { state: "running", totalArtifacts: 2, totalPairs: 1 } });
+      await vi.advanceTimersByTimeAsync(45);
+      expect(await backend.duplicateSnapshot()).toMatchObject({
+        ok: true,
+        data: { run: { state: "running", hashedArtifacts: 1, comparedPairs: 0 } },
+      });
+      const cancelled = await backend.duplicateScanCancel();
+      expect(cancelled).toMatchObject({ ok: true, data: { state: "cancelled" } });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await backend.duplicateSnapshot()).toMatchObject({
+        ok: true,
+        data: { run: { state: "cancelled" }, candidates: [] },
+      });
+
+      await backend.duplicateScanStart();
+      await vi.advanceTimersByTimeAsync(100);
+      const complete = await backend.duplicateSnapshot();
+      expect(complete).toMatchObject({
+        ok: true,
+        data: {
+          run: { state: "completed", hashedArtifacts: 2, comparedPairs: 1, candidatesFound: 1 },
+          candidates: [{
+            candidateId: "browser-duplicate-archive-tram",
+            relation: "contains",
+            confidence: 0.94,
+          }],
+        },
+      });
+      expect(events).toEqual(expect.arrayContaining(["cancelled:2", "completed:2"]));
+
+      const reviewResult = await backend.duplicateReviewGet("browser-duplicate-archive-tram");
+      if (!reviewResult.ok) throw new Error(reviewResult.error.message);
+      expect(reviewResult.data).toMatchObject({
+        evidence: expect.arrayContaining([
+          expect.objectContaining({ kind: "exact_sha256" }),
+          expect.objectContaining({ kind: "visual_hash" }),
+          expect.objectContaining({ kind: "sequence_alignment" }),
+        ]),
+        pagePairs: [
+          expect.objectContaining({
+            parentSourcePage: 1,
+            candidateSourcePage: 3,
+            exactSha256: true,
+            detailHashDistance: 0,
+            edgeSimilarity: 1,
+          }),
+          expect.any(Object),
+          expect.any(Object),
+        ],
+      });
+
+      const stale = await backend.duplicateDecisionApply({
+        candidateId: reviewResult.data.candidate.candidateId,
+        expectedRevision: 99,
+        action: "hide_parent",
+      });
+      expect(stale).toMatchObject({
+        ok: false,
+        error: {
+          code: "REVISION_CONFLICT",
+          details: { resource: "duplicateCandidate", expectedRevision: 99, actualRevision: 0 },
+        },
+      });
+
+      const linked = await backend.duplicateDecisionApply({
+        candidateId: reviewResult.data.candidate.candidateId,
+        expectedRevision: 0,
+        action: "series_link",
+        seriesName: "Rain sequence",
+      });
+      if (!linked.ok) throw new Error(linked.error.message);
+      expect(linked.data).toMatchObject({
+        candidate: { revision: 1 },
+        seriesGroups: [{ name: "Rain sequence", members: [{ galleryId: galleryId(4051038) }, { galleryId: galleryId(4050754) }] }],
+        decisions: [{ action: "series_link", candidateRevision: 1 }],
+      });
+      const groupId = linked.data.seriesGroups[0]!.seriesGroupId;
+
+      const unlinked = await backend.duplicateDecisionApply({
+        candidateId: linked.data.candidate.candidateId,
+        expectedRevision: 1,
+        action: "series_unlink",
+        targetGalleryId: galleryId(4051038),
+        seriesGroupId: groupId,
+      });
+      if (!unlinked.ok) throw new Error(unlinked.error.message);
+      expect(unlinked.data.seriesGroups[0]?.members.map((member) => member.galleryId)).toEqual([galleryId(4050754)]);
+
+      const excluded = await backend.duplicateDecisionApply({
+        candidateId: unlinked.data.candidate.candidateId,
+        expectedRevision: 2,
+        action: "exclude_pair",
+      });
+      if (!excluded.ok) throw new Error(excluded.error.message);
+      expect(excluded.data.decisions.at(-1)).toMatchObject({ action: "exclude_pair", candidateRevision: 3 });
+      expect(await backend.duplicateSnapshot()).toMatchObject({ ok: true, data: { candidates: [] } });
+
+      const hiddenCandidate = await backend.duplicateDecisionApply({
+        candidateId: excluded.data.candidate.candidateId,
+        expectedRevision: 3,
+        action: "hide_candidate",
+      });
+      if (!hiddenCandidate.ok) throw new Error(hiddenCandidate.error.message);
+      const hiddenParent = await backend.duplicateDecisionApply({
+        candidateId: hiddenCandidate.data.candidate.candidateId,
+        expectedRevision: 4,
+        action: "hide_parent",
+      });
+      expect(hiddenParent).toMatchObject({ ok: true, data: { candidate: { revision: 5 } } });
+
+      await backend.favoriteSet({ namespace: "artist", value: "serein" }, true);
+      await backend.autoFindRefresh();
+      await vi.advanceTimersByTimeAsync(100);
+      const autoFind = await backend.autoFindSnapshot();
+      if (!autoFind.ok) throw new Error(autoFind.error.message);
+      expect(autoFind.data.candidates.some((candidate) =>
+        candidate.id === galleryId(4051038) || candidate.id === galleryId(4050754),
+      )).toBe(false);
+    } finally {
+      await backend.favoriteSet({ namespace: "artist", value: "serein" }, false);
+      unsubscribe();
+      vi.useRealTimers();
+    }
+  });
+});

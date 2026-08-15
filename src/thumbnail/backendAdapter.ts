@@ -28,9 +28,11 @@ type PendingResolution = {
 
 const THUMBNAIL_COMPLETION_TIMEOUT_MS = 30_000;
 
-const backendKey = (key: ThumbnailKey): BackendThumbnailKey => key.kind === "gallery-cover"
-  ? { kind: "galleryCover", galleryId: key.galleryId }
-  : { kind: "galleryPage", galleryId: key.galleryId, sourcePage: key.page };
+const backendKey = (key: ThumbnailKey): BackendThumbnailKey => {
+  if (key.kind === "gallery-cover") return { kind: "galleryCover", galleryId: key.galleryId };
+  if (key.kind === "source-page") return { kind: "galleryPage", galleryId: key.galleryId, sourcePage: key.page };
+  return { kind: "artifactPage", entryId: key.entryId, sourcePage: key.page };
+};
 
 const requestDto = (request: ThumbnailRequest): ThumbnailRequestDto => ({
   key: backendKey(request.key),
@@ -38,15 +40,24 @@ const requestDto = (request: ThumbnailRequest): ThumbnailRequestDto => ({
   priority: request.priority,
 });
 
-const keysEqual = (left: BackendThumbnailKey, right: BackendThumbnailKey): boolean =>
-  left.kind === right.kind
-  && left.galleryId === right.galleryId
-  && (left.kind !== "galleryPage"
-    || (right.kind === "galleryPage" && left.sourcePage === right.sourcePage));
+const keysEqual = (left: BackendThumbnailKey, right: BackendThumbnailKey): boolean => {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "galleryCover") return right.kind === "galleryCover" && left.galleryId === right.galleryId;
+  if (left.kind === "galleryPage") {
+    return right.kind === "galleryPage"
+      && left.galleryId === right.galleryId
+      && left.sourcePage === right.sourcePage;
+  }
+  return right.kind === "artifactPage"
+    && left.entryId === right.entryId
+    && left.sourcePage === right.sourcePage;
+};
 
-const backendKeyIdentity = (key: BackendThumbnailKey): string => key.kind === "galleryCover"
-  ? `gallery-cover:${key.galleryId}`
-  : `source-page:${key.galleryId}:${key.sourcePage}`;
+const backendKeyIdentity = (key: BackendThumbnailKey): string => {
+  if (key.kind === "galleryCover") return `gallery-cover:${key.galleryId}`;
+  if (key.kind === "galleryPage") return `source-page:${key.galleryId}:${key.sourcePage}`;
+  return `artifact-page:${key.entryId}:${key.sourcePage}`;
+};
 
 const priorityRank: Record<ThumbnailRequest["priority"], number> = {
   prefetch: 0,

@@ -1,6 +1,6 @@
 # API Contract V2
 
-Phase 4의 즐겨찾기·검색 이력·Auto Find까지 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다. 아직 구현되지 않은 중복 판정·Classic import command는 후속 계약으로 구분한다.
+Phase 5의 실제 artifact 기반 작품 중복 판정과 Review까지 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다. 내부 페이지 중복과 Classic import command는 후속 계약으로 구분한다.
 
 ## 공통 규칙
 
@@ -43,6 +43,11 @@ type ApiError = {
 | `auto_find_refresh` | 없음 | `AutoFindRun` | 실행 중인 run은 재사용, 완료 뒤에는 새 run |
 | `auto_find_cancel` | 없음 | `AutoFindRun` | 실행 중 run에 한 번 적용 |
 | `auto_find_exclude` | `{ galleryIds, reason }` | `AutoFindExclusionResult` | gallery ID 기준 upsert |
+| `duplicate_snapshot` | 없음 | `DuplicateSnapshot` | 예 |
+| `duplicate_scan_start` | 없음 | `DuplicateScanRun` | 실행 중인 run 재사용 |
+| `duplicate_scan_cancel` | 없음 | `DuplicateScanRun` | 실행 중 run에 한 번 적용 |
+| `duplicate_review_get` | `{ candidateId }` | `DuplicateReview` | 예 |
+| `duplicate_decision_apply` | `{ request: DuplicateDecisionRequest }` | `DuplicateReview` | candidate revision CAS |
 | `download_queue_add` | `{ galleries: GalleryId[], requestId }` | `DownloadEntry[]` | requestId + active gallery 기반 |
 | `download_entries_list` | `DownloadListRequest` | `DownloadPage` | 예 |
 | `download_retry` | `{ entryIds }` | `JobRef[]` | 현재 active job 재사용 |
@@ -66,6 +71,7 @@ type ApiError = {
 | `thumbnail:ready` | requestId, gallery/page key, delivery 또는 typed failure |
 | `settings:changed` | 다른 window에서 바뀐 설정 snapshot |
 | `auto-find:changed` | Auto Find run state, progress, candidate count와 revision |
+| `duplicate:changed` | 작품 중복 scan state, hash/pair progress, candidate count와 revision |
 
 이벤트가 유실돼도 `list/get` command로 현재 상태를 다시 구성할 수 있어야 한다.
 
@@ -183,7 +189,7 @@ type AutoFindExclusionResult = {
 - 후보는 SQLite에 run별로 저장한다. 어떤 상태든 `download_entries`에 존재하는 gallery와 `auto_find_exclusions`에 존재하는 gallery는 추가·조회에서 제외한다. 명시적 제외는 최대 200개 양의 ID와 1~500 bytes 이유를 받는다.
 - 진행 중 앱이 닫히면 run은 `cancelled/AUTO_FIND_APP_EXIT`, startup에서 남은 `running` run은 `failed/AUTO_FIND_INTERRUPTED`로 바꾼다. source 실패는 `failed/AUTO_FIND_SOURCE_FAILED`로 저장하며 사용자는 명시적 갱신을 다시 실행해 retry한다.
 - `auto-find:changed`는 run projection 갱신 신호다. 후보마다 event를 만들지 않고 시작, 작가별 진행, 최종 상태에서만 보내며 UI는 event 뒤 snapshot을 다시 읽는다. 이벤트가 유실되거나 앱이 재시작되면 `auto_find_snapshot`으로 최신 run과 후보를 복원한다. 화면의 전체/작가 그룹, 결과 문자열 검색과 언어 filter는 영속 후보에 대한 local projection이며 키 입력마다 원격 요청하지 않는다.
-- 현재 구현은 다운로드 이력과 Auto Find 명시적 제외를 반영한다. Phase 5에서 생성되는 작품 숨김·중복 판정·pair 제외 기록은 해당 decision schema가 추가될 때 후보 조건에 결합한다.
+- 현재 구현은 다운로드 이력, Auto Find 명시적 제외, 작품 숨김과 resolved duplicate decision·pair 제외 기록을 후보 조건에 함께 반영한다.
 
 ## DownloadEntry 상태
 
@@ -238,7 +244,8 @@ type DownloadState =
 ```ts
 type ThumbnailKey =
   | { kind: "galleryCover"; galleryId: GalleryId }
-  | { kind: "galleryPage"; galleryId: GalleryId; sourcePage: number };
+  | { kind: "galleryPage"; galleryId: GalleryId; sourcePage: number }
+  | { kind: "artifactPage"; entryId: string; sourcePage: number };
 
 type ThumbnailRequest = {
   key: ThumbnailKey;
@@ -247,7 +254,7 @@ type ThumbnailRequest = {
 };
 ```
 
-- `sourcePage`는 UI index가 아니라 1부터 시작하는 원본 page number다.
+- `sourcePage`는 UI index가 아니라 1부터 시작하는 원본 page number다. `artifactPage`는 작품 Review에서 검증된 local artifact만 읽으며 raw 경로를 반환하지 않는다.
 - 동일 key의 동시 요청은 프로세스 전역에서 하나로 합친다. 마지막 구독자가 사라지면 queued/running resolver에 cancellation을 전달한다.
 - 완료는 `thumbnail:ready` event로 전달한다. 메모리 cache hit에서는 event가 command 응답보다 먼저 올 수 있으므로 frontend transport는 requestId별 미매칭 event를 잠시 보관한다.
 - WebView decode 실패는 `thumbnail_invalidate`로 해당 key의 success/negative cache를 비운 뒤 다시 해석할 수 있다.
@@ -262,12 +269,16 @@ type ThumbnailRequest = {
 - quarantine은 `pending_quarantine -> quarantined`, undo는 `pending_restore -> restored` saga다. filesystem atomic move와 SQLite commit 사이에 종료되면 다음 reconcile이 원본/격리 경로 존재를 비교해 마무리한다.
 - 둘 다 존재하거나 둘 다 없으면 자동 삭제·덮어쓰기를 하지 않고 `QUARANTINE_CONFLICT`를 반환한다. 자동 purge command는 없다.
 
+## 작품 중복 계약
+
+- `HashProfile` 1은 algorithm 1, detail dHash 1024 bits, pHash 64 bits, visual threshold 0.80과 low-information threshold를 고정한다. 기존 profile 결과를 새 버전으로 재해석하지 않는다.
+- scan은 `completed` artifact의 present·verified·non-excluded page만 읽고, gallery마다 완료 시각/revision이 가장 최신인 artifact 하나를 결정론적으로 선택한다. title/artist/group/page count metadata로 작업 순서를 정하되 전수 pair fallback을 유지한다.
+- 후보는 `exact | contains | partial | translation_visual`과 confidence, coverage, typed evidence 및 원본 source page pair를 가진다. one-to-one monotonic alignment이므로 한 page를 여러 상대 page에 재사용하지 않는다.
+- `duplicate_decision_apply` action은 `hide_parent | hide_candidate | series_link | series_unlink | exclude_pair`다. hide와 pair 제외는 후보를 resolve하고 Auto Find에서도 제외한다. series link는 양쪽 gallery를 같은 group에 원자적으로 연결하되 후보를 자동 resolve하지 않는다.
+- scan event는 신호일 뿐이며 후보·Review·판정 이력의 canonical source는 SQLite다. UI는 event 유실·재시작·revision 충돌 때 snapshot/get을 다시 읽는다.
+- Review page preview는 `{ kind: "artifactPage", entryId, sourcePage }` key로 같은 전역 thumbnail coordinator를 사용한다. backend는 root 내부의 검증된 local WebP만 읽고 1024px 이하 preview로 전달한다.
+- E-Hentai relation provider는 명시적으로 제공된 적법 session이 없으면 비활성이다. session·cookie를 SQLite, manifest, 로그에 저장하지 않는다.
+
 ## 후속 계약
 
-Phase 5 이전에 다음을 별도 확정한다.
-
-- duplicate candidate와 evidence
-- duplicate decision plan/apply
-- E-Hentai relation
-- full scan progress와 cancellation
-- internal scene block과 page selection plan/apply
+Phase 6~7에서 `internal scene block + page selection/removal plan/apply/undo`와 Classic import dry-run/apply/rollback command를 추가한다.

@@ -9,11 +9,12 @@ use crate::{
     application::{
         ApplicationError, ApplicationService, ArtifactStore, AutoFindSupervisor,
         DownloadPipelineError, DownloadPipelineErrorCode, DownloadRootPicker, DownloadSupervisor,
-        ReconcileReport,
+        DuplicateSupervisor, ReconcileReport,
     },
     domain::{
         AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot, DownloadChangedEvent,
-        DownloadEntry, DownloadListRequest, DownloadPage, FavoriteKey, FavoriteMutationResult,
+        DownloadEntry, DownloadListRequest, DownloadPage, DuplicateDecisionRequest,
+        DuplicateReview, DuplicateScanRun, DuplicateSnapshot, FavoriteKey, FavoriteMutationResult,
         FavoriteRecord, GalleryDetail, GalleryPage, JobRef, SearchHistoryEntry, SearchRequest,
         SearchSubmission, SettingsPatch, SettingsSnapshot, WindowPlacement,
         WindowPlacementSnapshot,
@@ -33,17 +34,22 @@ pub struct AppState {
     thumbnail_completions: Sender<ThumbnailCompletionEventDto>,
     downloads: DownloadSupervisor,
     auto_find: AutoFindSupervisor,
+    duplicates: DuplicateSupervisor,
     download_root_picker: Arc<dyn DownloadRootPicker>,
     artifact_store: Arc<dyn ArtifactStore>,
 }
 
 impl AppState {
+    // This is the single composition root for application services and ports.
+    // Keeping dependencies explicit here makes production/test wiring auditable.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         service: ApplicationService,
         thumbnails: ThumbnailCoordinator,
         thumbnail_completions: Sender<ThumbnailCompletionEventDto>,
         downloads: DownloadSupervisor,
         auto_find: AutoFindSupervisor,
+        duplicates: DuplicateSupervisor,
         download_root_picker: Arc<dyn DownloadRootPicker>,
         artifact_store: Arc<dyn ArtifactStore>,
     ) -> Self {
@@ -53,6 +59,7 @@ impl AppState {
             thumbnail_completions,
             downloads,
             auto_find,
+            duplicates,
             download_root_picker,
             artifact_store,
         }
@@ -111,6 +118,56 @@ pub async fn auto_find_exclude(
     reason: String,
 ) -> Result<ApiResult<AutoFindExclusionResult>, ApiError> {
     Ok(state.service.auto_find_exclude(gallery_ids, reason).into())
+}
+
+#[tauri::command]
+pub async fn duplicate_snapshot(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<DuplicateSnapshot>, ApiError> {
+    let duplicates = state.duplicates.clone();
+    Ok(run_application_blocking("duplicate_snapshot", move || duplicates.snapshot()).await)
+}
+
+#[tauri::command]
+pub async fn duplicate_scan_start(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<DuplicateScanRun>, ApiError> {
+    let duplicates = state.duplicates.clone();
+    Ok(run_application_blocking("duplicate_scan_start", move || duplicates.start()).await)
+}
+
+#[tauri::command]
+pub async fn duplicate_scan_cancel(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<DuplicateScanRun>, ApiError> {
+    let duplicates = state.duplicates.clone();
+    Ok(run_application_blocking("duplicate_scan_cancel", move || duplicates.cancel()).await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn duplicate_review_get(
+    state: State<'_, AppState>,
+    candidate_id: String,
+) -> Result<ApiResult<DuplicateReview>, ApiError> {
+    let duplicates = state.duplicates.clone();
+    Ok(run_application_blocking("duplicate_review_get", move || {
+        duplicates.review_get(&candidate_id)
+    })
+    .await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn duplicate_decision_apply(
+    state: State<'_, AppState>,
+    request: DuplicateDecisionRequest,
+) -> Result<ApiResult<DuplicateReview>, ApiError> {
+    let duplicates = state.duplicates.clone();
+    Ok(
+        run_application_blocking("duplicate_decision_apply", move || {
+            duplicates.decision_apply(request)
+        })
+        .await,
+    )
 }
 
 #[tauri::command]
@@ -391,7 +448,9 @@ pub async fn app_quit(
 ) -> Result<ApiResult<()>, ApiError> {
     let downloads = state.downloads.clone();
     let auto_find = state.auto_find.clone();
+    let duplicates = state.duplicates.clone();
     if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
+        duplicates.shutdown_and_wait();
         auto_find.shutdown_and_wait();
         downloads.shutdown_and_wait();
     })

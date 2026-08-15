@@ -102,18 +102,13 @@ Milestone D의 즐겨찾기·검색 이력·Auto Find workflow를 실제 SQLite�
 현재 경계:
 
 - source pagination은 전체 기간을 순회하되 한 작가당 250 page 안전 상한을 둔다.
-- 작품 숨김·중복 판정·pair 제외는 Phase 5의 실제 decision schema가 만들어진 뒤 Auto Find 후보 조건에 결합한다.
+- 작품 숨김·resolved duplicate decision·pair 제외는 schema v12의 canonical record를 Auto Find 후보 조건에 결합한다.
 - Classic 즐겨찾기·검색 기록 import와 충돌 보고는 Phase 7에 속한다.
 - 일반 cache/data cleanup UI와 전체 운영 polish는 Phase 7 import 이후 최종 UI·운영·보안 마무리(Milestone H)에서 검증한다.
 
 ## Phase 5: 작품 중복
 
-- candidate evidence model
-- E-Hentai relation adapter
-- staged image containment scan
-- Review workspace
-- 숨김, 연작, 오탐 decision transaction
-- golden positive/negative suite
+완료했다. 검증된 최신 local artifact만 대상으로 versioned SHA/perceptual/detail/edge evidence를 만들고, metadata-prioritized exhaustive pair worklist와 monotonic one-to-one gap alignment로 exact·contains·partial·translation 후보를 저장한다. scan 진행률·취소·앱 종료/비정상 종료 복구, candidate revision CAS와 append-only 판정 이력, 숨김·양쪽 연작 연결/해제·pair 제외를 SQLite transaction으로 처리한다. 대형 Review는 전역 thumbnail coordinator의 root-bound `artifactPage`로 정확한 원본 page pair와 근거를 표시한다. blank/B&W, 실제 장면 변화, 일부 공통 panel 오판 금지와 재압축·해상도/번역형 positive를 회귀 테스트로 고정했다. 자동 파일 삭제는 없다. E-Hentai relation은 port와 evidence type만 두고 명시적 session이 없는 production에서는 비활성화한다.
 
 ## Phase 6: 내부 페이지 중복
 
@@ -151,4 +146,5 @@ Milestone D의 즐겨찾기·검색 이력·Auto Find workflow를 실제 SQLite�
 6. 완료: 앱 내부 single-instance 계약과 migration 전 SQLite backup/future-schema 거부. repository open은 WAL·busy timeout을 사용하고 job 복구는 single-instance를 획득한 app setup에서만 명시적으로 실행한다.
 7. 완료: 정식 queue runner와 artifact 저장·검증·resume·reconcile, 첫 이미지 열기와 Phase 3 filesystem/SQLite 통합 검증.
 8. 완료: 영속 즐겨찾기·검색 이력, 명시적 작가 갱신, Auto Find 진행·취소·복원과 local grouping/filter/batch queue 연결.
-9. 다음: 실제 artifact evidence를 사용하는 작품 단위 중복 후보·판정·Review와 Auto Find decision 제외 연동.
+9. 완료: 실제 artifact evidence를 사용하는 작품 단위 중복 후보·판정·Review와 Auto Find decision 제외 연동.
+10. 다음: 완료 artifact 내부의 반복 장면 block, synchronized source-page Review, removal plan, page quarantine·undo와 manifest/DB 일관성.

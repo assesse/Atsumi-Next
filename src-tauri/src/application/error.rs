@@ -49,6 +49,10 @@ pub enum ApplicationError {
     },
     #[error("no Auto Find refresh is currently running")]
     AutoFindNotRunning,
+    #[error("no duplicate scan is currently running")]
+    DuplicateScanNotRunning,
+    #[error("duplicate candidate {0:?} was not found")]
+    DuplicateCandidateNotFound(String),
     #[error(transparent)]
     DownloadPipeline(#[from] DownloadPipelineError),
     #[error(transparent)]

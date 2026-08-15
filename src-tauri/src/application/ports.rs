@@ -1,10 +1,12 @@
 use crate::domain::{
     ArtifactBundle, AutoFindCandidateRecord, AutoFindExclusionResult, AutoFindRun,
     AutoFindRunState, AutoFindSnapshot, DownloadEntry, DownloadEntryId, DownloadJobDescriptor,
-    DownloadJobProjection, DownloadListRequest, DownloadPage, FavoriteKey, FavoriteMutationResult,
-    FavoriteRecord, FixtureDownloadJobStep, GalleryDetail, GalleryId, GalleryPage, JobRef,
-    JobState, SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsSnapshot,
-    WindowPlacementSnapshot,
+    DownloadJobProjection, DownloadListRequest, DownloadPage, DuplicateCandidateRecord,
+    DuplicateDecisionApplyOutcome, DuplicateDecisionRequest, DuplicatePageHash, DuplicateReview,
+    DuplicateScanRun, DuplicateScanState, DuplicateSnapshot, ExternalRelationEvidence, FavoriteKey,
+    FavoriteMutationResult, FavoriteRecord, FixtureDownloadJobStep, GalleryDetail, GalleryId,
+    GalleryPage, JobRef, JobState, SearchHistoryEntry, SearchRequest, SearchSubmission,
+    SettingsSnapshot, SourcePageNumber, WindowPlacementSnapshot,
 };
 
 use super::RepositoryError;
@@ -121,6 +123,73 @@ pub trait AutomationRepository: Send + Sync {
         gallery_ids: &[GalleryId],
         reason: &str,
     ) -> Result<AutoFindExclusionResult, RepositoryError>;
+}
+
+pub trait DuplicateRepository: Send + Sync {
+    fn duplicate_artifact_bundles(&self) -> Result<Vec<ArtifactBundle>, RepositoryError>;
+
+    fn duplicate_page_hash_get(
+        &self,
+        entry_id: &str,
+        source_page_number: SourcePageNumber,
+        profile_version: u32,
+        artifact_sha256: &str,
+    ) -> Result<Option<DuplicatePageHash>, RepositoryError>;
+
+    fn duplicate_page_hash_upsert(&self, hash: &DuplicatePageHash) -> Result<(), RepositoryError>;
+
+    fn duplicate_recover_interrupted(&self) -> Result<usize, RepositoryError>;
+
+    fn duplicate_scan_start(
+        &self,
+        profile_version: u32,
+        total_artifacts: u32,
+        total_pairs: u64,
+    ) -> Result<DuplicateScanRun, RepositoryError>;
+
+    fn duplicate_scan_progress(
+        &self,
+        run_id: &str,
+        hashed_artifacts: u32,
+        compared_pairs: u64,
+    ) -> Result<Option<DuplicateScanRun>, RepositoryError>;
+
+    fn duplicate_candidate_replace(
+        &self,
+        record: &DuplicateCandidateRecord,
+    ) -> Result<Option<DuplicateScanRun>, RepositoryError>;
+
+    fn duplicate_scan_finish(
+        &self,
+        run_id: &str,
+        state: DuplicateScanState,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<Option<DuplicateScanRun>, RepositoryError>;
+
+    fn duplicate_scan_is_running(&self, run_id: &str) -> Result<bool, RepositoryError>;
+
+    fn duplicate_snapshot(&self) -> Result<DuplicateSnapshot, RepositoryError>;
+
+    fn duplicate_review_get(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<DuplicateReview>, RepositoryError>;
+
+    fn duplicate_decision_apply(
+        &self,
+        request: &DuplicateDecisionRequest,
+    ) -> Result<DuplicateDecisionApplyOutcome, RepositoryError>;
+}
+
+pub trait DuplicateRelationProvider: Send + Sync {
+    fn enabled(&self) -> bool;
+
+    fn relation(
+        &self,
+        parent_gallery_id: GalleryId,
+        candidate_gallery_id: GalleryId,
+    ) -> Result<Option<ExternalRelationEvidence>, RepositoryError>;
 }
 
 pub trait DownloadRepository: Send + Sync {

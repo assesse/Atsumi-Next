@@ -83,6 +83,32 @@ describe("BackendThumbnailAdapter", () => {
     adapter.dispose();
   });
 
+  it("requests verified review evidence by artifact entry and immutable source page", async () => {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn(() => "blob:https://atsumi.local/artifact-page"),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    const submitted = vi.spyOn(backend, "thumbnailRequest");
+    const adapter = new BackendThumbnailAdapter(backend);
+    const artifactRequest: ThumbnailRequest = {
+      key: { kind: "artifact-page", entryId: "verified-entry-101", page: 11 },
+      consumer: "review",
+      priority: "critical",
+    };
+
+    const asset = await adapter.resolve(artifactRequest);
+
+    expect(asset.kind).toBe("image");
+    expect(submitted).toHaveBeenCalledWith({
+      key: { kind: "artifactPage", entryId: "verified-entry-101", sourcePage: 11 },
+      consumer: "review",
+      priority: "critical",
+    });
+    adapter.release(artifactRequest, asset);
+    adapter.dispose();
+  });
+
   it("replays a priority promotion that happens during the request handshake", async () => {
     let completeToken: ((result: ApiResult<ThumbnailRequestToken>) => void) | undefined;
     let completeListener: ((unlisten: () => void) => void) | undefined;

@@ -165,6 +165,23 @@ impl From<ApplicationError> for ApiError {
                 action: Some(ApiAction::None),
                 details: None,
             },
+            ApplicationError::DuplicateScanNotRunning => Self {
+                code: "DUPLICATE_SCAN_NOT_RUNNING".into(),
+                message: "There is no active duplicate scan to cancel".into(),
+                retryable: false,
+                action: Some(ApiAction::None),
+                details: None,
+            },
+            ApplicationError::DuplicateCandidateNotFound(candidate_id) => Self {
+                code: "DUPLICATE_CANDIDATE_NOT_FOUND".into(),
+                message: "The duplicate candidate no longer exists; reload the review list".into(),
+                retryable: false,
+                action: Some(ApiAction::Review),
+                details: Some(BTreeMap::from([(
+                    "candidateId".into(),
+                    json!(candidate_id),
+                )])),
+            },
             ApplicationError::DownloadPipeline(error) => Self {
                 code: error.code.as_str().into(),
                 message: error.message,

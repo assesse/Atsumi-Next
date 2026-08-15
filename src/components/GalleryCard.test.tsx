@@ -129,6 +129,52 @@ describe("GalleryCard event projection", () => {
     container.remove();
   });
 
+  it("marks duplicate counts and opens Review only from the warning or Downloads context action", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery: Gallery = {
+      ...mockGalleries[0]!,
+      download: { entryId: "entry-completed-duplicate", state: "completed", progress: 100 },
+    };
+
+    await act(async () => root.render(
+      <GalleryCard
+        gallery={gallery}
+        view="downloads"
+        selected={false}
+        selectionContext={false}
+        favoriteMetadata={new Set()}
+        duplicateCandidateCount={2}
+        {...callbacks}
+      />,
+    ));
+    const article = container.querySelector<HTMLElement>("article");
+    const warning = container.querySelector<HTMLButtonElement>(".status-pill.has-duplicate-count");
+    expect(warning).toHaveTextContent("2");
+    expect(warning).toHaveAccessibleName(expect.stringContaining("중복 후보 2개"));
+
+    await act(async () => warning?.click());
+    expect(callbacks.onOpenReview).toHaveBeenCalledWith(gallery.id);
+
+    callbacks.onOpenReview.mockClear();
+    await act(async () => article?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })));
+    expect(callbacks.onOpenReview).toHaveBeenCalledWith(gallery.id);
+
+    callbacks.onOpenReview.mockClear();
+    callbacks.onOpenArtifact.mockClear();
+    await act(async () => {
+      article?.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      article?.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2 }));
+      article?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+    });
+    expect(callbacks.onOpenArtifact).toHaveBeenCalledWith(gallery.id);
+    expect(callbacks.onOpenReview).not.toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("routes an internal metadata click to selection while a selection exists", async () => {
     const container = document.createElement("div");
     document.body.append(container);

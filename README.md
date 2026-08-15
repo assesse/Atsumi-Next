@@ -4,11 +4,13 @@
 
 Atsumi Next는 기존 Atsumi를 보존하면서 새 구조로 재작성하는 독립 프로젝트다.
 
-승인된 UX prototype과 V2 계약을 기준으로 `Phase 3: 첫 수직 기능`과 Phase 4의 영속 즐겨찾기·검색 이력·Auto Find workflow를 구현했다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
+승인된 UX prototype과 V2 계약을 기준으로 Phase 3의 실제 다운로드 흐름, Phase 4의 영속 즐겨찾기·검색 이력·Auto Find, Phase 5의 작품 중복 Review를 구현했다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
 
 다운로드는 SQLite queue에서 자동 시작해 source page 번호별 `.part` 기록, decode, WebP 저장, SHA-256, atomic rename, versioned manifest 검증을 마친 뒤에만 `completed`가 된다. 강제 종료된 작업은 검증된 page checkpoint부터 재개하며, 시작 시와 Downloads의 수동 명령에서 DB·manifest·실제 파일을 재조정한다. 완료 파일은 Windows 기본 뷰어로 열 수 있고, 삭제 대신 download root 내부의 crash-safe quarantine으로 옮긴 뒤 복원할 수 있다. 자동 영구 삭제는 하지 않는다.
 
-즐겨찾기는 작가·그룹·시리즈·캐릭터·태그를 SQLite에 저장하고 카드·상세·Related에서 같은 상태로 표시한다. 시리즈와 캐릭터도 실제 Hitomi namespace 검색으로 연결한다. Auto Find는 사용자가 `즐겨찾기 작가 갱신`을 명시적으로 실행할 때만 실제 source를 조회하고, 실행 진행률·취소·오류와 후보를 영속해 재시작 뒤에도 복원한다. 검색어를 입력하는 동안에는 원격 요청하지 않으며 검색 제출만 이력에 기록한다. 이미 다운로드한 항목과 사용자가 Auto Find에서 제외한 항목은 후보에서 숨긴다. 작품 중복 판정에 따른 숨김·판정 이력 연동은 Phase 5의 실제 decision schema와 함께 완성한다.
+즐겨찾기는 작가·그룹·시리즈·캐릭터·태그를 SQLite에 저장하고 카드·상세·Related에서 같은 상태로 표시한다. 시리즈와 캐릭터도 실제 Hitomi namespace 검색으로 연결한다. Auto Find는 사용자가 `즐겨찾기 작가 갱신`을 명시적으로 실행할 때만 실제 source를 조회하고, 실행 진행률·취소·오류와 후보를 영속해 재시작 뒤에도 복원한다. 검색어를 입력하는 동안에는 원격 요청하지 않으며 검색 제출만 이력에 기록한다. 이미 다운로드했거나 사용자가 제외·숨김·중복 판정한 항목은 후보에서 숨긴다.
+
+작품 중복 검사는 검증 완료된 로컬 artifact만 읽어 exact SHA-256, 64-bit perceptual hash, 1024-bit detail hash, 밝기 분산·edge gate와 단조 1:1 gap-tolerant 정렬을 versioned evidence로 저장한다. 제목·작가·그룹 metadata는 전수 비교 작업의 우선순위를 정하되 후보를 누락시키지 않는다. Review는 실제 source page 번호의 로컬 artifact preview, confidence와 판정 이력을 보여 주며 숨김·연작 연결/해제·pair 제외를 revision CAS transaction으로 적용한다. 자동 판정만으로 파일을 삭제하지 않는다. E-Hentai relation port는 명시적 적법 세션이 없는 기본 production 설정에서 비활성화된다.
 
 ## 실행과 검증
 

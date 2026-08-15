@@ -40,6 +40,8 @@
 | `DOWNLOAD_ENTRY_NOT_FOUND` | 다운로드 항목을 다시 불러오세요 | 아니오 | 목록 새로고침 |
 | `INVALID_DOWNLOAD_STATE` | 현재 상태에서는 요청한 작업을 수행할 수 없습니다 | 아니오 | 최신 상태 검토 |
 | `AUTO_FIND_NOT_RUNNING` | 취소할 Auto Find 갱신이 없습니다 | 아니오 | 최신 snapshot 확인 |
+| `DUPLICATE_SCAN_NOT_RUNNING` | 취소할 작품 중복 검사가 없습니다 | 아니오 | 최신 snapshot 확인 |
+| `DUPLICATE_CANDIDATE_NOT_FOUND` | 중복 후보가 더 이상 존재하지 않습니다 | 아니오 | 후보 목록 다시 로드 |
 | `JOB_INTERRUPTED` | 작업이 중단되었습니다 | 예 | 이어받기 |
 | `THUMBNAIL_REQUEST_INVALID` | 미리보기 요청 정보가 올바르지 않습니다 | 아니오 | 요청 key 확인 |
 | `THUMBNAIL_COORDINATOR_CLOSED` | 미리보기 작업기가 종료되었습니다 | 예 | 앱 상태 확인 후 재시도 |
@@ -47,7 +49,7 @@
 | `INTEGRITY_INCOMPLETE` | 일부 페이지가 없습니다 | 예 | 누락 페이지 plan |
 | `DUPLICATE_EXACT` | 동일한 이미지가 발견되었습니다 | 아니오 | Review |
 | `DUPLICATE_VISUAL` | 유사한 작품을 확인해야 합니다 | 아니오 | Review |
-| `REVIEW_DECISION_CONFLICT` | 판정 대상이 이후 변경되었습니다 | 아니오 | 최신 상태 다시 로드 |
+| `REVISION_CONFLICT` | 판정 대상이 이후 변경되었습니다 | 아니오 | 최신 상태 다시 로드 |
 
 ## 로그 필드
 
@@ -76,3 +78,17 @@ Thumbnail event는 같은 원인을 camelCase code(`candidatesExhausted`, `respo
 | `AUTO_FIND_APP_EXIT` | 앱 종료가 진행 중 갱신을 취소함 | 다음 실행에서 다시 갱신 |
 
 worker 시작 실패 command는 현재 공통 `DATABASE_ERROR` envelope도 함께 반환할 수 있으므로, frontend는 반환 오류와 복원된 run snapshot 중 어느 하나도 성공으로 오인하지 않는다. source의 raw URL·검색어·transport detail은 `AutoFindRun.errorMessage`에 넣지 않는다.
+
+## 작품 중복 scan 오류
+
+아래 code는 영속 `DuplicateScanRun.errorCode`다. 최신 상태는 `duplicate_snapshot`으로 복원하며 이미 저장된 candidate·decision을 오류 때문에 삭제하지 않는다.
+
+| Run error code | 발생 조건 | 사용자 행동 |
+|---|---|---|
+| `DUPLICATE_WORKER_UNAVAILABLE` | background worker 시작 실패 | 앱 상태 확인 후 다시 검사 |
+| `DUPLICATE_SCAN_FAILED` | verified artifact가 검사 중 변경·손상되거나 repository 작업 실패 | Downloads 무결성 검사 후 다시 검사 |
+| `DUPLICATE_SCAN_INTERRUPTED` | 이전 프로세스가 `running` 상태로 종료됨 | 보존된 후보 확인 후 다시 검사 |
+| `DUPLICATE_SCAN_CANCELLED` | 사용자가 검사를 취소함 | 필요할 때 다시 검사 |
+| `DUPLICATE_SCAN_APP_EXIT` | 앱 종료가 진행 중 검사를 취소함 | 다음 실행에서 다시 검사 |
+
+오류 문구에는 download root, 파일명, session, raw source URL을 넣지 않는다. 검증 파일의 구체적 불일치는 기존 artifact reconcile에서 안정 code로 확인한다.

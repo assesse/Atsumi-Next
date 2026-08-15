@@ -20,6 +20,13 @@ pub enum ThumbnailKey {
         #[serde(rename = "sourcePage")]
         source_page: u32,
     },
+    #[serde(rename = "artifactPage")]
+    ArtifactPage {
+        #[serde(rename = "entryId")]
+        entry_id: String,
+        #[serde(rename = "sourcePage")]
+        source_page: u32,
+    },
 }
 
 impl ThumbnailKey {
@@ -38,22 +45,46 @@ impl ThumbnailKey {
         Ok(key)
     }
 
-    pub fn gallery_id(&self) -> i64 {
+    pub fn artifact_page(
+        entry_id: impl Into<String>,
+        source_page: u32,
+    ) -> Result<Self, ThumbnailKeyError> {
+        let key = Self::ArtifactPage {
+            entry_id: entry_id.into(),
+            source_page,
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
+    pub fn gallery_id(&self) -> Option<i64> {
         match self {
-            Self::GalleryCover { gallery_id } | Self::GalleryPage { gallery_id, .. } => *gallery_id,
+            Self::GalleryCover { gallery_id } | Self::GalleryPage { gallery_id, .. } => {
+                Some(*gallery_id)
+            }
+            Self::ArtifactPage { .. } => None,
         }
     }
 
     pub fn source_page(&self) -> Option<u32> {
         match self {
             Self::GalleryCover { .. } => None,
-            Self::GalleryPage { source_page, .. } => Some(*source_page),
+            Self::GalleryPage { source_page, .. } | Self::ArtifactPage { source_page, .. } => {
+                Some(*source_page)
+            }
         }
     }
 
     pub fn validate(&self) -> Result<(), ThumbnailKeyError> {
-        if self.gallery_id() <= 0 {
-            return Err(ThumbnailKeyError::InvalidGalleryId(self.gallery_id()));
+        if let Some(gallery_id) = self.gallery_id() {
+            if gallery_id <= 0 {
+                return Err(ThumbnailKeyError::InvalidGalleryId(gallery_id));
+            }
+        }
+        if let Self::ArtifactPage { entry_id, .. } = self {
+            if entry_id.trim().is_empty() || entry_id.len() > 200 {
+                return Err(ThumbnailKeyError::InvalidEntryId);
+            }
         }
         if matches!(self.source_page(), Some(0)) {
             return Err(ThumbnailKeyError::InvalidSourcePage);
@@ -68,6 +99,13 @@ impl ThumbnailKey {
                 gallery_id,
                 source_page,
             } => format!("gallery:{gallery_id}:source-page:{source_page}"),
+            Self::ArtifactPage {
+                entry_id,
+                source_page,
+            } => format!(
+                "artifact:{}:{entry_id}:source-page:{source_page}",
+                entry_id.len()
+            ),
         }
     }
 }
@@ -82,6 +120,8 @@ impl fmt::Display for ThumbnailKey {
 pub enum ThumbnailKeyError {
     #[error("gallery ID must be positive, got {0}")]
     InvalidGalleryId(i64),
+    #[error("artifact entry ID must be non-empty and at most 200 bytes")]
+    InvalidEntryId,
     #[error("source page must be one-based")]
     InvalidSourcePage,
 }

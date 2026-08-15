@@ -4,6 +4,10 @@ import type {
   AutoFindRun,
   AutoFindSnapshot,
   DownloadChangedEvent,
+  DuplicateDecisionRequest,
+  DuplicateReview,
+  DuplicateScanRun,
+  DuplicateSnapshot,
   FavoriteKey,
   FavoriteNamespace,
   FavoriteRecord,
@@ -26,6 +30,12 @@ import { useSettings } from "./hooks/useSettings";
 import { useWindowPlacement } from "./hooks/useWindowPlacement";
 import { resolveGalleryColumns } from "./layout/galleryColumns";
 import { applyDownloadChanged } from "./state/downloadProjection";
+import {
+  duplicateEventNeedsSnapshot,
+  duplicateRunIsNewer,
+  mergeHydratedDuplicateSnapshot,
+  validDuplicateRun,
+} from "./state/duplicateProjection";
 import { mergeDownloadEntries, mergeGalleryDetail, mergeGalleryPage } from "./state/galleryProjection";
 import { galleryQueryReducer, initialGalleryQueryState } from "./state/galleryQuery";
 import { visibleGalleries } from "./state/selectors";
@@ -93,6 +103,18 @@ const autoFindStatusLabel = (loading: boolean, error: string | null, run?: AutoF
   return `탐색 완료 · 작가 ${run.completedFavorites}/${run.totalFavorites} · 후보 ${run.candidatesFound}개`;
 };
 
+const duplicateStatusLabel = (loading: boolean, error: string | null, run?: DuplicateScanRun): string => {
+  if (loading) return "저장된 작품 중복 검사 결과를 불러오는 중";
+  if (error) return `작품 중복 검사 오류 · ${error}`;
+  if (!run) return "아직 실행한 작품 중복 검사가 없습니다.";
+  if (run.state === "running") {
+    return `중복 검사 중 · 아티팩트 ${run.hashedArtifacts}/${run.totalArtifacts} · 비교 ${run.comparedPairs}/${run.totalPairs} · 후보 ${run.candidatesFound}개`;
+  }
+  if (run.state === "failed") return `중복 검사 실패 · ${run.errorMessage ?? run.errorCode ?? "원인을 확인해 주세요."}`;
+  if (run.state === "cancelled") return `중복 검사 취소됨 · 비교 ${run.comparedPairs}/${run.totalPairs} · 기존 후보 보존`;
+  return `중복 검사 완료 · 비교 ${run.comparedPairs}/${run.totalPairs} · 후보 ${run.candidatesFound}개`;
+};
+
 export default function App() {
   const [ui, dispatch] = useReducer(uiReducer, initialUiState);
   const [query, dispatchQuery] = useReducer(galleryQueryReducer, initialGalleryQueryState);
@@ -112,6 +134,16 @@ export default function App() {
   const [autoFindLoading, setAutoFindLoading] = useState(true);
   const [autoFindError, setAutoFindError] = useState<string | null>(null);
   const [autoFindPending, setAutoFindPending] = useState(false);
+  const [duplicateSnapshot, setDuplicateSnapshot] = useState<DuplicateSnapshot | null>(null);
+  const [duplicateRun, setDuplicateRun] = useState<DuplicateScanRun | undefined>(undefined);
+  const [duplicateLoading, setDuplicateLoading] = useState(true);
+  const [duplicateError, setDuplicateError] = useState<string | null>(null);
+  const [duplicatePending, setDuplicatePending] = useState(false);
+  const [duplicateReviewCandidateId, setDuplicateReviewCandidateId] = useState<string | null>(null);
+  const [duplicateReview, setDuplicateReview] = useState<DuplicateReview | null>(null);
+  const [duplicateReviewLoading, setDuplicateReviewLoading] = useState(false);
+  const [duplicateReviewError, setDuplicateReviewError] = useState<string | null>(null);
+  const [duplicateDecisionPending, setDuplicateDecisionPending] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const [reconcilingArtifacts, setReconcilingArtifacts] = useState(false);
   const [settingsPreview, setSettingsPreview] = useState<{ maxColumns: number; previewWidth: number } | null>(null);
@@ -124,6 +156,12 @@ export default function App() {
   const toastTimer = useRef<number | undefined>(undefined);
   const searchToken = useRef(0);
   const autoFindHydrationToken = useRef(0);
+  const duplicateHydrationToken = useRef(0);
+  const duplicateReviewToken = useRef(0);
+  const duplicateRunRef = useRef<DuplicateScanRun | undefined>(undefined);
+  const duplicateSnapshotRef = useRef<DuplicateSnapshot | null>(null);
+  const duplicatePendingRef = useRef(false);
+  const duplicateDecisionPendingRef = useRef(false);
   const downloadHydrationToken = useRef(0);
   const queueRequestSequence = useRef(0);
   const pendingDownloadEntriesRef = useRef(new Set<string>());
@@ -200,6 +238,35 @@ export default function App() {
     }
   }, [applyAutoFindSnapshot]);
 
+  const hydrateDuplicateSnapshot = useCallback(async (showLoading = false) => {
+    const token = ++duplicateHydrationToken.current;
+    if (showLoading) setDuplicateLoading(true);
+    try {
+      const result = await backend.duplicateSnapshot();
+      if (token !== duplicateHydrationToken.current) return;
+      if (!result.ok) {
+        setDuplicateError(result.error.message);
+        return;
+      }
+      setDuplicateError(null);
+      const merged = mergeHydratedDuplicateSnapshot(
+        duplicateSnapshotRef.current,
+        result.data,
+        duplicateRunRef.current,
+      );
+      duplicateSnapshotRef.current = merged;
+      duplicateRunRef.current = merged.run;
+      setDuplicateRun(merged.run);
+      setDuplicateSnapshot(merged);
+    } catch {
+      if (token === duplicateHydrationToken.current) {
+        setDuplicateError("작품 중복 검사 backend에 연결하지 못했습니다.");
+      }
+    } finally {
+      if (token === duplicateHydrationToken.current) setDuplicateLoading(false);
+    }
+  }, []);
+
   const beginDownloadMutation = useCallback((entryId: string): boolean => {
     if (pendingDownloadEntriesRef.current.has(entryId)) return false;
     pendingDownloadEntriesRef.current.add(entryId);
@@ -218,7 +285,8 @@ export default function App() {
     void hydrateFavorites();
     void hydrateSearchHistory();
     void hydrateAutoFind(true);
-  }, [hydrateAutoFind, hydrateFavorites, hydrateSearchHistory]);
+    void hydrateDuplicateSnapshot(true);
+  }, [hydrateAutoFind, hydrateDuplicateSnapshot, hydrateFavorites, hydrateSearchHistory]);
 
   useLayoutEffect(() => {
     document.documentElement.style.setProperty("--preview-width", `${previewWidth}px`);
@@ -278,6 +346,34 @@ export default function App() {
       unsubscribe?.();
     };
   }, [hydrateAutoFind]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    void backend.on("duplicate:changed", (run) => {
+      if (!validDuplicateRun(run)) return;
+      const previous = duplicateRunRef.current;
+      if (!duplicateRunIsNewer(previous, run)) return;
+      if (previous?.runId !== run.runId) duplicateHydrationToken.current += 1;
+      duplicateRunRef.current = run;
+      setDuplicateRun(run);
+      if (duplicateSnapshotRef.current) {
+        const next = { ...duplicateSnapshotRef.current, run };
+        duplicateSnapshotRef.current = next;
+        setDuplicateSnapshot(next);
+      }
+      if (duplicateEventNeedsSnapshot(previous, run)) void hydrateDuplicateSnapshot();
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unsubscribe = cleanup;
+    }).catch(() => {
+      if (!disposed) setDuplicateError("작품 중복 검사 event stream에 연결하지 못했습니다.");
+    });
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [hydrateDuplicateSnapshot]);
 
   useEffect(() => {
     let cancelled = false;
@@ -400,6 +496,14 @@ export default function App() {
   galleriesRef.current = displayGalleries;
   visibleIdsRef.current = visibleIds;
   const allGalleries = useMemo(() => [...displayGalleries.values()], [displayGalleries]);
+  const duplicateCandidateCounts = useMemo(() => {
+    const counts = new Map<GalleryId, number>();
+    for (const candidate of duplicateSnapshot?.candidates ?? []) {
+      counts.set(candidate.parent.galleryId, (counts.get(candidate.parent.galleryId) ?? 0) + 1);
+      counts.set(candidate.candidate.galleryId, (counts.get(candidate.candidate.galleryId) ?? 0) + 1);
+    }
+    return counts;
+  }, [duplicateSnapshot?.candidates]);
   const autoFindCount = autoFindIds.length;
   const attentionCount = useMemo(
     () => allGalleries.filter((gallery) => ["failed", "interrupted", "review_required"].includes(gallery.download?.state ?? "")).length,
@@ -497,7 +601,79 @@ export default function App() {
     dispatch({ type: "detail.open", id, parentId });
     void hydrateDetail(id);
   }, [hydrateDetail]);
-  const openReview = useCallback((id: GalleryId) => dispatch({ type: "overlay.review", galleryId: id }), []);
+  const hydrateDuplicateReview = useCallback(async (candidateId: string) => {
+    const token = ++duplicateReviewToken.current;
+    setDuplicateReviewLoading(true);
+    setDuplicateReviewError(null);
+    try {
+      const result = await backend.duplicateReviewGet(candidateId);
+      if (token !== duplicateReviewToken.current) return;
+      if (!result.ok) {
+        setDuplicateReviewError(result.error.message);
+        return;
+      }
+      setDuplicateReview(result.data);
+    } catch {
+      if (token === duplicateReviewToken.current) {
+        setDuplicateReviewError("중복 검토 backend에 연결하지 못했습니다.");
+      }
+    } finally {
+      if (token === duplicateReviewToken.current) setDuplicateReviewLoading(false);
+    }
+  }, []);
+  const openReview = useCallback((id: GalleryId) => {
+    const candidate = duplicateSnapshot?.candidates.find((item) =>
+      item.parent.galleryId === id || item.candidate.galleryId === id,
+    );
+    if (!candidate) {
+      showToast("저장된 작품 중복 후보를 찾을 수 없습니다. 중복 검사 결과를 새로 불러옵니다.");
+      void hydrateDuplicateSnapshot();
+      return;
+    }
+    setDuplicateReviewCandidateId(candidate.candidateId);
+    setDuplicateReview(null);
+    setDuplicateReviewError(null);
+    dispatch({ type: "overlay.review", galleryId: id });
+    void hydrateDuplicateReview(candidate.candidateId);
+  }, [duplicateSnapshot?.candidates, hydrateDuplicateReview, hydrateDuplicateSnapshot, showToast]);
+  const closeDuplicateReview = useCallback(() => {
+    duplicateReviewToken.current += 1;
+    setDuplicateReviewCandidateId(null);
+    setDuplicateReview(null);
+    setDuplicateReviewError(null);
+    setDuplicateReviewLoading(false);
+    dispatch({ type: "overlay.review", galleryId: null });
+  }, []);
+  const applyDuplicateDecision = useCallback(async (request: DuplicateDecisionRequest) => {
+    if (duplicateDecisionPendingRef.current) return;
+    duplicateDecisionPendingRef.current = true;
+    setDuplicateDecisionPending(true);
+    setDuplicateReviewError(null);
+    try {
+      const result = await backend.duplicateDecisionApply(request);
+      if (!result.ok) {
+        if (result.error.code === "REVISION_CONFLICT") {
+          await Promise.all([
+            hydrateDuplicateReview(request.candidateId),
+            hydrateDuplicateSnapshot(),
+          ]);
+          setDuplicateReviewError("다른 창에서 판정이 변경되어 최신 근거와 이력을 다시 불러왔습니다.");
+          return;
+        }
+        setDuplicateReviewError(result.error.message);
+        return;
+      }
+      setDuplicateReview(result.data);
+      await hydrateDuplicateSnapshot();
+      setDownloadsRefresh((value) => value + 1);
+      showToast("중복 판정을 저장했습니다. 파일은 자동으로 영구 삭제되지 않습니다.");
+    } catch {
+      setDuplicateReviewError("중복 판정 요청을 backend에 전달하지 못했습니다.");
+    } finally {
+      duplicateDecisionPendingRef.current = false;
+      setDuplicateDecisionPending(false);
+    }
+  }, [hydrateDuplicateReview, hydrateDuplicateSnapshot, showToast]);
   const openActivity = useCallback(() => {
     activityOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dispatch({ type: "overlay.activity", open: true });
@@ -776,6 +952,66 @@ export default function App() {
     }
   }, [applyAutoFindSnapshot, autoFindIds, showToast]);
 
+  const startDuplicateScan = useCallback(async () => {
+    if (duplicatePendingRef.current || duplicateRun?.state === "running") return;
+    duplicatePendingRef.current = true;
+    setDuplicatePending(true);
+    setDuplicateError(null);
+    try {
+      const result = await backend.duplicateScanStart();
+      if (!result.ok) {
+        setDuplicateError(result.error.message);
+        showToast(result.error.message);
+        return;
+      }
+      if (duplicateRunRef.current?.runId !== result.data.runId) duplicateHydrationToken.current += 1;
+      duplicateRunRef.current = result.data;
+      setDuplicateRun(result.data);
+      if (duplicateSnapshotRef.current) {
+        const next = { ...duplicateSnapshotRef.current, run: result.data };
+        duplicateSnapshotRef.current = next;
+        setDuplicateSnapshot(next);
+      }
+      await hydrateDuplicateSnapshot();
+      showToast("검증된 로컬 아티팩트를 기준으로 작품 중복 검사를 시작했습니다.");
+    } catch {
+      const message = "작품 중복 검사를 시작하지 못했습니다.";
+      setDuplicateError(message);
+      showToast(message);
+    } finally {
+      duplicatePendingRef.current = false;
+      setDuplicatePending(false);
+    }
+  }, [duplicateRun?.state, hydrateDuplicateSnapshot, showToast]);
+
+  const cancelDuplicateScan = useCallback(async () => {
+    if (duplicatePendingRef.current || duplicateRun?.state !== "running") return;
+    duplicatePendingRef.current = true;
+    setDuplicatePending(true);
+    try {
+      const result = await backend.duplicateScanCancel();
+      if (!result.ok) {
+        setDuplicateError(result.error.message);
+        showToast(result.error.message);
+        return;
+      }
+      duplicateRunRef.current = result.data;
+      setDuplicateRun(result.data);
+      if (duplicateSnapshotRef.current) {
+        const next = { ...duplicateSnapshotRef.current, run: result.data };
+        duplicateSnapshotRef.current = next;
+        setDuplicateSnapshot(next);
+      }
+      await hydrateDuplicateSnapshot();
+      showToast("작품 중복 검사를 취소했습니다. 저장된 후보와 판정 이력은 유지됩니다.");
+    } catch {
+      showToast("작품 중복 검사 취소 요청을 전달하지 못했습니다.");
+    } finally {
+      duplicatePendingRef.current = false;
+      setDuplicatePending(false);
+    }
+  }, [duplicateRun?.state, hydrateDuplicateSnapshot, showToast]);
+
   const loadExplorePage = useCallback(async (page: number) => {
     if (!query.queryId || page < 1 || query.phase === "loading-page") return;
     const queryId = query.queryId;
@@ -843,11 +1079,6 @@ export default function App() {
     window.addEventListener("keydown", keyDown);
     return () => window.removeEventListener("keydown", keyDown);
   }, [closeActivity, excludeAutoFindCandidates, galleries, openArtifact, openExitConfirm, quarantineGalleries, queueGalleries, selectedIds, showToast, ui.detail.activeId, ui.overlays, ui.search, ui.view]);
-
-  const reviewParent = ui.overlays.reviewGalleryId === null ? undefined : displayGalleries.get(ui.overlays.reviewGalleryId);
-  const reviewCandidate = reviewParent
-    ? allGalleries.find((gallery) => gallery.id !== reviewParent.id && gallery.artist === reviewParent.artist) ?? allGalleries.find((gallery) => gallery.id !== reviewParent.id)
-    : undefined;
 
   const saveSettingsPatch = useCallback(
     async (patch: SettingsPatch) => {
@@ -917,6 +1148,7 @@ export default function App() {
   const config = viewConfig[ui.view];
   const resultSourceLabel = backend.runtime === "tauri" ? "Hitomi 실데이터" : "브라우저 fixture";
   const currentAutoFindStatus = autoFindStatusLabel(autoFindLoading, autoFindError, autoFindSnapshot.run);
+  const currentDuplicateStatus = duplicateStatusLabel(duplicateLoading, duplicateError, duplicateRun);
   const renderGalleryGrid = (items: Gallery[], ariaLabel: string) => (
     <div className={`gallery-grid${ui.selection.ids.size ? " is-selection-context" : ""}`} style={{ gridTemplateColumns: `repeat(${galleryColumns}, minmax(0, 1fr))` }} role="list" aria-label={ariaLabel}>
       {items.map((gallery, index) => (
@@ -928,6 +1160,7 @@ export default function App() {
           selected={ui.selection.ids.has(gallery.id)}
           selectionContext={ui.selection.ids.size > 0}
           favoriteMetadata={favoriteMetadataForDisplay}
+          duplicateCandidateCount={duplicateCandidateCounts.get(gallery.id) ?? 0}
           onSelect={selectGallery}
           onOpenDetail={openDetail}
           onOpenArtifact={openArtifact}
@@ -1001,7 +1234,8 @@ export default function App() {
                 <>
                   <GroupingControl value={ui.grouping.downloads} onChange={(grouping) => dispatch({ type: "grouping.set", view: "downloads", grouping })} />
                   <button type="button" className="text-button" disabled={reconcilingArtifacts} onClick={() => void reconcileArtifacts()}><FluentIcon glyph="\uE9D9" /> {reconcilingArtifacts ? "무결성 검사 중" : "무결성 검사"}</button>
-                  <button type="button" className="text-button" onClick={() => showToast("내부 중복 검사는 Phase 6 계약 뒤에 연결합니다.")}><FluentIcon glyph="\uE9D9" /> 내부 중복 검사</button>
+                  <button type="button" className="text-button" disabled={duplicateLoading || duplicatePending || duplicateRun?.state === "running"} onClick={() => void startDuplicateScan()}><FluentIcon glyph="\uE9D9" /> {duplicateRun?.state === "failed" ? "작품 중복 다시 검사" : "작품 중복 검사"}</button>
+                  {duplicateRun?.state === "running" ? <button type="button" className="text-button danger-button" disabled={duplicatePending} onClick={() => void cancelDuplicateScan()}><FluentIcon glyph="\uE711" /> 중복 검사 취소</button> : null}
                   <button type="button" className="text-button primary" onClick={() => void queueGalleries(visibleIds)}><FluentIcon glyph="\uE896" /> 전체 다운로드</button>
                 </>
               ) : null}
@@ -1014,13 +1248,17 @@ export default function App() {
               ) : ui.view === "auto-find" ? (
                 <span className={`context-summary auto-find-status is-${autoFindSnapshot.run?.state ?? "idle"}`} role="status">{currentAutoFindStatus}</span>
               ) : (
-                <div className="segmented status-filter" role="group" aria-label="다운로드 상태 필터">
-                  {(["all", "active", "review", "failed", "complete"] as const).map((filter) => (
-                    <button key={filter} type="button" aria-pressed={ui.downloadsFilter === filter} className={ui.downloadsFilter === filter ? "is-active" : ""} onClick={() => dispatch({ type: "downloads.filter", filter })}>
-                      {{ all: "전체", active: "작업 중", review: "검토", failed: "실패", complete: "완료" }[filter]}
-                    </button>
-                  ))}
-                </div>
+                <>
+                  <div className="segmented status-filter" role="group" aria-label="다운로드 상태 필터">
+                    {(["all", "active", "review", "failed", "complete"] as const).map((filter) => (
+                      <button key={filter} type="button" aria-pressed={ui.downloadsFilter === filter} className={ui.downloadsFilter === filter ? "is-active" : ""} onClick={() => dispatch({ type: "downloads.filter", filter })}>
+                        {{ all: "전체", active: "작업 중", review: "검토", failed: "실패", complete: "완료" }[filter]}
+                      </button>
+                    ))}
+                  </div>
+                  <span className={`context-summary duplicate-scan-status is-${duplicateRun?.state ?? "idle"}`} role="status">{currentDuplicateStatus}</span>
+                  {duplicateError ? <button type="button" className="text-button compact" onClick={() => void hydrateDuplicateSnapshot(true)}>결과 다시 불러오기</button> : null}
+                </>
               )}
             </div>
             <div className="context-summary">{visible.length}개 결과 · {resultSourceLabel}</div>
@@ -1105,15 +1343,17 @@ export default function App() {
       />
 
       <DuplicateReviewDialog
-        open={ui.overlays.reviewGalleryId !== null}
-        parent={reviewParent}
-        candidate={reviewCandidate}
-        onClose={() => dispatch({ type: "overlay.review", galleryId: null })}
-        onScan={() => showToast("전수 검사는 Phase 5 evidence 계약 뒤에 연결합니다.")}
-        onDecision={(label) => {
-          showToast(`${label} 판정 계획을 mock으로 확인했습니다.`);
-          dispatch({ type: "overlay.review", galleryId: null });
-        }}
+        open={ui.overlays.reviewGalleryId !== null && duplicateReviewCandidateId !== null}
+        review={duplicateReview ?? undefined}
+        galleries={displayGalleries}
+        loading={duplicateReviewLoading}
+        error={duplicateReviewError}
+        decisionPending={duplicateDecisionPending}
+        browserFixture={backend.runtime === "browser-mock"}
+        onClose={closeDuplicateReview}
+        onRetry={() => duplicateReviewCandidateId && void hydrateDuplicateReview(duplicateReviewCandidateId)}
+        onRescan={() => void startDuplicateScan()}
+        onDecision={(request) => void applyDuplicateDecision(request)}
       />
 
       <ExitConfirmDialog

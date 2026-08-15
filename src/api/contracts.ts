@@ -42,7 +42,8 @@ export type JobRef = {
 
 export type BackendThumbnailKey =
   | { kind: "galleryCover"; galleryId: number }
-  | { kind: "galleryPage"; galleryId: number; sourcePage: number };
+  | { kind: "galleryPage"; galleryId: number; sourcePage: number }
+  | { kind: "artifactPage"; entryId: string; sourcePage: number };
 
 export type ThumbnailRequestDto = {
   key: BackendThumbnailKey;
@@ -240,6 +241,133 @@ export type AutoFindSnapshot = {
 export type AutoFindExclusionResult = {
   excludedGalleryIds: GalleryId[];
   snapshot: AutoFindSnapshot;
+};
+
+export type HashProfile = {
+  profileVersion: number;
+  algorithmVersion: number;
+  dHashBits: number;
+  pHashBits: number;
+  visualMatchThreshold: number;
+  lowInformationStdDevThreshold: number;
+};
+
+export type DuplicateScanState = "running" | "completed" | "failed" | "cancelled";
+
+export type DuplicateScanRun = {
+  runId: string;
+  revision: number;
+  state: DuplicateScanState;
+  totalArtifacts: number;
+  hashedArtifacts: number;
+  totalPairs: number;
+  comparedPairs: number;
+  candidatesFound: number;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+export type DuplicateRelation = "exact" | "contains" | "partial" | "translation_visual";
+
+export type DuplicateGalleryRef = {
+  galleryId: GalleryId;
+  entryId: string;
+  title: string;
+  artist?: string;
+  group?: string;
+  pageCount: number;
+};
+
+export type DuplicateCandidate = {
+  candidateId: string;
+  revision: number;
+  parent: DuplicateGalleryRef;
+  candidate: DuplicateGalleryRef;
+  relation: DuplicateRelation;
+  confidence: number;
+  matchedPages: number;
+  parentCoverage: number;
+  candidateCoverage: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DuplicateEvidenceKind =
+  | "exact_sha256"
+  | "visual_hash"
+  | "sequence_alignment"
+  | "e_hentai_relation";
+
+export type DuplicateEvidence = {
+  evidenceId: string;
+  kind: DuplicateEvidenceKind;
+  confidence: number;
+  matchedPages: number;
+  description: string;
+};
+
+export type DuplicatePagePair = {
+  parentSourcePage: number;
+  candidateSourcePage: number;
+  exactSha256: boolean;
+  dHashDistance: number;
+  pHashDistance: number;
+  detailHashDistance: number;
+  edgeSimilarity: number;
+  visualSimilarity: number;
+  lowInformation: boolean;
+};
+
+export type DuplicateDecisionAction =
+  | "hide_parent"
+  | "hide_candidate"
+  | "series_link"
+  | "series_unlink"
+  | "exclude_pair";
+
+export type DuplicateDecisionRequest = {
+  candidateId: string;
+  expectedRevision: number;
+  action: DuplicateDecisionAction;
+  targetGalleryId?: GalleryId;
+  seriesGroupId?: string;
+  seriesName?: string;
+};
+
+export type DuplicateDecisionHistory = {
+  decisionId: string;
+  candidateId: string;
+  candidateRevision: number;
+  action: DuplicateDecisionAction;
+  targetGalleryId?: GalleryId;
+  seriesGroupId?: string;
+  createdAt: string;
+};
+
+export type SeriesGroup = {
+  seriesGroupId: string;
+  name: string;
+  revision: number;
+  members: DuplicateGalleryRef[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DuplicateReview = {
+  candidate: DuplicateCandidate;
+  evidence: DuplicateEvidence[];
+  pagePairs: DuplicatePagePair[];
+  decisions: DuplicateDecisionHistory[];
+  seriesGroups: SeriesGroup[];
+};
+
+export type DuplicateSnapshot = {
+  profile: HashProfile;
+  run?: DuplicateScanRun;
+  candidates: DuplicateCandidate[];
 };
 
 export type GalleryDetail = GallerySummary & {

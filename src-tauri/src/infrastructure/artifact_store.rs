@@ -19,13 +19,15 @@ use crate::{
     },
     domain::{
         ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
-        ArtifactStorageFormat, DownloadArtifactState, Gallery, PageArtifactState, SourcePageNumber,
+        ArtifactStorageFormat, DownloadArtifactState, Gallery, PageArtifact, PageArtifactState,
+        SourcePageNumber,
     },
     thumbnail::CancellationToken,
 };
 
 const MAX_IMAGE_DIMENSION: u32 = 16_384;
 const MAX_IMAGE_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
+const MAX_MANAGED_PAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 
 #[derive(Debug, Default)]
@@ -424,6 +426,93 @@ impl ArtifactStore for FilesystemArtifactStore {
         ensure_descendant(&root, &canonical)?;
         Ok(true)
     }
+
+    fn read_verified_page_bytes(
+        &self,
+        root: &Path,
+        page: &PageArtifact,
+    ) -> Result<Vec<u8>, DownloadPipelineError> {
+        if page.state != PageArtifactState::Present
+            || page.excluded
+            || page.storage_format != Some(ArtifactStorageFormat::Webp)
+            || page.source_revision.is_none()
+            || page.verified_at.is_none()
+        {
+            return Err(DownloadPipelineError::new(
+                DownloadPipelineErrorCode::ArtifactMissing,
+                "Only a present verified non-excluded page can be scanned",
+                false,
+            ));
+        }
+        let expected_length = page.byte_length.ok_or_else(|| {
+            DownloadPipelineError::new(
+                DownloadPipelineErrorCode::ManifestInvalid,
+                "The verified page is missing its byte length",
+                false,
+            )
+        })?;
+        let expected_sha = page.sha256.as_ref().ok_or_else(|| {
+            DownloadPipelineError::new(
+                DownloadPipelineErrorCode::ManifestInvalid,
+                "The verified page is missing its SHA-256 digest",
+                false,
+            )
+        })?;
+        if expected_length == 0 || expected_length > MAX_MANAGED_PAGE_BYTES {
+            return Err(DownloadPipelineError::new(
+                DownloadPipelineErrorCode::ImageDecodeFailed,
+                "The verified page exceeds the safe scan byte limit",
+                false,
+            ));
+        }
+        // Duplicate scans and local previews are read-only.  Do not run the
+        // write-probe used by download preparation once per page; the scan
+        // supervisor validates the configured root once before dispatching.
+        let root = resolve_existing_download_root(root)?;
+        let path = resolve_managed_path(&root, &page.relative_path, true)?;
+        let metadata = fs::metadata(&path)
+            .map_err(|_| filesystem_error("The verified page metadata could not be read"))?;
+        if metadata.len() != expected_length {
+            return Err(DownloadPipelineError::new(
+                DownloadPipelineErrorCode::HashMismatch,
+                "The verified page byte length changed before duplicate scanning",
+                false,
+            ));
+        }
+        let bytes = fs::read(&path)
+            .map_err(|_| filesystem_error("The verified page could not be read for scanning"))?;
+        let actual_sha = format!("{:x}", Sha256::digest(&bytes));
+        if actual_sha != expected_sha.as_str() {
+            return Err(DownloadPipelineError::new(
+                DownloadPipelineErrorCode::HashMismatch,
+                "The verified page SHA-256 changed before duplicate scanning",
+                false,
+            ));
+        }
+        decode_image(&bytes, ImageFormat::WebP)?;
+        Ok(bytes)
+    }
+}
+
+fn resolve_existing_download_root(root: &Path) -> Result<PathBuf, DownloadPipelineError> {
+    if root.as_os_str().is_empty() || !root.is_absolute() {
+        return Err(DownloadPipelineError::new(
+            DownloadPipelineErrorCode::RootUnavailable,
+            "The download folder must be an absolute path",
+            false,
+        ));
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|_| filesystem_error("The download folder could not be resolved"))?;
+    if !root.is_dir() {
+        return Err(DownloadPipelineError::new(
+            DownloadPipelineErrorCode::RootUnavailable,
+            "The selected download path is not a folder",
+            false,
+        ));
+    }
+    Ok(root)
 }
 
 fn normalized_webp_bytes(page: &DownloadPagePayload) -> Result<Vec<u8>, DownloadPipelineError> {

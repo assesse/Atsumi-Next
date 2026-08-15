@@ -19,6 +19,7 @@ type GalleryCardProps = {
   selected: boolean;
   selectionContext: boolean;
   favoriteMetadata: ReadonlySet<string>;
+  duplicateCandidateCount?: number;
   onSelect: (id: GalleryId, modifiers: { ctrlKey: boolean; shiftKey: boolean }) => void;
   onOpenDetail: (id: GalleryId) => void;
   onOpenArtifact: (id: GalleryId) => void;
@@ -57,6 +58,7 @@ function GalleryCardComponent({
   selected,
   selectionContext,
   favoriteMetadata,
+  duplicateCandidateCount = 0,
   onSelect,
   onOpenDetail,
   onOpenArtifact,
@@ -80,16 +82,19 @@ function GalleryCardComponent({
   const hiddenTags = gallery.tags.slice(VISIBLE_TAG_LIMIT);
   const visibleSeries = (gallery.series ?? []).slice(0, VISIBLE_SERIES_LIMIT);
   const visibleCharacters = (gallery.characters ?? []).slice(0, VISIBLE_CHARACTER_LIMIT);
-  const iconOnlyStatus = download?.state === "downloading" || download?.state === "review_required";
+  const hasDuplicateCandidates = duplicateCandidateCount > 0;
+  const iconOnlyStatus = hasDuplicateCandidates || download?.state === "downloading" || download?.state === "review_required";
   const cardStatusClass = download?.state === "completed"
     ? " is-complete"
     : download?.state === "downloading"
       ? " is-downloading"
-      : ["review_required", "interrupted", "failed", "quarantined", "cancelled"].includes(download?.state ?? "")
+      : hasDuplicateCandidates || ["review_required", "interrupted", "failed", "quarantined", "cancelled"].includes(download?.state ?? "")
         ? " has-problem"
         : "";
   const statusLabel = selectionContext
     ? `${gallery.title}만 선택`
+    : hasDuplicateCandidates
+      ? `${gallery.title}, 중복 후보 ${duplicateCandidateCount}개, 검토 열기`
     : download?.state === "downloading"
     ? `${gallery.title}, 다운로드 중 ${progress}%, 작업 상태 열기`
     : download?.state === "review_required"
@@ -110,7 +115,7 @@ function GalleryCardComponent({
   const openStatus = (event: MouseEvent<HTMLButtonElement>) => {
     if (selectFromInteractiveTarget(event)) return;
     event.stopPropagation();
-    if (download?.state === "review_required") onOpenReview(gallery.id);
+    if (hasDuplicateCandidates || download?.state === "review_required") onOpenReview(gallery.id);
     else onStatusDetail(gallery.id);
   };
 
@@ -157,7 +162,8 @@ function GalleryCardComponent({
         if ((event.target as Element).closest("button")) return;
         event.preventDefault();
         event.currentTarget.focus();
-        onOpenDetail(gallery.id);
+        if (view === "downloads" && hasDuplicateCandidates) onOpenReview(gallery.id);
+        else onOpenDetail(gallery.id);
       }}
     >
       <span className="selection-indicator" aria-hidden="true">
@@ -185,19 +191,21 @@ function GalleryCardComponent({
             <GalleryStatusIcon kind="complete" />
           </span>
         ) : null}
-        {download && !["completed", "quarantined"].includes(download.state) ? (
+        {hasDuplicateCandidates || (download && !["completed", "quarantined"].includes(download.state)) ? (
           <button
             type="button"
-            className={`status-pill${statusClass}${iconOnlyStatus ? ` icon-only is-${download.state}` : ""}`}
-            title={selectionContext ? `${gallery.title}만 선택` : download.state === "downloading" ? `다운로드 중 · ${progress}%` : download.state === "review_required" ? "중복 의심 · 클릭하여 검토" : workLabel[download.state]}
+            className={`status-pill${statusClass}${iconOnlyStatus ? ` icon-only is-${hasDuplicateCandidates ? "review_required" : download?.state}` : ""}${hasDuplicateCandidates ? " has-duplicate-count" : ""}`}
+            title={selectionContext ? `${gallery.title}만 선택` : hasDuplicateCandidates ? `중복 후보 ${duplicateCandidateCount}개 · 클릭하여 검토` : download?.state === "downloading" ? `다운로드 중 · ${progress}%` : download?.state === "review_required" ? "중복 의심 · 클릭하여 검토" : download ? workLabel[download.state] : "작업 상태"}
             aria-label={statusLabel}
             onClick={openStatus}
           >
-            {download.state === "downloading" ? (
+            {hasDuplicateCandidates ? (
+              <><GalleryStatusIcon kind="warning" /><span className="duplicate-count">{duplicateCandidateCount}</span></>
+            ) : download?.state === "downloading" ? (
               <GalleryStatusIcon kind="downloading" />
-            ) : download.state === "review_required" ? (
+            ) : download?.state === "review_required" ? (
               <GalleryStatusIcon kind="warning" />
-            ) : workLabel[download.state]}
+            ) : download ? workLabel[download.state] : null}
           </button>
         ) : null}
         {view === "downloads" ? (

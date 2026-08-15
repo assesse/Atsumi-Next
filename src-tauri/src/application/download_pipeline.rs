@@ -7,7 +7,7 @@ use crate::{
     domain::{
         ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
         ArtifactStorageFormat, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
-        Gallery, GalleryId, JobRef, JobState, SourcePageNumber,
+        Gallery, GalleryId, JobRef, JobState, PageArtifact, SourcePageNumber,
     },
     source::SourceContractError,
     thumbnail::CancellationToken,
@@ -156,6 +156,12 @@ pub trait ArtifactStore: Send + Sync {
         root: &Path,
         relative_path: &ArtifactRelativePath,
     ) -> Result<bool, DownloadPipelineError>;
+
+    fn read_verified_page_bytes(
+        &self,
+        root: &Path,
+        page: &PageArtifact,
+    ) -> Result<Vec<u8>, DownloadPipelineError>;
 }
 
 pub trait DownloadRootPicker: Send + Sync {

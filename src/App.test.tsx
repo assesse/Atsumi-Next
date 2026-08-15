@@ -254,4 +254,111 @@ describe("App Phase 3A backend flow", () => {
     await backend.favoriteSet({ namespace: "artist", value: "serein" }, false);
     await backend.favoriteSet({ namespace: "artist", value: "mizuno" }, false);
   });
+
+  it("recovers a failed snapshot, scans and cancels explicitly, then reviews real evidence with CAS reload", async () => {
+    await backend.downloadQueueAdd(
+      [galleryId(4051038), galleryId(4050754)],
+      "app-duplicate-review-downloads",
+    );
+    const snapshot = vi.spyOn(backend, "duplicateSnapshot").mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: "BACKEND_UNAVAILABLE",
+        message: "initial duplicate snapshot unavailable",
+        retryable: true,
+        action: "retry",
+      },
+    });
+    const scanStart = vi.spyOn(backend, "duplicateScanStart");
+    const scanCancel = vi.spyOn(backend, "duplicateScanCancel");
+    const decision = vi.spyOn(backend, "duplicateDecisionApply");
+    const quarantine = vi.spyOn(backend, "downloadQuarantine");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<App />);
+      await settle();
+    });
+    await act(async () => {
+      clickButtonContaining(container, "Downloads");
+      await settle();
+    });
+    expect(container.textContent).toContain("initial duplicate snapshot unavailable");
+
+    await act(async () => {
+      clickButtonContaining(container, "작품 중복 검사");
+      await settle(15);
+    });
+    expect(scanStart).toHaveBeenCalledTimes(1);
+    expect(snapshot).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("중복 검사 중");
+    await act(async () => {
+      clickButtonContaining(container, "중복 검사 취소");
+      await settle();
+    });
+    expect(scanCancel).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("중복 검사 취소됨");
+
+    await act(async () => {
+      clickButtonContaining(container, "작품 중복 검사");
+      await settle(130);
+    });
+    expect(container.textContent).toContain("중복 검사 완료");
+    const warning = container.querySelector<HTMLButtonElement>(
+      '[data-gallery-id="4051038"] .status-pill.has-duplicate-count',
+    );
+    expect(warning).toHaveTextContent("1");
+    expect(warning).toHaveAccessibleName(expect.stringContaining("중복 후보 1개"));
+
+    await act(async () => {
+      warning?.focus();
+      warning?.click();
+      await settle();
+    });
+    expect(container.querySelector(".review-dialog")).toHaveAttribute("open");
+    expect(container.querySelector(".review-summary")).toHaveTextContent("신뢰도 94%");
+    expect(container.textContent).toContain("브라우저 검토 fixture");
+    expect(container.textContent).toContain("원본 페이지 번호를 보존한 순서 정렬");
+    expect(container.textContent).not.toContain("82%");
+    expect(container.textContent).not.toContain("first gid");
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('.review-dialog button[aria-label="닫기"]')?.click();
+      await settle();
+    });
+    expect(document.activeElement).toBe(warning);
+    await act(async () => {
+      warning?.click();
+      await settle();
+    });
+
+    decision.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: "REVISION_CONFLICT",
+        message: "stale",
+        retryable: false,
+        action: "review",
+        details: { resource: "duplicateCandidate", expectedRevision: 0, actualRevision: 1 },
+      },
+    });
+    await act(async () => {
+      clickButtonContaining(container, "부모 숨기기");
+      await settle();
+    });
+    expect(container.textContent).toContain("다른 창에서 판정이 변경되어 최신 근거와 이력을 다시 불러왔습니다.");
+
+    await act(async () => {
+      clickButtonContaining(container, "부모 숨기기");
+      await settle();
+    });
+    expect(container.querySelector(".decision-history")).toHaveTextContent("부모 숨김");
+    expect(container.textContent).toContain("자동으로 파일을 삭제하지 않으며");
+    expect(quarantine).not.toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
 });

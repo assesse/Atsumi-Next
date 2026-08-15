@@ -1,6 +1,7 @@
 mod artifact;
 mod auto_find;
 mod download;
+mod duplicate;
 mod gallery;
 mod job;
 mod search;
@@ -19,6 +20,14 @@ pub use auto_find::{
     FavoriteRecord, SearchHistoryEntry,
 };
 pub use download::{DownloadEntry, DownloadListRequest, DownloadPage, DownloadReviewKind};
+pub use duplicate::{
+    DuplicateCandidate, DuplicateCandidateRecord, DuplicateDecisionAction,
+    DuplicateDecisionApplyOutcome, DuplicateDecisionHistory, DuplicateDecisionRequest,
+    DuplicateEvidence, DuplicateEvidenceKind, DuplicateGalleryRef, DuplicatePageHash,
+    DuplicatePagePair, DuplicateRelation, DuplicateReview, DuplicateScanRun, DuplicateScanState,
+    DuplicateSnapshot, ExternalRelationEvidence, HashProfile, SeriesGroup,
+    DUPLICATE_HASH_ALGORITHM_VERSION, DUPLICATE_HASH_PROFILE_VERSION,
+};
 pub use gallery::{Gallery, GalleryId, GalleryMetadata, GalleryPageId, SourcePageNumber};
 pub use job::{
     DownloadChangedEvent, DownloadJobDescriptor, DownloadJobProjection, FixtureDownloadJobStep,
