@@ -7,7 +7,7 @@
 - 시작 브랜치: `agent/phase-3-foundation`
 - 시작 commit: `5450c8a1a77b45cb7683c75bd32ad94dd2ac72dc` (`Build Phase 3 application foundation`)
 - 기준 branch: `main` (`23a3b66`)
-- 기준 PR: `assesse/Atsumi-Next#1` (GitHub 인증 상태 재확인 필요)
+- 기준 PR: `assesse/Atsumi-Next#1`
 - 작업 시작일: 2026-08-15 (Asia/Seoul)
 - 시작 시 Git 상태: 원격 작업 branch와 동일한 HEAD, Milestone A/B 후보 변경이 working tree에 미커밋 상태
 - 시작 시 구현 상태: SQLite queue/retry/cancel과 전역 thumbnail coordinator는 존재하며, 실제 Hitomi read path는 working tree에 연결 중이다. 실제 artifact download·resume·open, Auto Find, 작품/내부 중복, Classic import는 미완성이다.
@@ -102,6 +102,16 @@
 - `ClassicImportDialog.tsx`와 설정 저장 공간: native Windows folder picker, read-only 보증, copy/count 요약, typed 충돌별 acknowledgement, 최종 승인, latest-report reload와 Next-only rollback을 연결했다. browser review adapter도 같은 revision/acknowledgement lifecycle을 재현한다.
 - 데이터 호환성: DB schema는 14로 상승한다. v14는 additive하고 v1~v13 의미, manifest schema 1과 HashProfile 1을 재해석하지 않는다.
 
+### Milestone H — production UI·diagnostics·delivery polish
+
+- `SettingsDialog.tsx`: 실제 동작하는 일반·저장 공간만 설정 navigation에 남겼다. cache/data/전체 파일 삭제는 plan·review·undo가 없으므로 이유와 연결된 disabled control로 고정했고 토스트형 가짜 동작을 제거했다.
+- `DetailWorkspace.tsx`: source page를 누르면 전역 `ThumbnailCoordinator`의 같은 `sourcePage` key를 critical priority로 다시 사용하는 확대 dialog가 열린다. Esc·닫기와 opener focus 복원, page count 변경 시 안전한 자동 닫기를 검증했다.
+- `ThumbnailProvider.tsx`, `main.tsx`, `SideRail.tsx`: production composition root가 thumbnail client를 반드시 주입하며 context의 fixture fallback을 제거했다. 패키지 앱은 `Hitomi live`, 명시적 browser review mode만 `Browser fixture`로 표시한다.
+- Settings·Classic import·page preview dialog는 열기 trigger와 close button focus를 관리한다. 기존 Review·내부 Review·종료 dialog의 focus 복원, reduced motion, keyboard/accessible label 계약을 유지한다.
+- `interface/api.rs`, `main.rs`, `start_app_hidden.ps1`: DB 내부 detail을 사용자 API message에서 분리하고 stable code만 노출한다. startup/launcher log는 사용자 profile과 전체 URL을 가리며 release GUI launcher는 project/executable 절대 경로를 로그에 남기지 않는다.
+- `THIRD_PARTY_NOTICES.md`: vendored Fluent UI System Icons 1.1.328의 정확한 자산 범위·MIT 고지와 lockfile 기반 dependency provenance를 기록했다. package/Cargo/Tauri version은 모두 `0.1.0`으로 일치하며 미검증 `1.0.0` 표시는 하지 않는다.
+- 데이터 호환성: H는 schema·manifest·HashProfile 의미를 변경하지 않는다. DB schema는 14, manifest와 HashProfile은 계속 version 1이다.
+
 ## 4. Contracts and versions
 
 - 앱/package/Tauri version: `0.1.0`
@@ -151,16 +161,21 @@
 - Milestone E 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend typecheck·Vite production build와 17 files 109/109 tests, Rust lib 105/105(외부 live smoke 1개 opt-in 제외), main 1/1, fmt/check/Clippy `-D warnings`, Tauri release no-bundle, whitespace를 통과했다. blank/저정보, 서로 다른 고대비 흑백, 작은 실제 장면 변화와 2/10 공통 panel negative, 재압축·해상도/번역 visual positive, containment 양방향, metadata 우선순위+전수 fallback, page 비재사용 alignment, cancel→join→restart, recovery, CAS/series/Auto Find filter를 포함한다. 로그는 `.runtime/verification/verify-20260816-025506.log`에 있다.
 - Milestone F 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend typecheck·Vite production build와 18 files 112/112 tests, Rust lib 109/109(외부 live smoke 1개 opt-in 제외), main 1/1, fmt/check/Clippy `-D warnings`, Tauri release no-bundle, whitespace를 통과했다. exact source page 2·8 탐지, page 8 단독 격리·manifest/DB 상태, 원본 번호·위치 undo, DB intent와 file move 뒤 강제 중단을 모사한 startup convergence를 실제 임시 SQLite/WebP/파일 시스템 통합 테스트로 검증했다. 로그는 `.runtime/verification/verify-20260816-033555.log`에 있다.
 - Milestone G 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend typecheck·Vite production build와 19 files 114/114 tests, Rust lib 112/112(외부 live smoke 1개 opt-in 제외), main 1/1, fmt/check/Clippy `-D warnings`, Tauri release no-bundle, whitespace를 통과했다. 실제 임시 Classic state/manifest/PNG와 별도 Next SQLite/root를 사용해 read-only inventory, conflict 비추측, verified WebP copy·manifest·completed 등록, favorite/download rollback, Classic 원본 byte 불변, applying 중 부분 폴더의 startup quarantine 수렴을 검증했다. 로그는 `.runtime/verification/verify-20260816-041453.log`에 있다.
+- Milestone H 최종 통합 검증: `tools/verify.ps1` 성공 — frozen pnpm 11.16.0 install, frontend 20 files 115/115, typecheck, Vite production build 66 modules, Rust lib 113/113와 startup 2/2(기본 suite에서 opt-in live 1개 제외), fmt/check/Clippy `-D warnings`, Tauri release no-bundle와 whitespace를 통과했다. 로그는 `.runtime/verification/verify-20260816-043508.log`에 있다.
+- opt-in 실제 Hitomi smoke: sandbox 밖 읽기 전용 실행에서 Recent search와 첫 metadata/page 계약 1/1 통과했다. `pnpm audit --prod --audit-level high`도 2026-08-16 registry advisory 기준 알려진 취약점 0건이다. `cargo-audit`은 이 PC에 설치되어 있지 않아 별도 RustSec CLI audit은 수행하지 않았다.
+- 숨김 launcher check는 typecheck와 `tauri-cli 2.11.4` 확인을 통과했고 `.runtime/launcher-check.log`에 사용자 profile/project 절대 경로를 남기지 않았다.
+- 최종 release `src-tauri/target/release/atsumi-next.exe`를 실제 Windows GUI로 실행했고 `Atsumi Next` main window가 생성되어 responsive 상태임을 확인했다. 사용자가 현재 열린 창에서 실제 검색·다운로드 폴더 선택·viewer open의 대화형 동작을 검토할 수 있다.
 
 ## 7. Known limitations and blockers
 
-현재 제품을 막는 blocker는 completion status 표에 기록한다. 각 milestone 구현 후 정확한 재현, 영향, 필요한 입력과 임시 안전 동작을 이 절에 남긴다.
+제품 기능과 Windows release build를 막는 알려진 blocker는 없다. 아래 항목은 의도된 안전 제한 또는 후속 개선 가능 범위다.
 
 - Auto Find의 현재 안전 상한은 작가당 250 page다. 그 이상을 가진 작가에서는 source가 보고한 전체 page 중 후반 후보가 이번 run에 포함되지 않는다. 범위를 임의로 무제한화하지 말고 scheduler 부하·중단 복구와 함께 정책을 조정해야 한다.
 - E-Hentai relation evidence는 사용자가 명시적인 적법 session을 제공하지 않아 production에서 비활성이다. 작품 중복 검사는 session 없이 local artifact evidence만으로 정상 동작한다. 향후 활성화할 때 cookie/session은 process memory의 redacted provider 입력으로만 취급하고 DB·manifest·로그에는 쓰지 않아야 한다.
 - Classic localStorage는 Classic 코드를 수정하거나 WebView profile을 직접 읽지 않는다. 사용자가 별도로 둔 세 가지 명시적 export filename만 선택적으로 병합하므로 export 파일이 없으면 state.json에 없는 localStorage-only 값은 가져오지 못한다.
 - page quarantine은 undo를 제공하지만 영구 purge는 의도적으로 제공하지 않는다. 공간 회수 UI는 자동 삭제 없이 별도 사용자 승인 정책으로만 추가해야 한다.
 - artifact decode는 현재 검증된 WebP와 JPEG/PNG 입력을 지원한다. source의 AVIF 가능 flag와 후보는 parse하지만 raw AVIF만 남은 page를 실제 WebP로 decode하는 기능은 아직 없다. downloader는 WebP와 원본 JPEG/PNG fallback을 우선하며 지원 후보가 없으면 typed failure로 종료한다.
+- GitHub 전달 blocker: 2026-08-16 최종 확인에서 `gh auth status`가 active account `assesse`의 token을 invalid로 판정했다. 로컬 branch·commit·release 검증에는 영향이 없지만 push와 PR #1 갱신은 새 GitHub 인증 세션이 필요하다. `gh auth login -h github.com` 실행 후 `gh auth status`가 성공하면 `git push origin agent/phase-3-foundation`과 PR 갱신을 재개한다. 인증을 우회하거나 기존 credential을 노출하지 않는다.
 
 ## 8. Future change cautions
 
@@ -201,5 +216,9 @@
 - `a8f0ca1` — `feat: complete favorites and auto find workflows`
 - `9d7f738` — `feat: add evidence based gallery duplicate review`
 - `c6bee7b` — `feat: implement internal duplicate scene review`
-- Milestone G 이후 commit, push 결과와 PR 상태는 완료 시 SHA와 함께 누적한다.
+- `6a2cd3f` — `feat: add safe classic import and rollback flow`
+- `1446b81` — `chore: finalize production ui and diagnostics`
+- 최종 문서 전달 commit: 이 문서를 포함한 branch `HEAD`
+- push 결과: GitHub CLI token invalid로 보류. 로컬 branch는 `origin/agent/phase-3-foundation`보다 위 8개 구현 commit과 이 최종 문서 commit을 가진다.
+- PR #1: 기존 Draft PR을 유지한다. 인증 복구 후 제목·본문·검토 체크리스트를 갱신하되 ready/merge는 자동 수행하지 않는다.
 - PR merge, `main` 직접 push, force push, release/tag 생성은 수행하지 않는다.
