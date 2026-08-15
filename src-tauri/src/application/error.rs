@@ -8,6 +8,12 @@ pub enum RepositoryError {
     Busy(String),
     #[error("database is corrupt: {0}")]
     Corrupt(String),
+    #[error(
+        "database schema version {found} is newer than the latest supported version {latest_supported}"
+    )]
+    UnsupportedSchema { found: i64, latest_supported: i64 },
+    #[error("database backup failed: {0}")]
+    MigrationBackup(String),
     #[error("database operation failed: {0}")]
     Other(String),
 }

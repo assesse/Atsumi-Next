@@ -179,6 +179,26 @@ impl From<RepositoryError> for ApiError {
                 action: Some(ApiAction::Review),
                 details: None,
             },
+            RepositoryError::UnsupportedSchema {
+                found,
+                latest_supported,
+            } => Self {
+                code: "DATABASE_SCHEMA_NEWER".into(),
+                message: "이 데이터는 더 새로운 Atsumi Next에서 만들어졌습니다. 앱을 업데이트하거나 백업본으로 복구하세요.".into(),
+                retryable: false,
+                action: Some(ApiAction::Review),
+                details: Some(BTreeMap::from([
+                    ("actualSchemaVersion".into(), json!(found)),
+                    ("supportedSchemaVersion".into(), json!(latest_supported)),
+                ])),
+            },
+            RepositoryError::MigrationBackup(message) => Self {
+                code: "DATABASE_BACKUP_FAILED".into(),
+                message: "안전 백업을 만들 수 없어 데이터 업데이트를 중단했습니다.".into(),
+                retryable: false,
+                action: Some(ApiAction::Review),
+                details: Some(BTreeMap::from([("reason".into(), json!(message))])),
+            },
             RepositoryError::Other(message) => Self {
                 code: "DATABASE_ERROR".into(),
                 message,

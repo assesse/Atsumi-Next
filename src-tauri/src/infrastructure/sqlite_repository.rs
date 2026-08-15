@@ -1,7 +1,8 @@
 use std::{
-    path::Path,
+    io::ErrorKind,
+    path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{
@@ -35,37 +36,63 @@ impl SqliteRepository {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
-                RepositoryError::Other(format!(
-                    "could not create database directory {}: {error}",
-                    parent.display()
-                ))
+                RepositoryError::Other(format!("could not create the database directory: {error}"))
             })?;
         }
+        let existing_database = match std::fs::metadata(path) {
+            Ok(metadata) => metadata.is_file() && metadata.len() > 0,
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(RepositoryError::Other(format!(
+                    "could not inspect the database file: {error}"
+                )))
+            }
+        };
         let connection = Connection::open(path).map_err(map_sqlite_error)?;
-        connection
-            .execute_batch("PRAGMA locking_mode = EXCLUSIVE;")
-            .map_err(map_sqlite_error)?;
-        Self::from_connection(connection)
+        Self::from_connection(
+            connection,
+            Some(FileDatabase {
+                path,
+                existing_database,
+            }),
+        )
     }
 
     pub fn open_in_memory() -> Result<Self, RepositoryError> {
         let connection = Connection::open_in_memory().map_err(map_sqlite_error)?;
-        Self::from_connection(connection)
+        Self::from_connection(connection, None)
     }
 
-    fn from_connection(mut connection: Connection) -> Result<Self, RepositoryError> {
+    fn from_connection(
+        mut connection: Connection,
+        file_database: Option<FileDatabase<'_>>,
+    ) -> Result<Self, RepositoryError> {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(map_sqlite_error)?;
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(map_sqlite_error)?;
-        let report = MigrationRunner::run(&mut connection).map_err(map_migration_error)?;
-        let recovered_entries = recover_volatile_downloads(&mut connection)?;
+        let backup_path = file_database
+            .filter(|database| database.existing_database)
+            .map(|database| database.path);
+        let report = run_migrations_with_backup(&mut connection, backup_path)?;
+        if file_database.is_some() {
+            let journal_mode: String = connection
+                .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+                .map_err(map_sqlite_error)?;
+            if !journal_mode.eq_ignore_ascii_case("wal") {
+                return Err(RepositoryError::Other(format!(
+                    "SQLite refused WAL journal mode and returned {journal_mode:?}"
+                )));
+            }
+            connection
+                .execute_batch("PRAGMA synchronous = NORMAL;")
+                .map_err(map_sqlite_error)?;
+        }
         tracing::info!(
             schema_version = report.current_version,
             migrations_applied = ?report.applied_versions,
-            recovered_entries,
             "SQLite schema is ready"
         );
         Ok(Self {
@@ -78,6 +105,121 @@ impl SqliteRepository {
             .lock()
             .map_err(|_| RepositoryError::Other("database mutex was poisoned".into()))
     }
+}
+
+#[derive(Clone, Copy)]
+struct FileDatabase<'a> {
+    path: &'a Path,
+    existing_database: bool,
+}
+
+fn run_migrations_with_backup(
+    connection: &mut Connection,
+    existing_database_path: Option<&Path>,
+) -> Result<super::migrations::MigrationReport, RepositoryError> {
+    if let Some(database_path) = existing_database_path {
+        let pending_versions =
+            MigrationRunner::pending_versions(connection).map_err(map_migration_error)?;
+        if let (Some(first_pending), Some(target_version)) =
+            (pending_versions.first(), pending_versions.last())
+        {
+            let backup_path = create_pre_migration_backup(
+                connection,
+                database_path,
+                first_pending - 1,
+                *target_version,
+            )?;
+            tracing::info!(
+                backup_file = %backup_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("pre-migration-backup.bak"),
+                from_version = first_pending - 1,
+                to_version = target_version,
+                "Created a recoverable pre-migration database backup"
+            );
+        }
+    }
+
+    MigrationRunner::run(connection).map_err(map_migration_error)
+}
+
+fn create_pre_migration_backup(
+    connection: &Connection,
+    database_path: &Path,
+    from_version: i64,
+    to_version: i64,
+) -> Result<PathBuf, RepositoryError> {
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            RepositoryError::MigrationBackup(format!(
+                "the system clock is before the Unix epoch: {error}"
+            ))
+        })?
+        .as_secs();
+    let backup_path =
+        next_pre_migration_backup_path(database_path, from_version, to_version, created_at)?;
+    let backup_path_text = backup_path.to_str().ok_or_else(|| {
+        RepositoryError::MigrationBackup(
+            "the pre-migration backup path is not valid Unicode".into(),
+        )
+    })?;
+    connection
+        .execute("VACUUM main INTO ?1", [backup_path_text])
+        .map_err(|error| {
+            RepositoryError::MigrationBackup(format!(
+                "could not create pre-migration backup {}: {error}",
+                backup_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("snapshot.bak")
+            ))
+        })?;
+    Ok(backup_path)
+}
+
+fn next_pre_migration_backup_path(
+    database_path: &Path,
+    from_version: i64,
+    to_version: i64,
+    created_at: u64,
+) -> Result<PathBuf, RepositoryError> {
+    let parent = database_path.parent().ok_or_else(|| {
+        RepositoryError::MigrationBackup(
+            "the database has no directory for a pre-migration backup".into(),
+        )
+    })?;
+    let file_name = database_path.file_name().ok_or_else(|| {
+        RepositoryError::MigrationBackup(
+            "the database has no file name for a pre-migration backup".into(),
+        )
+    })?;
+
+    for sequence in 0..10_000_u32 {
+        let mut backup_name = file_name.to_os_string();
+        backup_name.push(format!(
+            ".pre-migration-v{from_version}-to-v{to_version}-{created_at}"
+        ));
+        if sequence > 0 {
+            backup_name.push(format!("-{sequence}"));
+        }
+        backup_name.push(".bak");
+        let candidate = parent.join(backup_name);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(candidate),
+            Err(error) => {
+                return Err(RepositoryError::MigrationBackup(format!(
+                    "could not inspect a pre-migration backup path: {error}"
+                )))
+            }
+        }
+    }
+
+    Err(RepositoryError::MigrationBackup(
+        "could not reserve a non-overwriting pre-migration backup name".into(),
+    ))
 }
 
 impl StateRepository for SqliteRepository {
@@ -159,6 +301,11 @@ impl StateRepository for SqliteRepository {
 }
 
 impl DownloadRepository for SqliteRepository {
+    fn download_recover_interrupted(&self) -> Result<usize, RepositoryError> {
+        let mut connection = self.connection()?;
+        recover_volatile_downloads(&mut connection)
+    }
+
     fn download_queue_add(
         &self,
         request_id: &str,
@@ -1083,7 +1230,7 @@ impl StoredDownloadTarget {
     fn into_download_entry(self) -> Result<DownloadEntry, RepositoryError> {
         let review_kind = parse_download_review_kind(self.review_kind)?;
         if self.state == JobState::ReviewRequired
-            && (review_kind.is_none() || self.review_id.as_deref().map_or(true, str::is_empty))
+            && (review_kind.is_none() || self.review_id.as_deref().is_none_or(str::is_empty))
         {
             return Err(RepositoryError::Corrupt(
                 "review_required download entry is missing its review target".into(),
@@ -1335,7 +1482,7 @@ impl StoredDownloadEntry {
         let state = self.state.parse::<JobState>().map_err(domain_corruption)?;
         let review_kind = parse_download_review_kind(self.review_kind)?;
         if state == JobState::ReviewRequired
-            && (review_kind.is_none() || self.review_id.as_deref().map_or(true, str::is_empty))
+            && (review_kind.is_none() || self.review_id.as_deref().is_none_or(str::is_empty))
         {
             return Err(RepositoryError::Corrupt(
                 "review_required download entry is missing its review target".into(),
@@ -1558,6 +1705,254 @@ fn map_sqlite_error(error: rusqlite::Error) -> RepositoryError {
 fn map_migration_error(error: MigrationError) -> RepositoryError {
     match error {
         MigrationError::Sqlite(error) => map_sqlite_error(error),
-        other => RepositoryError::Other(other.to_string()),
+        MigrationError::FutureVersion {
+            found,
+            latest_supported,
+        } => RepositoryError::UnsupportedSchema {
+            found,
+            latest_supported,
+        },
+        MigrationError::NonContiguousHistory { .. } | MigrationError::NameMismatch { .. } => {
+            RepositoryError::Corrupt(error.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod migration_backup_tests {
+    use super::*;
+    use crate::infrastructure::migrations::MIGRATIONS;
+
+    fn create_database_before_latest_migration(path: &Path) -> i64 {
+        let connection = Connection::open(path).expect("create pre-migration database");
+        connection
+            .execute_batch(
+                r#"
+                    PRAGMA foreign_keys = ON;
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT (
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    ) STRICT;
+                "#,
+            )
+            .expect("create migration history");
+        let migrations_before_latest = &MIGRATIONS[..MIGRATIONS.len() - 1];
+        for migration in migrations_before_latest {
+            connection
+                .execute_batch(migration.sql)
+                .expect("apply pre-latest migration");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                    params![migration.version, migration.name],
+                )
+                .expect("record pre-latest migration");
+        }
+        migrations_before_latest
+            .last()
+            .expect("at least one pre-latest migration")
+            .version
+    }
+
+    fn backup_files(directory: &Path) -> Vec<PathBuf> {
+        let mut backups = std::fs::read_dir(directory)
+            .expect("read database directory")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(".pre-migration-") && name.ends_with(".bak"))
+            })
+            .collect::<Vec<_>>();
+        backups.sort();
+        backups
+    }
+
+    #[test]
+    fn file_database_is_backed_up_once_before_pending_migrations() {
+        let temporary = tempfile::tempdir().expect("create temporary directory");
+        let database_path = temporary.path().join("atsumi-next.sqlite3");
+        let previous_version = create_database_before_latest_migration(&database_path);
+        let target_version = MIGRATIONS.last().expect("latest migration").version;
+
+        drop(SqliteRepository::open(&database_path).expect("migrate persistent repository"));
+
+        let backups = backup_files(temporary.path());
+        assert_eq!(backups.len(), 1);
+        let backup_name = backups[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("backup file name is Unicode");
+        assert!(backup_name.starts_with(&format!(
+            "atsumi-next.sqlite3.pre-migration-v{previous_version}-to-v{target_version}-"
+        )));
+        assert!(backup_name.ends_with(".bak"));
+        let backup = Connection::open(&backups[0]).expect("open recoverable backup");
+        let backup_version: i64 = backup
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("read backup schema version");
+        assert_eq!(backup_version, previous_version);
+        let integrity: String = backup
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .expect("check backup integrity");
+        assert_eq!(integrity, "ok");
+        drop(backup);
+
+        let migrated = Connection::open(&database_path).expect("open migrated database");
+        let migrated_version: i64 = migrated
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("read migrated schema version");
+        assert_eq!(migrated_version, target_version);
+        drop(migrated);
+
+        drop(SqliteRepository::open(&database_path).expect("reopen current repository"));
+        assert_eq!(backup_files(temporary.path()).len(), 1);
+    }
+
+    #[test]
+    fn backup_names_never_overwrite_an_existing_snapshot() {
+        let temporary = tempfile::tempdir().expect("create temporary directory");
+        let database_path = temporary.path().join("atsumi-next.sqlite3");
+        let created_at = 1_786_780_000;
+        let first = next_pre_migration_backup_path(&database_path, 6, 7, created_at)
+            .expect("reserve first backup path");
+        std::fs::write(&first, b"keep this recovery snapshot")
+            .expect("create an existing recovery snapshot");
+
+        let second = next_pre_migration_backup_path(&database_path, 6, 7, created_at)
+            .expect("reserve non-overwriting backup path");
+
+        assert_ne!(second, first);
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("atsumi-next.sqlite3.pre-migration-v6-to-v7-1786780000-1.bak")
+        );
+        assert_eq!(
+            std::fs::read(&first).expect("existing snapshot remains readable"),
+            b"keep this recovery snapshot"
+        );
+    }
+
+    #[test]
+    fn backup_failure_prevents_pending_migrations_from_running() {
+        let temporary = tempfile::tempdir().expect("create temporary directory");
+        let missing_database_path = temporary
+            .path()
+            .join("missing-directory")
+            .join("atsumi-next.sqlite3");
+        let mut connection = Connection::open_in_memory().expect("open migration test database");
+        connection
+            .execute_batch(
+                r#"
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT (
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    ) STRICT;
+                    INSERT INTO schema_migrations (version, name)
+                    VALUES (1, 'settings_and_window_placement');
+                "#,
+            )
+            .expect("seed pending migration history");
+
+        let error = run_migrations_with_backup(&mut connection, Some(&missing_database_path))
+            .expect_err("backup failure must abort migration");
+
+        assert!(matches!(
+            error,
+            RepositoryError::MigrationBackup(message)
+                if message.contains("could not create pre-migration backup")
+        ));
+        let recorded_version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("read unchanged migration history");
+        assert_eq!(recorded_version, 1);
+        let migration_two_table_exists: bool = connection
+            .query_row(
+                r#"
+                    SELECT EXISTS (
+                        SELECT 1 FROM sqlite_schema
+                        WHERE type = 'table' AND name = 'download_entries'
+                    )
+                "#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("check that migration two did not run");
+        assert!(!migration_two_table_exists);
+    }
+
+    #[test]
+    fn persistent_repository_uses_wal_without_exclusive_locking() {
+        let temporary = tempfile::tempdir().expect("create temporary directory");
+        let database_path = temporary.path().join("atsumi-next.sqlite3");
+        let first = SqliteRepository::open(&database_path).expect("open primary repository");
+        let second = SqliteRepository::open(&database_path).expect("open concurrent repository");
+
+        let observer = Connection::open(&database_path).expect("open independent observer");
+        let journal_mode: String = observer
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal mode");
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+
+        drop(observer);
+        drop(second);
+        drop(first);
+    }
+
+    #[test]
+    fn future_schema_is_rejected_without_modifying_the_database() {
+        let temporary = tempfile::tempdir().expect("create temporary directory");
+        let database_path = temporary.path().join("future.sqlite3");
+        let future_version = MIGRATIONS.last().expect("latest migration").version + 1;
+        let connection = Connection::open(&database_path).expect("create future database");
+        connection
+            .execute_batch(&format!(
+                r#"
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT (
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    ) STRICT;
+                    INSERT INTO schema_migrations (version, name)
+                    VALUES ({future_version}, 'future_schema');
+                    CREATE TABLE future_sentinel (
+                        value TEXT NOT NULL
+                    ) STRICT;
+                    INSERT INTO future_sentinel (value) VALUES ('preserve-me');
+                "#
+            ))
+            .expect("seed future schema");
+        drop(connection);
+        let before = std::fs::read(&database_path).expect("snapshot future database");
+
+        let error = match SqliteRepository::open(&database_path) {
+            Ok(_) => panic!("older application must reject a future schema"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            RepositoryError::UnsupportedSchema {
+                found,
+                latest_supported
+            } if found == future_version
+                && latest_supported == future_version - 1
+        ));
+        let after = std::fs::read(&database_path).expect("re-read future database");
+        assert_eq!(after, before);
+        assert!(backup_files(temporary.path()).is_empty());
     }
 }

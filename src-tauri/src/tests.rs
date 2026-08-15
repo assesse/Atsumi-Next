@@ -7,9 +7,7 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 
 use crate::{
-    application::{
-        ApplicationError, ApplicationService, ArtifactRepository, RepositoryError, StateRepository,
-    },
+    application::{ApplicationError, ApplicationService, ArtifactRepository, StateRepository},
     domain::{
         ArtifactBundle, ArtifactRelativePath, DownloadArtifact, DownloadArtifactState,
         DownloadEntry, DownloadEntryId, DownloadListRequest, FixtureDownloadJobStep, Gallery,
@@ -449,7 +447,7 @@ fn window_placement_round_trips_through_sqlite() {
 }
 
 #[test]
-fn exclusive_repository_open_prevents_a_second_instance_from_recovering_live_jobs() {
+fn repository_open_is_non_exclusive_and_recovery_is_an_explicit_app_operation() {
     let temporary = tempfile::tempdir().expect("create temporary directory");
     let database_path = temporary.path().join("exclusive-owner.sqlite3");
     let first_repository = Arc::new(
@@ -462,11 +460,11 @@ fn exclusive_repository_open_prevents_a_second_instance_from_recovering_live_job
         .expect("queue a live entry");
     let entry_id = queued.entries[0].entry_id.clone();
 
-    let second_open = match SqliteRepository::open(&database_path) {
-        Ok(_) => panic!("a second repository must not recover another instance's live jobs"),
-        Err(error) => error,
-    };
-    assert!(matches!(second_open, RepositoryError::Busy(_)));
+    let second_repository = Arc::new(
+        SqliteRepository::open(&database_path).expect("WAL permits a concurrent repository"),
+    );
+    let second_service = ApplicationService::new(second_repository.clone())
+        .with_download_repository(second_repository.clone());
 
     let still_queued = first_service
         .download_entries_list(DownloadListRequest {
@@ -479,12 +477,31 @@ fn exclusive_repository_open_prevents_a_second_instance_from_recovering_live_job
     assert_eq!(still_queued.entries[0].entry_id, entry_id);
     assert_eq!(still_queued.entries[0].revision, 0);
 
+    let observed_by_second = second_service
+        .download_entries_list(DownloadListRequest {
+            state: Some(JobState::Queued),
+            query: None,
+            page: 1,
+            page_size: 20,
+        })
+        .expect("opening a repository does not mutate active jobs");
+    assert_eq!(observed_by_second.entries[0].entry_id, entry_id);
+    assert_eq!(observed_by_second.entries[0].revision, 0);
+
+    drop(second_service);
+    drop(second_repository);
     drop(first_service);
     drop(first_repository);
     let reopened =
         Arc::new(SqliteRepository::open(&database_path).expect("open after the first owner exits"));
     let reopened_service =
         ApplicationService::new(reopened.clone()).with_download_repository(reopened);
+    assert_eq!(
+        reopened_service
+            .download_recover_interrupted()
+            .expect("the single app owner recovers abandoned work"),
+        1
+    );
     let interrupted = reopened_service
         .download_entries_list(DownloadListRequest {
             state: Some(JobState::Interrupted),
@@ -816,7 +833,7 @@ fn cancelling_an_interrupted_download_preserves_attempt_failure_evidence() {
 fn stale_fixture_worker_cannot_advance_a_retried_attempt() {
     let temporary = tempfile::tempdir().expect("create temporary directory");
     let repository = Arc::new(
-        SqliteRepository::open(&temporary.path().join("stale-worker.sqlite3"))
+        SqliteRepository::open(temporary.path().join("stale-worker.sqlite3"))
             .expect("create repository"),
     );
     let service = ApplicationService::new(repository.clone()).with_download_repository(repository);
@@ -925,6 +942,12 @@ fn download_mutation_errors_are_stable_and_batches_roll_back() {
         Arc::new(SqliteRepository::open(&database_path).expect("reopen and recover active entry"));
     let service =
         ApplicationService::new(repository.clone()).with_download_repository(repository.clone());
+    assert_eq!(
+        service
+            .download_recover_interrupted()
+            .expect("recover the abandoned active entry"),
+        1
+    );
     let invalid = service
         .download_cancel(vec![first_id.clone(), completed_id.clone()])
         .expect_err("completed entry makes the whole batch invalid");
@@ -1128,6 +1151,12 @@ fn volatile_download_state_recovers_as_interrupted_after_reopen() {
         Arc::new(SqliteRepository::open(&database_path).expect("reopen and recover repository"));
     let service =
         ApplicationService::new(repository.clone()).with_download_repository(repository.clone());
+    assert_eq!(
+        service
+            .download_recover_interrupted()
+            .expect("the application owner performs startup recovery"),
+        1
+    );
     let interrupted = service
         .download_entries_list(DownloadListRequest {
             state: Some(JobState::Interrupted),

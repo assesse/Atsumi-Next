@@ -22,21 +22,25 @@ start-app.vbs
 
 이 실행기는 전역 `pnpm`을 요구하지 않는다. 시스템 Node.js가 없으면 Codex Desktop의 bundled Node.js를 사용하고, Rust/Cargo는 PATH 또는 `%USERPROFILE%\.cargo\bin`에서 찾는다. Tauri 앱을 새로 빌드하려면 Rust 외에 MSVC C++ Build Tools와 Windows SDK가 필요하다. 첫 실행 또는 소스 변경 뒤에는 빌드 시간만큼 앱 창이 늦게 나타날 수 있으며, 이후 실행은 만들어 둔 release 실행 파일을 바로 연다.
 
-MSVC/Windows SDK가 없는 PC에서는 `start-review.cmd`를 실행해 브라우저 fixture 모드로 UI와 command projection을 검토할 수 있다. 이 모드는 SQLite/Tauri backend 검증을 대신하지 않으며, 창과 함께 열린 최소화된 개발 서버를 닫으면 종료된다.
-
 ### 개발 및 자동 검증
+
+권장 개발 도구는 Node.js 24.x, `pnpm` 11.16.0, Rust 1.88 이상 stable이다. `package.json`의 `packageManager`와 CI가 같은 `pnpm` 버전을 고정하므로 다른 버전으로 lockfile을 갱신하지 않는다.
 
 ```powershell
 pnpm install --frozen-lockfile
 pnpm run dev
-pnpm run typecheck
 pnpm run test
+pnpm run typecheck
 pnpm run build
+rustup toolchain install stable --profile minimal --component rustfmt,clippy
+./tools/verify.ps1
 pnpm tauri dev
 ```
 
 이 저장소의 PowerShell 실행기는 시스템 Node.js를 우선 사용하고, 없으면 Codex Desktop의 bundled Node.js를 찾는다.
 일상적인 사용자 검토는 `start-app.vbs`로 앱을 직접 실행한다. `start-dev.cmd`는 오류 진단용으로 남겨 둔다. MSI/Setup 번들은 명시적인 릴리스 요청이 있을 때만 만든다.
+
+GitHub Actions의 `Windows CI`는 push와 pull request마다 `windows-latest`에서 Node.js 24, 정확히 `pnpm` 11.16.0, Rust stable을 사용한다. 로컬과 같은 `tools/verify.ps1`로 frozen lockfile 설치, frontend test/typecheck/build, Rust fmt/check/test/clippy, release no-bundle build, whitespace 검사를 모두 통과해야 한다. CI token 권한은 저장소 읽기로 제한하고 pnpm store와 Cargo 의존성·빌드 출력만 캐시한다. 검증 로그는 Git에서 제외된 `.runtime/verification/`에 남는다.
 
 ## 절대 원칙
 
@@ -51,13 +55,13 @@ pnpm tauri dev
 ## Classic 기준선 주의사항
 
 - 감사일: 2026-08-12
-- Classic 저장소: `C:\Users\정재호\Documents\PUPIL`
+- Classic 저장소: 별도 보존된 로컬 `PUPIL` 저장소(개인 PC의 절대 경로는 문서화하지 않음)
 - Classic 보존 commit: `3b3bedd Preserve Atsumi Classic baseline before rewrite`
 - Classic 보존 tag: `atsumi-classic-baseline-2026-08-12`
 - 초기 설계 보존 branch: Classic 저장소의 `codex/atsumi-next`
 - 초기 설계 보존 commit: `7c0a773 Define Atsumi Next architecture and UX prototype`
-- 현재 프로젝트 branch: `main`
-- 현재 프로젝트는 Classic의 포크가 아니라 별도 Git 저장소이며 원격 저장소는 아직 연결하지 않았다.
+- Atsumi Next 원격 저장소: [`assesse/Atsumi-Next`](https://github.com/assesse/Atsumi-Next) (`origin`)
+- 기본 branch는 `main`이며, 기능 작업은 `agent/*` branch와 pull request를 거쳐 병합한다.
 - Classic 기준선은 frontend production build와 Rust 15개 unit test를 통과했다.
 - Classic 코드는 참조 및 데이터 이전 입력으로만 사용하며 새 구현 코드를 Classic 저장소에 추가하지 않는다.
 - 앱 브랜드에는 Aluminum Classic의 `atsumi.svg`, `atsumi-256.png`, `icon.ico` 원본만 복사해 사용한다. Pupil APK 추출 자원은 사용하지 않는다.
@@ -69,12 +73,16 @@ pnpm tauri dev
 - [PRODUCT_SCOPE.md](docs/PRODUCT_SCOPE.md): 새 제품의 목표, 비목표, 첫 완성 범위
 - [FEATURE_MATRIX.md](docs/FEATURE_MATRIX.md): Classic 기능의 유지, 재설계, 보류 분류
 - [UX_ARCHITECTURE.md](docs/UX_ARCHITECTURE.md): 정보 구조와 주요 화면 흐름
+- [UX_INTERACTION_MATRIX.md](docs/UX_INTERACTION_MATRIX.md): 화면별 포인터·키보드 상호작용 계약
 - [MULTI_SELECTION_RESEARCH.md](docs/MULTI_SELECTION_RESEARCH.md): 카드 내부 action과 충돌하지 않는 다중 선택 mode 조사·권장안
 - [SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md): 프론트와 백엔드의 새 경계
+- [API_CONTRACT_V2.md](docs/API_CONTRACT_V2.md): command·event·DTO 계약
+- [ERROR_CATALOG.md](docs/ERROR_CATALOG.md): 안정 오류 code와 사용자 행동
 - [DATA_MIGRATION.md](docs/DATA_MIGRATION.md): 데이터 소유권과 이전 원칙
 - [INCIDENT_AND_LESSONS.md](docs/INCIDENT_AND_LESSONS.md): 문제, 원인, 해결 이력과 회귀 조건
 - [DECISION_REGISTER.md](docs/DECISION_REGISTER.md): 확정 사항과 사용자 승인 대기 사항
 - [DELIVERY_PLAN.md](docs/DELIVERY_PLAN.md): 단계별 산출물과 구현 진입 조건
+- [IMPLEMENTATION_HANDOFF.md](docs/IMPLEMENTATION_HANDOFF.md): 실제 구현·검증·복구·Git 전달 상태
 
 ## 기존 명세와의 관계
 

@@ -72,6 +72,8 @@ pub trait SearchRepository: Send + Sync {
 }
 
 pub trait DownloadRepository: Send + Sync {
+    fn download_recover_interrupted(&self) -> Result<usize, RepositoryError>;
+
     fn download_queue_add(
         &self,
         request_id: &str,

@@ -119,6 +119,12 @@ impl ApplicationService {
             .map_err(Into::into)
     }
 
+    pub fn download_recover_interrupted(&self) -> Result<usize, ApplicationError> {
+        self.download_repository()?
+            .download_recover_interrupted()
+            .map_err(Into::into)
+    }
+
     pub fn download_queue_add(
         &self,
         galleries: Vec<i64>,

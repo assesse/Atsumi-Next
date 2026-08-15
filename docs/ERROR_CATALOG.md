@@ -1,4 +1,4 @@
-# 오류 분류 초안
+# 오류 분류
 
 ## 원칙
 
@@ -21,6 +21,8 @@
 | `FILESYSTEM_CONFLICT` | 같은 위치에 다른 파일이 있습니다 | 아니오 | 사용자 검토 |
 | `DATABASE_BUSY` | 내부 기록이 사용 중입니다 | 예 | 짧은 재시도 |
 | `DATABASE_CORRUPT` | 내부 데이터 복구가 필요합니다 | 아니오 | backup/repair flow |
+| `DATABASE_SCHEMA_NEWER` | 더 새로운 Atsumi Next가 만든 데이터입니다 | 아니오 | 데이터 변경 없이 최신 앱 사용 |
+| `DATABASE_BACKUP_FAILED` | 안전 백업을 만들 수 없어 업데이트를 중단했습니다 | 아니오 | 저장 공간·권한 확인 후 재시도 |
 | `IDEMPOTENCY_CONFLICT` | 같은 요청 식별자가 다른 대상에 이미 사용되었습니다 | 아니오 | 호출 내용 검토 |
 | `DOWNLOAD_ENTRY_NOT_FOUND` | 다운로드 항목을 다시 불러오세요 | 아니오 | 목록 새로고침 |
 | `INVALID_DOWNLOAD_STATE` | 현재 상태에서는 요청한 작업을 수행할 수 없습니다 | 아니오 | 최신 상태 검토 |

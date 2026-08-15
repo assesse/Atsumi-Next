@@ -25,10 +25,21 @@ use thumbnail::{
     ThumbnailCoordinatorConfig,
 };
 
-pub fn run() {
+pub fn run() -> tauri::Result<()> {
     infrastructure::telemetry::init();
 
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = window
+                    .show()
+                    .and_then(|_| window.unminimize())
+                    .and_then(|_| window.set_focus())
+                {
+                    tracing::warn!(error = %error, "could not focus the existing Atsumi Next window");
+                }
+            }
+        }))
         .on_tray_icon_event(|app, event| {
             let restore = matches!(
                 event,
@@ -75,6 +86,7 @@ pub fn run() {
                 .with_download_repository(repository)
                 .with_search_repository(Arc::new(search_repository));
             let settings = service.settings_get()?;
+            let recovered_entries = service.download_recover_interrupted()?;
             let thumbnail_config = ThumbnailCoordinatorConfig {
                 max_concurrency: settings.concurrent_image_requests as usize,
                 request_start_interval: Duration::from_millis(settings.request_start_interval_ms),
@@ -109,6 +121,7 @@ pub fn run() {
             tracing::info!(
                 database_file = "atsumi-next.sqlite3",
                 app_version = env!("CARGO_PKG_VERSION"),
+                recovered_entries,
                 "Atsumi Next backend initialized"
             );
             Ok(())
@@ -136,7 +149,8 @@ pub fn run() {
         ])
         .run(tauri::generate_context!());
 
-    if let Err(error) = result {
+    if let Err(ref error) = result {
         tracing::error!(error = %error, "Atsumi Next exited with an error");
     }
+    result
 }

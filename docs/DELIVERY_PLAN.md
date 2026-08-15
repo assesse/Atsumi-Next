@@ -128,5 +128,5 @@
 3. 완료: 중앙 상태 전이, attempt/error/timestamp schema, `download_retry`/`download_cancel`, `cancelled`와 batch/CAS 회귀 검증.
 4. 완료: 공용 thumbnail key/component와 프로세스 전역 coordinator, priority, in-flight dedupe, 취소, 성공/실패 cache 기반.
 5. 실제 Hitomi metadata/thumbnail resolver를 저장 fixture의 404, 503, timeout, rate-limit test부터 연결한다.
-6. 임시 exclusive DB guard를 owner lease/heartbeat 또는 앱 내부 single-instance 계약으로 교체한다.
+6. 완료: 앱 내부 single-instance 계약과 migration 전 SQLite backup/future-schema 거부. repository open은 WAL·busy timeout을 사용하고 job 복구는 single-instance를 획득한 app setup에서만 명시적으로 실행한다.
 7. 정식 queue runner와 artifact 저장·검증·resume·reconcile, 첫 이미지 열기를 연결한 뒤 Phase 3 E2E를 수행한다.

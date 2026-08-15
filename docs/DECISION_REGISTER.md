@@ -40,6 +40,10 @@
 | D-120 | 카드 표지의 hover `+`/`…` command를 제거하고, sole selection 일반 재클릭은 선택 해제한다. 선택 0의 첫 일반 metadata/status 클릭은 원래 action을 수행한다. | 2026-08-13 사용자 승인 |
 | D-121 | 카드의 중복 의심·다운로드 중 상태는 텍스트 대신 접근 가능한 warning/download 아이콘으로 표시하며 상세 설명은 Activity Center에 유지한다. | 2026-08-13 사용자 승인 |
 | D-122 | Explore, Auto Find, Downloads, Detail, Review의 미리보기는 화면별 worker가 아니라 프로세스 전역 ThumbnailCoordinator 하나가 우선순위·중복 요청·취소·cache를 담당한다. | 2026-08-14 사용자 승인 |
+| D-123 | 다운로드 폴더가 정해지지 않은 첫 다운로드에서만 Windows 폴더 선택 dialog를 열고, 선택한 경로를 설정에 영속한다. 취소하면 queue를 만들지 않는다. | 2026-08-15 전체 구현 지시 |
+| D-124 | Downloads에서 여러 완료 항목을 선택하고 Enter를 누르면 첫 번째 항목의 첫 검증 파일만 연다. | 2026-08-15 전체 구현 지시 |
+| D-125 | Review는 별도 창이 아니라 현재 앱 위의 대형 dialog로 유지한다. | 2026-08-15 전체 구현 지시 |
+| D-126 | quarantine은 자동으로 영구 삭제하지 않는다. 영구 삭제는 명시적인 사용자 명령과 재확인을 거친다. | 2026-08-15 전체 구현 지시 |
 
 ## 제안
 
@@ -58,7 +62,5 @@
 ## 다음 사용자 확인 항목
 
 1. clickable prototype의 정보 위치와 화면 밀도
-2. Downloads에서 여러 완료 항목 Enter를 모두 외부 viewer로 열지, 첫 항목만 열지
-3. Review 진입점과 대형 dialog/독립 window 중 선호
-4. quarantine 보존 기간과 영구 삭제 UI
-5. Classic import dry-run 보고서 형식
+2. quarantine 수동 영구 삭제 화면에서 보여 줄 evidence 범위
+3. Classic import dry-run 보고서 형식

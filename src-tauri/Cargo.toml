@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Atsumi Next desktop backend"
 authors = ["Atsumi Next contributors"]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88.0"
 
 [lib]
 name = "atsumi_next_lib"
@@ -18,6 +18,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 tracing = "0.1"

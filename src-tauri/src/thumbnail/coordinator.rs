@@ -881,7 +881,7 @@ fn next_work(core: &CoordinatorCore) -> Option<(QueueItem, CancellationToken)> {
             return None;
         }
         while state.queue.peek().is_some_and(|item| {
-            state.work.get(&item.key).map_or(true, |work| {
+            state.work.get(&item.key).is_none_or(|work| {
                 work.generation != item.generation
                     || work.queue_version != item.queue_version
                     || work.status != WorkStatus::Queued

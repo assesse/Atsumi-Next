@@ -509,6 +509,14 @@ pub struct MigrationReport {
 pub enum MigrationError {
     #[error("SQLite migration failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error(
+        "database schema version {found} is newer than the latest supported version {latest_supported}"
+    )]
+    FutureVersion { found: i64, latest_supported: i64 },
+    #[error(
+        "migration history is non-contiguous: expected version {expected}, found version {actual}"
+    )]
+    NonContiguousHistory { expected: i64, actual: i64 },
     #[error("migration {version} was recorded as {actual:?}, expected {expected:?}")]
     NameMismatch {
         version: i64,
@@ -535,17 +543,7 @@ impl MigrationRunner {
         )?;
 
         let applied = Self::applied_migrations(connection)?;
-        for migration in MIGRATIONS {
-            if let Some(actual_name) = applied.get(&migration.version) {
-                if actual_name != migration.name {
-                    return Err(MigrationError::NameMismatch {
-                        version: migration.version,
-                        expected: migration.name,
-                        actual: actual_name.clone(),
-                    });
-                }
-            }
-        }
+        Self::validate_applied_migrations(&applied)?;
 
         let mut applied_versions = Vec::new();
         for migration in MIGRATIONS {
@@ -575,6 +573,70 @@ impl MigrationRunner {
         })
     }
 
+    pub(crate) fn pending_versions(connection: &Connection) -> Result<Vec<i64>, MigrationError> {
+        let migration_table_exists = connection.query_row(
+            r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM sqlite_schema
+                    WHERE type = 'table' AND name = 'schema_migrations'
+                )
+            "#,
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let applied = if migration_table_exists {
+            Self::applied_migrations(connection)?
+        } else {
+            BTreeMap::new()
+        };
+        Self::validate_applied_migrations(&applied)?;
+        Ok(MIGRATIONS
+            .iter()
+            .skip(applied.len())
+            .map(|migration| migration.version)
+            .collect())
+    }
+
+    fn validate_applied_migrations(applied: &BTreeMap<i64, String>) -> Result<(), MigrationError> {
+        let latest_supported = MIGRATIONS
+            .last()
+            .map(|migration| migration.version)
+            .unwrap_or(0);
+        if let Some(found) = applied.keys().next_back().copied() {
+            if found > latest_supported {
+                return Err(MigrationError::FutureVersion {
+                    found,
+                    latest_supported,
+                });
+            }
+        }
+
+        for (index, (actual_version, actual_name)) in applied.iter().enumerate() {
+            let Some(expected) = MIGRATIONS.get(index) else {
+                return Err(MigrationError::FutureVersion {
+                    found: *actual_version,
+                    latest_supported,
+                });
+            };
+            if *actual_version != expected.version {
+                return Err(MigrationError::NonContiguousHistory {
+                    expected: expected.version,
+                    actual: *actual_version,
+                });
+            }
+            if actual_name != expected.name {
+                return Err(MigrationError::NameMismatch {
+                    version: expected.version,
+                    expected: expected.name,
+                    actual: actual_name.clone(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     fn applied_migrations(
         connection: &Connection,
     ) -> Result<BTreeMap<i64, String>, rusqlite::Error> {
@@ -582,5 +644,87 @@ impl MigrationRunner {
             .prepare("SELECT version, name FROM schema_migrations ORDER BY version ASC")?;
         let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn migration_history(entries: &[(i64, &str)]) -> Connection {
+        let connection = Connection::open_in_memory().expect("open migration test database");
+        connection
+            .execute_batch(
+                r#"
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT (
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    ) STRICT;
+                "#,
+            )
+            .expect("create migration history");
+        for (version, name) in entries {
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                    params![version, name],
+                )
+                .expect("record migration history");
+        }
+        connection
+    }
+
+    #[test]
+    fn rejects_a_schema_version_newer_than_this_binary_supports() {
+        let future_version = MIGRATIONS.last().expect("known migration").version + 1;
+        let mut connection = migration_history(&[(future_version, "future_migration")]);
+
+        let error = MigrationRunner::run(&mut connection).expect_err("reject future schema");
+
+        assert!(matches!(
+            error,
+            MigrationError::FutureVersion {
+                found,
+                latest_supported
+            } if found == future_version
+                && latest_supported == MIGRATIONS.last().expect("known migration").version
+        ));
+    }
+
+    #[test]
+    fn rejects_a_gap_in_recorded_migration_history() {
+        let mut connection = migration_history(&[
+            (MIGRATIONS[0].version, MIGRATIONS[0].name),
+            (MIGRATIONS[2].version, MIGRATIONS[2].name),
+        ]);
+
+        let error = MigrationRunner::run(&mut connection).expect_err("reject migration gap");
+
+        assert!(matches!(
+            error,
+            MigrationError::NonContiguousHistory {
+                expected: 2,
+                actual: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_a_recorded_migration_name_mismatch() {
+        let mut connection = migration_history(&[(MIGRATIONS[0].version, "renamed")]);
+
+        let error = MigrationRunner::run(&mut connection).expect_err("reject renamed migration");
+
+        assert!(matches!(
+            error,
+            MigrationError::NameMismatch {
+                version: 1,
+                expected: "settings_and_window_placement",
+                actual
+            } if actual == "renamed"
+        ));
     }
 }
