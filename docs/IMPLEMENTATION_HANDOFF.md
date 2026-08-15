@@ -17,7 +17,7 @@
 | 영역 | 상태 | 현재 근거 |
 |---|---|---|
 | startup·single-instance | 완료 | 두 번째 실행은 기존 창을 복원하며, fatal startup은 non-zero exit·사용자 안내·로컬 오류 로그를 남긴다 |
-| DB·migration | 완료 | schema v12, v11→v12 additive duplicate evidence schema, future-schema 무변경 거부, version backup, WAL·explicit startup recovery 검증 완료 |
+| DB·migration | 완료 | schema v13, v12→v13 additive internal scene/page quarantine schema, future-schema 무변경 거부, version backup, WAL·explicit startup recovery 검증 완료 |
 | Hitomi search | 완료 | production live adapter, query serialization, paging/filter/popular fixture contract 검증 완료; live smoke만 미검증 |
 | detail·Related | 완료 | typed galleryinfo detail·Related 5개와 source-page identity를 저장 fixture 통합 테스트로 검증 |
 | thumbnail | 완료 | 전역 coordinator와 live resolver·viewport 구독·우선순위·취소·memory/negative cache 검증 완료 |
@@ -26,7 +26,7 @@
 | file open | 완료 | verified first non-quarantined page를 root 내부 canonical path로 확인하고 Windows ShellExecute로 실행 |
 | Auto Find | 완료 | SQLite favorite/history/run/candidate/exclusion, 실제 source supervisor, 5개 namespace 카드·상세·Related projection, 명시적 갱신·취소·복원·local filter/group·batch queue 검증 완료 |
 | gallery duplicate | 완료 | verified artifact HashProfile evidence, full scan/cancel/recovery, 실제 source-page Review와 CAS decision history 검증 완료 |
-| internal duplicate | blocker | 실제 artifact 기반 scan·removal plan 미구현 |
+| internal duplicate | 완료 | verified artifact 내부 exact/2행 이상 visual scene scan, synchronized source-page Review, CAS plan, page quarantine·undo·startup recovery 검증 완료 |
 | quarantine | 완료 | root 내부 atomic move, pending saga, startup 복구, undo와 무자동삭제 검증 |
 | Classic import | blocker | read-only dry-run·conflict·rollback 미구현 |
 | Windows build·CI | 완료 | 최소 CSP·capability, 공용 `tools/verify.ps1`, Windows CI와 Tauri no-bundle release 검증 완료 |
@@ -82,12 +82,22 @@
 - E-Hentai relation은 typed optional port와 evidence kind를 제공하지만 명시적인 적법 session이 없는 현재 production에서는 disabled provider를 사용한다. session/cookie를 저장하거나 로그에 남기는 fallback은 없다.
 - 데이터 호환성: DB schema는 12로 상승한다. v12는 additive하고 v1~v11 의미, manifest schema 1, download artifact HashProfile field를 재해석하지 않는다.
 
+### Milestone F — internal scene Review·page quarantine
+
+- `domain/internal_duplicate.rs`, `application/internal_duplicate_analyzer.rs`, `internal_duplicate_supervisor.rs`: 작품 중복 HashProfile/page cache를 공유하되 한 verified artifact 안에서만 검사한다. exact SHA 반복은 한 행을 허용하고 visual evidence는 한 장짜리 shared panel을 제외하기 위해 최소 2행의 단조 gap-tolerant block만 저장한다.
+- `migrations.rs`와 `internal_duplicate_repository.rs`: migration 13으로 scan run, block/row/page evidence, 만료형 removal plan과 page quarantine saga를 additive하게 추가했다. run은 singleton이고 start/cancel/shutdown/recovery, group replace, plan revision CAS와 apply/undo completion은 짧은 SQLite transaction이다.
+- `InternalDuplicateSupervisor`: gallery별 최신 verified artifact를 hash하고 진행 event를 보낸다. 사용자가 고른 keep/remove source page와 현재 파일 수·byte 합계를 15분 계획으로 고정한다. page move는 DB intent 뒤 artifact 내부 `.atsumi-page-quarantine/<plan-id>/`로 수행하고 manifest atomic replace 뒤 DB state를 확정한다.
+- startup은 pending page move/restore를 원본·격리 경로 존재 상태로 재개한다. 양쪽이 모두 있거나 모두 없으면 overwrite/delete하지 않고 Review 오류로 남긴다. source page number, SHA·byte·format metadata는 격리와 undo 동안 유지된다.
+- `App.tsx`, typed backend와 `InternalDuplicateDialog.tsx`: Downloads에서 전체 scan 시작·취소·진행·오류·재시도, 완료 앨범 하나의 synchronized row 검토, 행별 keep 선택, 파일 수·용량 계획 preview, 명시적 격리 적용과 이력 기반 undo를 연결했다. page 이미지는 live source가 아니라 전역 coordinator의 verified `artifactPage(entryId, sourcePage)`만 사용한다.
+- 브라우저 검토 adapter는 동일한 run/plan/revision/quarantine/undo 계약을 결정론적으로 재현한다. production과 browser 모두 자동 영구 삭제 command가 없다.
+- 데이터 호환성: DB schema는 13으로 상승한다. v13은 additive하고 v1~v12 의미, manifest schema 1과 HashProfile 1을 재해석하지 않는다.
+
 ## 4. Contracts and versions
 
 - 앱/package/Tauri version: `0.1.0`
 - Rust MSRV: `1.88.0` (working tree)
-- DB schema version: 12
-- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`, `favorites_search_history_and_auto_find`, `auto_find_visible_metadata`, `artifact_duplicate_evidence_and_decisions`
+- DB schema version: 13
+- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`, `favorites_search_history_and_auto_find`, `auto_find_visible_metadata`, `artifact_duplicate_evidence_and_decisions`, `internal_scene_review_and_page_quarantine`
 - manifest schema version: 1
 - HashProfile version: 1 / algorithm version 1 (artifact SHA-256 + 작품 중복 64-bit coarse dHash·pHash, 1024-bit detail dHash와 content gate)
 - Hitomi parser version: 1
@@ -103,7 +113,7 @@
 - 검색·썸네일·다운로드는 공용 HTTP budget과 host cooldown을 공유한다.
 - filesystem 경로는 canonical download root 내부만 허용한다.
 - 자동 판정만으로 사용자 파일을 영구 삭제하지 않는다.
-- quarantine의 영구 삭제는 사용자의 명시적 명령으로만 수행한다.
+- 현재 quarantine은 undo만 제공하고 영구 purge command는 제공하지 않는다.
 - Classic 저장소와 원본 사용자 데이터는 읽기 전용 입력이다.
 - 지원 버전보다 새로운 DB schema는 변경 전에 거부한다.
 - 실제 파일 DB migration 전에 timestamp와 version이 포함된 일관된 backup을 만들고 덮어쓰지 않는다.
@@ -129,6 +139,7 @@
 - Milestone D frontend 집중 검증: TypeScript typecheck와 Vite production build(63 modules)가 통과했다. `tools/run_frontend.ps1 test`는 16 files, 100/100 tests를 통과해 5개 namespace card/detail/Related favorite 일관성, multiword namespace 검색, remount 복원, 구조화 이력 재생, 입력 중 무요청, 명시적 Auto Find lifecycle, 부분 후보 취소 보존, download/exclusion filter와 stale fixture 차단을 검증했다. 기존 React act-environment warning은 실패가 아니며 별도 운영 polish 항목이다.
 - Milestone D 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend 100/100, Rust lib 90/90(외부 live smoke 1개 opt-in 제외), startup 1/1, typecheck·production build·Clippy `-D warnings`·Tauri release·whitespace 검사를 통과했다. 로그는 `.runtime/verification/verify-20260815-184914.log`에 있다.
 - Milestone E 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend typecheck·Vite production build와 17 files 109/109 tests, Rust lib 105/105(외부 live smoke 1개 opt-in 제외), main 1/1, fmt/check/Clippy `-D warnings`, Tauri release no-bundle, whitespace를 통과했다. blank/저정보, 서로 다른 고대비 흑백, 작은 실제 장면 변화와 2/10 공통 panel negative, 재압축·해상도/번역 visual positive, containment 양방향, metadata 우선순위+전수 fallback, page 비재사용 alignment, cancel→join→restart, recovery, CAS/series/Auto Find filter를 포함한다. 로그는 `.runtime/verification/verify-20260816-025506.log`에 있다.
+- Milestone F 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend typecheck·Vite production build와 18 files 112/112 tests, Rust lib 109/109(외부 live smoke 1개 opt-in 제외), main 1/1, fmt/check/Clippy `-D warnings`, Tauri release no-bundle, whitespace를 통과했다. exact source page 2·8 탐지, page 8 단독 격리·manifest/DB 상태, 원본 번호·위치 undo, DB intent와 file move 뒤 강제 중단을 모사한 startup convergence를 실제 임시 SQLite/WebP/파일 시스템 통합 테스트로 검증했다. 로그는 `.runtime/verification/verify-20260816-033555.log`에 있다.
 
 ## 7. Known limitations and blockers
 
@@ -137,6 +148,7 @@
 - Auto Find의 현재 안전 상한은 작가당 250 page다. 그 이상을 가진 작가에서는 source가 보고한 전체 page 중 후반 후보가 이번 run에 포함되지 않는다. 범위를 임의로 무제한화하지 말고 scheduler 부하·중단 복구와 함께 정책을 조정해야 한다.
 - E-Hentai relation evidence는 사용자가 명시적인 적법 session을 제공하지 않아 production에서 비활성이다. 작품 중복 검사는 session 없이 local artifact evidence만으로 정상 동작한다. 향후 활성화할 때 cookie/session은 process memory의 redacted provider 입력으로만 취급하고 DB·manifest·로그에는 쓰지 않아야 한다.
 - Classic favorite/search history import는 Milestone G의 read-only dry-run·conflict·rollback 경계 전에는 수행하지 않는다.
+- page quarantine은 undo를 제공하지만 영구 purge는 의도적으로 제공하지 않는다. 공간 회수 UI는 자동 삭제 없이 별도 사용자 승인 정책으로만 추가해야 한다.
 - artifact decode는 현재 검증된 WebP와 JPEG/PNG 입력을 지원한다. source의 AVIF 가능 flag와 후보는 parse하지만 raw AVIF만 남은 page를 실제 WebP로 decode하는 기능은 아직 없다. downloader는 WebP와 원본 JPEG/PNG fallback을 우선하며 지원 후보가 없으면 typed failure로 종료한다.
 
 ## 8. Future change cautions
@@ -155,6 +167,7 @@
 - 작품 중복 hash cache는 artifact SHA-256과 HashProfile version이 모두 맞을 때만 재사용한다. threshold나 feature를 바꾸면 새 profile/algorithm version과 migration·golden test를 함께 추가한다.
 - `duplicate:changed` event로 후보나 판정 이력을 구성하지 않는다. 서로 다른 run의 늦은 snapshot이 최신 run을 덮지 않도록 startedAt/revision/token 경계를 유지한다.
 - Review에 live `galleryPage`를 사용하지 않는다. 판정 evidence는 반드시 root-bound verified `artifactPage(entryId, sourcePage)`와 immutable source page 번호를 사용한다.
+- 내부 visual duplicate를 한 page match만으로 생성하지 않는다. 최소 2행 monotonic scene block, plan revision/byte snapshot과 page quarantine saga를 함께 유지한다.
 
 ## 9. Recovery and rollback
 
@@ -173,5 +186,6 @@
 - `af9878a` — `feat: connect live hitomi search metadata and thumbnails`
 - `80919bd` — `feat: implement resilient artifact downloads and recovery`
 - `a8f0ca1` — `feat: complete favorites and auto find workflows`
-- Milestone E 이후 commit, push 결과와 PR 상태는 완료 시 SHA와 함께 누적한다.
+- `9d7f738` — `feat: add evidence based gallery duplicate review`
+- Milestone F 이후 commit, push 결과와 PR 상태는 완료 시 SHA와 함께 누적한다.
 - PR merge, `main` 직접 push, force push, release/tag 생성은 수행하지 않는다.

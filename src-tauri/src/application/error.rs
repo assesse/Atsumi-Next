@@ -53,6 +53,12 @@ pub enum ApplicationError {
     DuplicateScanNotRunning,
     #[error("duplicate candidate {0:?} was not found")]
     DuplicateCandidateNotFound(String),
+    #[error("no internal duplicate scan is currently running")]
+    InternalDuplicateScanNotRunning,
+    #[error("internal duplicate entry {0:?} was not found")]
+    InternalDuplicateEntryNotFound(String),
+    #[error("internal removal plan is invalid: {0}")]
+    InternalRemovalPlanInvalid(String),
     #[error(transparent)]
     DownloadPipeline(#[from] DownloadPipelineError),
     #[error(transparent)]

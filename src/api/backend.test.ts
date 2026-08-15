@@ -607,3 +607,71 @@ describe("browser backend duplicate review contract", () => {
     }
   });
 });
+
+describe("browser backend internal duplicate contract", () => {
+  it("persists exact source-page evidence and keeps quarantine undoable with revision checks", async () => {
+    vi.useFakeTimers();
+    const events: string[] = [];
+    const unsubscribe = await backend.on("internal-duplicate:changed", (run) => events.push(`${run.state}:${run.revision}`));
+    try {
+      const started = await backend.internalDuplicateScanStart();
+      expect(started).toMatchObject({ ok: true, data: { state: "running", totalArtifacts: 1 } });
+      await vi.advanceTimersByTimeAsync(90);
+      const snapshot = await backend.internalDuplicateSnapshot();
+      if (!snapshot.ok) throw new Error(snapshot.error.message);
+      expect(snapshot.data).toMatchObject({
+        run: { state: "completed", scannedArtifacts: 1, groupsFound: 3 },
+        groups: [
+          { relation: "exact", pages: [{ sourcePage: 2 }, { sourcePage: 8 }] },
+          { relation: "translation_visual", pages: [{ sourcePage: 14 }, { sourcePage: 20 }] },
+          { relation: "translation_visual", pages: [{ sourcePage: 15 }, { sourcePage: 21 }] },
+        ],
+      });
+      expect(events).toEqual(expect.arrayContaining(["running:0", "completed:2"]));
+
+      const group = snapshot.data.groups[0]!;
+      const stale = await backend.internalRemovalPlan({
+        entryId: group.entryId,
+        selections: [{
+          groupId: group.groupId,
+          expectedRevision: 99,
+          keepSourcePage: 2,
+          removeSourcePages: [8],
+        }],
+      });
+      expect(stale).toMatchObject({ ok: false, error: { code: "REVISION_CONFLICT" } });
+
+      const prepared = await backend.internalRemovalPlan({
+        entryId: group.entryId,
+        selections: [{
+          groupId: group.groupId,
+          expectedRevision: group.revision,
+          keepSourcePage: 2,
+          removeSourcePages: [8],
+        }],
+      });
+      if (!prepared.ok) throw new Error(prepared.error.message);
+      expect(prepared.data).toMatchObject({ filesToQuarantine: 1, bytesToQuarantine: 512_000 });
+      const applied = await backend.internalRemovalApply({ plan: prepared.data, reason: "test review" });
+      if (!applied.ok) throw new Error(applied.error.message);
+      expect(applied.data.records).toEqual([
+        expect.objectContaining({ sourcePage: 8, state: "quarantined" }),
+      ]);
+      expect(applied.data.review.groups.some((item) => item.groupId === group.groupId)).toBe(false);
+
+      const restored = await backend.internalRemovalUndo({
+        recordIds: applied.data.records.map((record) => record.recordId),
+      });
+      if (!restored.ok) throw new Error(restored.error.message);
+      expect(restored.data.review.groups).toEqual(expect.arrayContaining([
+        expect.objectContaining({ groupId: group.groupId, resolved: false }),
+      ]));
+      expect(restored.data.records).toEqual([
+        expect.objectContaining({ sourcePage: 8, state: "restored" }),
+      ]);
+    } finally {
+      unsubscribe();
+      vi.useRealTimers();
+    }
+  });
+});

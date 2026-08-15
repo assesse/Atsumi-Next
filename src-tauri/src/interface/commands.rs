@@ -9,15 +9,17 @@ use crate::{
     application::{
         ApplicationError, ApplicationService, ArtifactStore, AutoFindSupervisor,
         DownloadPipelineError, DownloadPipelineErrorCode, DownloadRootPicker, DownloadSupervisor,
-        DuplicateSupervisor, ReconcileReport,
+        DuplicateSupervisor, InternalDuplicateSupervisor, ReconcileReport,
     },
     domain::{
         AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot, DownloadChangedEvent,
         DownloadEntry, DownloadListRequest, DownloadPage, DuplicateDecisionRequest,
         DuplicateReview, DuplicateScanRun, DuplicateSnapshot, FavoriteKey, FavoriteMutationResult,
-        FavoriteRecord, GalleryDetail, GalleryPage, JobRef, SearchHistoryEntry, SearchRequest,
-        SearchSubmission, SettingsPatch, SettingsSnapshot, WindowPlacement,
-        WindowPlacementSnapshot,
+        FavoriteRecord, GalleryDetail, GalleryPage, InternalDuplicateReview,
+        InternalDuplicateSnapshot, InternalRemovalApplyRequest, InternalRemovalPlan,
+        InternalRemovalPlanRequest, InternalRemovalResult, InternalRemovalUndoRequest,
+        InternalScanRun, JobRef, SearchHistoryEntry, SearchRequest, SearchSubmission,
+        SettingsPatch, SettingsSnapshot, WindowPlacement, WindowPlacementSnapshot,
     },
     thumbnail::{
         ThumbnailCompletionEventDto, ThumbnailCoordinator, ThumbnailCoordinatorError,
@@ -35,6 +37,7 @@ pub struct AppState {
     downloads: DownloadSupervisor,
     auto_find: AutoFindSupervisor,
     duplicates: DuplicateSupervisor,
+    internal_duplicates: InternalDuplicateSupervisor,
     download_root_picker: Arc<dyn DownloadRootPicker>,
     artifact_store: Arc<dyn ArtifactStore>,
 }
@@ -50,6 +53,7 @@ impl AppState {
         downloads: DownloadSupervisor,
         auto_find: AutoFindSupervisor,
         duplicates: DuplicateSupervisor,
+        internal_duplicates: InternalDuplicateSupervisor,
         download_root_picker: Arc<dyn DownloadRootPicker>,
         artifact_store: Arc<dyn ArtifactStore>,
     ) -> Self {
@@ -60,6 +64,7 @@ impl AppState {
             downloads,
             auto_find,
             duplicates,
+            internal_duplicates,
             download_root_picker,
             artifact_store,
         }
@@ -168,6 +173,88 @@ pub async fn duplicate_decision_apply(
         })
         .await,
     )
+}
+
+#[tauri::command]
+pub async fn internal_duplicate_snapshot(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<InternalDuplicateSnapshot>, ApiError> {
+    let supervisor = state.internal_duplicates.clone();
+    Ok(
+        run_application_blocking("internal_duplicate_snapshot", move || supervisor.snapshot())
+            .await,
+    )
+}
+
+#[tauri::command]
+pub async fn internal_duplicate_scan_start(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<InternalScanRun>, ApiError> {
+    let supervisor = state.internal_duplicates.clone();
+    Ok(run_application_blocking("internal_duplicate_scan_start", move || supervisor.start()).await)
+}
+
+#[tauri::command]
+pub async fn internal_duplicate_scan_cancel(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<InternalScanRun>, ApiError> {
+    let supervisor = state.internal_duplicates.clone();
+    Ok(
+        run_application_blocking("internal_duplicate_scan_cancel", move || {
+            supervisor.cancel()
+        })
+        .await,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn internal_duplicate_review_get(
+    state: State<'_, AppState>,
+    entry_id: String,
+) -> Result<ApiResult<InternalDuplicateReview>, ApiError> {
+    let supervisor = state.internal_duplicates.clone();
+    Ok(
+        run_application_blocking("internal_duplicate_review_get", move || {
+            supervisor.review_get(&entry_id)
+        })
+        .await,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn internal_removal_plan(
+    state: State<'_, AppState>,
+    request: InternalRemovalPlanRequest,
+) -> Result<ApiResult<InternalRemovalPlan>, ApiError> {
+    let supervisor = state.internal_duplicates.clone();
+    Ok(run_application_blocking("internal_removal_plan", move || {
+        supervisor.removal_plan(request)
+    })
+    .await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn internal_removal_apply(
+    state: State<'_, AppState>,
+    request: InternalRemovalApplyRequest,
+) -> Result<ApiResult<InternalRemovalResult>, ApiError> {
+    let supervisor = state.internal_duplicates.clone();
+    Ok(run_application_blocking("internal_removal_apply", move || {
+        supervisor.removal_apply(request)
+    })
+    .await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn internal_removal_undo(
+    state: State<'_, AppState>,
+    request: InternalRemovalUndoRequest,
+) -> Result<ApiResult<InternalRemovalResult>, ApiError> {
+    let supervisor = state.internal_duplicates.clone();
+    Ok(run_application_blocking("internal_removal_undo", move || {
+        supervisor.removal_undo(request)
+    })
+    .await)
 }
 
 #[tauri::command]
@@ -449,7 +536,9 @@ pub async fn app_quit(
     let downloads = state.downloads.clone();
     let auto_find = state.auto_find.clone();
     let duplicates = state.duplicates.clone();
+    let internal_duplicates = state.internal_duplicates.clone();
     if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
+        internal_duplicates.shutdown_and_wait();
         duplicates.shutdown_and_wait();
         auto_find.shutdown_and_wait();
         downloads.shutdown_and_wait();

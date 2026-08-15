@@ -2,6 +2,7 @@ mod artifact_store;
 mod artifact_thumbnail;
 mod fixture_search;
 mod hitomi_live;
+mod internal_duplicate_repository;
 mod migrations;
 mod sqlite_repository;
 pub mod telemetry;

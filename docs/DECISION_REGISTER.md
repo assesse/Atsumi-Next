@@ -58,6 +58,9 @@
 | D-138 | 작품 page matching은 단조 1:1 gap-tolerant alignment로 고정하고 blank·저정보·작은 장면 변화·일부 공통 panel은 강한 후보에서 제외한다. 재압축·해상도·번역 차이는 exact와 분리된 visual evidence다. | 2026-08-16 Milestone E 구현 |
 | D-139 | Review는 전역 thumbnail coordinator의 검증 local `artifactPage(entryId, sourcePage)`를 사용한다. 숨김·연작·pair 제외는 revision CAS와 append-only history로 적용하며 자동 파일 삭제를 하지 않는다. | 2026-08-16 Milestone E 구현 |
 | D-140 | E-Hentai relation은 적법한 session을 사용자가 명시적으로 제공한 경우에만 활성화한다. 기본 production provider는 비활성이고 cookie/session을 DB·manifest·로그에 저장하지 않는다. | 2026-08-16 Milestone E 안전 경계 |
+| D-141 | 내부 visual page 중복은 단일 유사 page로 만들지 않고 최소 2행의 단조 scene block만 Review에 올린다. exact SHA 반복은 별도 근거로 한 행을 허용한다. | 2026-08-16 Milestone F 오탐 안전 경계 |
+| D-142 | 내부 page 제거는 group revision·파일 수·byte 합계를 고정한 plan preview 후에만 artifact 내부 quarantine으로 적용한다. source page number와 검증 metadata를 유지하고 자동 영구 삭제하지 않는다. | 2026-08-16 Milestone F 구현 |
+| D-143 | page quarantine·undo는 DB intent, atomic file move, manifest atomic replace, SQLite completion으로 구성된 crash-safe saga다. 시작 시 pending saga를 재개하고 모호한 두 경로는 overwrite/delete하지 않는다. | 2026-08-16 Milestone F 안전 경계 |
 
 ## 제안
 

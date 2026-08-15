@@ -410,6 +410,56 @@ impl ArtifactStore for FilesystemArtifactStore {
         Ok(())
     }
 
+    fn move_managed_file(
+        &self,
+        root: &Path,
+        source: &ArtifactRelativePath,
+        destination: &ArtifactRelativePath,
+    ) -> Result<(), DownloadPipelineError> {
+        let root = self.validate_download_root(root)?;
+        let source_path = resolve_managed_path(&root, source, true)?;
+        if !source_path.is_file() {
+            return Err(DownloadPipelineError::new(
+                DownloadPipelineErrorCode::ArtifactMissing,
+                "The managed artifact page is missing",
+                false,
+            ));
+        }
+        let destination_path = resolve_managed_path(&root, destination, false)?;
+        if destination_path.exists() {
+            return Err(DownloadPipelineError::new(
+                DownloadPipelineErrorCode::QuarantineConflict,
+                "The page quarantine destination already exists",
+                false,
+            ));
+        }
+        let parent = destination_path.parent().ok_or_else(|| {
+            DownloadPipelineError::new(
+                DownloadPipelineErrorCode::PathOutsideRoot,
+                "The page quarantine destination has no managed parent",
+                false,
+            )
+        })?;
+        fs::create_dir_all(parent)
+            .map_err(|_| filesystem_error("The page quarantine folder could not be created"))?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|_| filesystem_error("The page quarantine folder could not be resolved"))?;
+        ensure_descendant(&root, &canonical_parent)?;
+        fs::rename(&source_path, &destination_path).map_err(|_| {
+            DownloadPipelineError::new(
+                DownloadPipelineErrorCode::Filesystem,
+                "The managed artifact page could not be moved atomically",
+                true,
+            )
+        })?;
+        let canonical_destination = destination_path
+            .canonicalize()
+            .map_err(|_| filesystem_error("The moved artifact page could not be resolved"))?;
+        ensure_descendant(&root, &canonical_destination)?;
+        Ok(())
+    }
+
     fn managed_path_exists(
         &self,
         root: &Path,

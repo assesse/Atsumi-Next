@@ -4,6 +4,8 @@ mod download_supervisor;
 mod duplicate_analyzer;
 mod duplicate_supervisor;
 mod error;
+mod internal_duplicate_analyzer;
+mod internal_duplicate_supervisor;
 mod ports;
 mod service;
 
@@ -19,9 +21,10 @@ pub use download_pipeline::{
 pub use download_supervisor::DownloadSupervisor;
 pub use duplicate_supervisor::{DisabledDuplicateRelationProvider, DuplicateSupervisor};
 pub use error::{ApplicationError, RepositoryError};
+pub use internal_duplicate_supervisor::InternalDuplicateSupervisor;
 pub use ports::{
     ArtifactRepository, AutomationRepository, DownloadMutationOutcome, DownloadQueueAddOutcome,
     DownloadQueueRecord, DownloadRepository, DuplicateRelationProvider, DuplicateRepository,
-    SearchRepository, StateRepository,
+    InternalDuplicateRepository, InternalPlanPrepareOutcome, SearchRepository, StateRepository,
 };
 pub use service::{ApplicationService, DownloadQueueLaunch};

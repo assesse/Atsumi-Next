@@ -112,12 +112,7 @@ Milestone D의 즐겨찾기·검색 이력·Auto Find workflow를 실제 SQLite�
 
 ## Phase 6: 내부 페이지 중복
 
-- local artifact hash index
-- gap-tolerant scene block detection
-- synchronized comparison rows
-- selection preview
-- quarantine apply와 undo
-- 재다운로드 및 무결성 예외
+완료했다. 작품 중복과 같은 verified local page hash cache를 재사용하되 한 artifact 안에서만 exact 반복 또는 최소 2행의 단조 gap-tolerant visual scene block을 만든다. synchronized Review는 실제 `artifactPage(entryId, sourcePage)`를 표시하고 각 행에서 유지할 원본 page를 선택한다. revision CAS와 현재 byte snapshot으로 removal plan을 먼저 고정하며, 적용은 page별 pending DB intent → artifact 내부 quarantine move → manifest atomic replace → page/artifact/group/plan transaction 순서다. undo는 원래 relative path와 immutable source page number를 복원한다. 앱 종료가 filesystem/DB 사이에 발생해도 시작 시 pending saga를 재개하며 모호한 경로는 덮어쓰거나 삭제하지 않는다. 자동 영구 삭제는 없다.
 
 ## Phase 7: Classic import와 전환
 
@@ -147,4 +142,5 @@ Milestone D의 즐겨찾기·검색 이력·Auto Find workflow를 실제 SQLite�
 7. 완료: 정식 queue runner와 artifact 저장·검증·resume·reconcile, 첫 이미지 열기와 Phase 3 filesystem/SQLite 통합 검증.
 8. 완료: 영속 즐겨찾기·검색 이력, 명시적 작가 갱신, Auto Find 진행·취소·복원과 local grouping/filter/batch queue 연결.
 9. 완료: 실제 artifact evidence를 사용하는 작품 단위 중복 후보·판정·Review와 Auto Find decision 제외 연동.
-10. 다음: 완료 artifact 내부의 반복 장면 block, synchronized source-page Review, removal plan, page quarantine·undo와 manifest/DB 일관성.
+10. 완료: 완료 artifact 내부의 반복 장면 block, synchronized source-page Review, removal plan, page quarantine·undo와 manifest/DB 일관성.
+11. 다음: Classic read-only inventory, dry-run conflict report, 승인형 import·rollback과 최종 운영 polish.

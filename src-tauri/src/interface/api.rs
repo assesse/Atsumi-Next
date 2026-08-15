@@ -182,6 +182,28 @@ impl From<ApplicationError> for ApiError {
                     json!(candidate_id),
                 )])),
             },
+            ApplicationError::InternalDuplicateScanNotRunning => Self {
+                code: "INTERNAL_DUPLICATE_SCAN_NOT_RUNNING".into(),
+                message: "There is no active internal duplicate scan to cancel".into(),
+                retryable: false,
+                action: Some(ApiAction::None),
+                details: None,
+            },
+            ApplicationError::InternalDuplicateEntryNotFound(entry_id) => Self {
+                code: "INTERNAL_DUPLICATE_ENTRY_NOT_FOUND".into(),
+                message: "The download entry is not available for internal duplicate review".into(),
+                retryable: false,
+                action: Some(ApiAction::Review),
+                details: Some(BTreeMap::from([("entryId".into(), json!(entry_id))])),
+            },
+            ApplicationError::InternalRemovalPlanInvalid(reason) => Self {
+                code: "INTERNAL_REMOVAL_PLAN_INVALID".into(),
+                message: "The page removal plan is no longer safe to apply; reload the review"
+                    .into(),
+                retryable: false,
+                action: Some(ApiAction::Review),
+                details: Some(BTreeMap::from([("reason".into(), json!(reason))])),
+            },
             ApplicationError::DownloadPipeline(error) => Self {
                 code: error.code.as_str().into(),
                 message: error.message,

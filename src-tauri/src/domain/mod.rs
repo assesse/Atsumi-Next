@@ -3,6 +3,7 @@ mod auto_find;
 mod download;
 mod duplicate;
 mod gallery;
+mod internal_duplicate;
 mod job;
 mod search;
 mod settings;
@@ -29,6 +30,13 @@ pub use duplicate::{
     DUPLICATE_HASH_ALGORITHM_VERSION, DUPLICATE_HASH_PROFILE_VERSION,
 };
 pub use gallery::{Gallery, GalleryId, GalleryMetadata, GalleryPageId, SourcePageNumber};
+pub use internal_duplicate::{
+    InternalDuplicateGroup, InternalDuplicateReview, InternalDuplicateSnapshot,
+    InternalGroupRecord, InternalMatchKind, InternalPageEvidence, InternalRemovalApplyRequest,
+    InternalRemovalPlan, InternalRemovalPlanRequest, InternalRemovalResult,
+    InternalRemovalSelection, InternalRemovalUndoRequest, InternalScanRun, InternalScanState,
+    PageQuarantineRecord, PageQuarantineSaga, PageQuarantineState,
+};
 pub use job::{
     DownloadChangedEvent, DownloadJobDescriptor, DownloadJobProjection, FixtureDownloadJobStep,
     JobEvent, JobRef, JobState,

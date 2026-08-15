@@ -4,7 +4,7 @@
 
 새 버전의 영속 데이터 기준은 SQLite 하나로 통합한다. 파일 시스템은 artifact의 실제 존재를 증명하며, DB와 불일치하면 reconciliation job이 해결한다.
 
-## 현재 구현 schema (v12)
+## 현재 구현 schema (v13)
 
 | 테이블 | 책임 |
 |---|---|
@@ -32,15 +32,17 @@
 | `duplicate_hidden_galleries`·`duplicate_pair_exclusions` | 사용자 숨김과 오탐 pair 제외 |
 | `duplicate_series_groups`·`duplicate_series_members` | 원자적으로 관리되는 연작 묶음 |
 | `duplicate_decisions` | candidate revision별 append-only 사용자 판정 이력 |
+| `internal_duplicate_runs` | 앨범 내부 page scan 상태·revision·진행률·오류 |
+| `internal_duplicate_groups`·`internal_duplicate_group_pages` | immutable source page 기반 synchronized scene row와 근거 |
+| `internal_removal_plans` | group revision과 파일 수·byte 합계를 고정한 만료형 격리 계획 |
+| `page_quarantine_records` | page별 원본·격리 상대 경로와 crash-safe move/restore saga |
 | `schema_migrations` | migration 적용 이력 |
 
-아래 테이블은 Phase 6~7에서 추가할 계획 schema다.
+아래 테이블은 Phase 7 이후 검토할 계획 schema다.
 
 | 계획 테이블 | 책임 |
 |---|---|
 | `gallery_tags` | namespace가 보존된 tag 관계 |
-| `internal_review_blocks` | 갤러리 내부 장면 토막 |
-| `page_exclusions` | 사용자가 제거한 원본 페이지 |
 | `thumbnail_cache_entries` | cache index와 접근 시각 |
 
 정확한 현재 DDL과 CHECK/FK는 `src-tauri/src/infrastructure/migrations.rs`가 기준이다. 기존 migration의 이름·순서·column 의미는 바꾸지 않고 additive migration만 추가한다.
@@ -69,6 +71,16 @@
 - 후보·evidence·source page pair 교체, revision CAS 판정, 숨김·연작·pair 제외 side effect와 append-only history는 각각 하나의 SQLite transaction이다.
 - `series_link`는 두 gallery를 한 group에 연결하고 후보를 resolve하지 않는다. `hide_*`와 `exclude_pair`만 후보를 resolved 처리하며 Auto Find의 insert/snapshot도 해당 영속 상태를 제외한다.
 - v1~v11 table/column 의미는 바꾸지 않는 additive migration이며 migration 전 backup과 future-schema 거부 규칙을 그대로 따른다.
+
+### v13 추가 규칙
+
+- migration 이름은 `internal_scene_review_and_page_quarantine`이다.
+- 동시에 하나의 `internal_duplicate_runs.state='running'`만 허용한다. 시작 시 남은 run은 `failed/INTERNAL_SCAN_INTERRUPTED`, 정상 종료·사용자 취소는 `cancelled`로 끝내며 이미 저장된 group과 page 격리 이력은 보존한다.
+- 내부 group은 `entry_id`, block/sequence, immutable `source_page_number`, exact/visual evidence와 revision을 저장한다. exact SHA 반복은 한 행을 허용하지만 visual group은 최소 두 개의 단조 행을 통과한 경우에만 생성한다.
+- removal plan은 현재 group revision, keep/remove page, 현재 present page의 파일 수와 byte 합계를 고정하고 15분 후 만료한다. apply 시 같은 page를 다른 active plan이 중복 소유하지 못한다.
+- `page_quarantine_records`는 `pending_quarantine | quarantined | pending_restore | restored`만 허용한다. 파일 이동 전 DB intent를 commit하고, manifest를 원자 교체한 뒤 page/artifact/group/plan 상태를 한 transaction으로 확정한다.
+- 격리 page는 `download_pages.state='quarantined'`, `excluded=1`이지만 source page number와 SHA/byte/format 검증 metadata는 유지한다. undo는 원래 relative path와 `present/excluded=0`을 복원한다.
+- v1~v12 table/column 의미, manifest schema 1과 HashProfile 1을 바꾸지 않는 additive migration이다. v12 DB에는 migration 전 일관 backup을 만든다.
 
 ## Classic 입력원
 

@@ -8,7 +8,10 @@ pub use commands::{
     download_cancel, download_entries_list, download_quarantine, download_quarantine_undo,
     download_queue_add, download_retry, duplicate_decision_apply, duplicate_review_get,
     duplicate_scan_cancel, duplicate_scan_start, duplicate_snapshot, favorite_set, favorites_list,
-    gallery_detail_get, search_history_list, search_page_get, search_submit, settings_get,
-    settings_update, thumbnail_cancel, thumbnail_invalidate, thumbnail_reprioritize,
-    thumbnail_request, thumbnail_stats, window_placement_get, window_placement_update, AppState,
+    gallery_detail_get, internal_duplicate_review_get, internal_duplicate_scan_cancel,
+    internal_duplicate_scan_start, internal_duplicate_snapshot, internal_removal_apply,
+    internal_removal_plan, internal_removal_undo, search_history_list, search_page_get,
+    search_submit, settings_get, settings_update, thumbnail_cancel, thumbnail_invalidate,
+    thumbnail_reprioritize, thumbnail_request, thumbnail_stats, window_placement_get,
+    window_placement_update, AppState,
 };

@@ -922,6 +922,120 @@ pub const MIGRATIONS: &[Migration] = &[
                 ON duplicate_decisions(candidate_id, created_at ASC, decision_id ASC);
         "#,
     },
+    Migration {
+        version: 13,
+        name: "internal_scene_review_and_page_quarantine",
+        sql: r#"
+            CREATE TABLE internal_duplicate_runs (
+                run_id TEXT PRIMARY KEY CHECK (length(trim(run_id)) > 0),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                state TEXT NOT NULL CHECK (state IN (
+                    'running', 'completed', 'failed', 'cancelled'
+                )),
+                profile_version INTEGER NOT NULL
+                    REFERENCES duplicate_hash_profiles(profile_version),
+                total_artifacts INTEGER NOT NULL CHECK (total_artifacts >= 0),
+                scanned_artifacts INTEGER NOT NULL
+                    CHECK (scanned_artifacts BETWEEN 0 AND total_artifacts),
+                total_pages INTEGER NOT NULL CHECK (total_pages >= 0),
+                compared_pairs INTEGER NOT NULL CHECK (compared_pairs >= 0),
+                groups_found INTEGER NOT NULL CHECK (groups_found >= 0),
+                started_at TEXT NOT NULL CHECK (length(started_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                finished_at TEXT,
+                error_code TEXT,
+                error_message TEXT
+            ) STRICT;
+            CREATE UNIQUE INDEX internal_duplicate_one_running_idx
+                ON internal_duplicate_runs(state) WHERE state = 'running';
+            CREATE INDEX internal_duplicate_recent_idx
+                ON internal_duplicate_runs(started_at DESC, run_id DESC);
+
+            CREATE TABLE internal_duplicate_groups (
+                group_id TEXT PRIMARY KEY CHECK (length(trim(group_id)) > 0),
+                block_id TEXT NOT NULL CHECK (length(trim(block_id)) > 0),
+                sequence_index INTEGER NOT NULL CHECK (sequence_index >= 0),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                last_seen_run_id TEXT NOT NULL
+                    REFERENCES internal_duplicate_runs(run_id) ON DELETE CASCADE,
+                entry_id TEXT NOT NULL
+                    REFERENCES download_entries(entry_id) ON DELETE CASCADE,
+                gallery_id INTEGER NOT NULL CHECK (gallery_id > 0),
+                relation TEXT NOT NULL CHECK (relation IN (
+                    'exact', 'translation_visual'
+                )),
+                confidence REAL NOT NULL CHECK (confidence BETWEEN 0.0 AND 1.0),
+                recommended_keep_source_page INTEGER NOT NULL CHECK (
+                    recommended_keep_source_page > 0
+                ),
+                resolved INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0, 1)),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                UNIQUE (entry_id, block_id, sequence_index)
+            ) STRICT;
+            CREATE INDEX internal_duplicate_groups_entry_idx
+                ON internal_duplicate_groups(entry_id, resolved, block_id, sequence_index);
+
+            CREATE TABLE internal_duplicate_group_pages (
+                group_id TEXT NOT NULL
+                    REFERENCES internal_duplicate_groups(group_id) ON DELETE CASCADE,
+                source_page_number INTEGER NOT NULL CHECK (source_page_number > 0),
+                exact_sha256 INTEGER NOT NULL CHECK (exact_sha256 IN (0, 1)),
+                visual_similarity REAL NOT NULL CHECK (
+                    visual_similarity BETWEEN 0.0 AND 1.0
+                ),
+                detail_hash_distance INTEGER NOT NULL CHECK (detail_hash_distance >= 0),
+                low_information INTEGER NOT NULL CHECK (low_information IN (0, 1)),
+                PRIMARY KEY (group_id, source_page_number)
+            ) STRICT;
+
+            CREATE TABLE internal_removal_plans (
+                plan_id TEXT PRIMARY KEY CHECK (length(trim(plan_id)) > 0),
+                entry_id TEXT NOT NULL
+                    REFERENCES download_entries(entry_id) ON DELETE CASCADE,
+                selections_json TEXT NOT NULL CHECK (json_valid(selections_json)),
+                files_to_quarantine INTEGER NOT NULL CHECK (files_to_quarantine > 0),
+                bytes_to_quarantine INTEGER NOT NULL CHECK (bytes_to_quarantine > 0),
+                state TEXT NOT NULL CHECK (state IN (
+                    'prepared', 'applying', 'applied', 'cancelled'
+                )),
+                expires_at TEXT NOT NULL CHECK (length(expires_at) > 0),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0)
+            ) STRICT;
+            CREATE INDEX internal_removal_plans_entry_idx
+                ON internal_removal_plans(entry_id, state, created_at DESC);
+
+            CREATE TABLE page_quarantine_records (
+                record_id TEXT PRIMARY KEY CHECK (length(trim(record_id)) > 0),
+                plan_id TEXT NOT NULL
+                    REFERENCES internal_removal_plans(plan_id),
+                entry_id TEXT NOT NULL,
+                gallery_id INTEGER NOT NULL CHECK (gallery_id > 0),
+                source_page_number INTEGER NOT NULL CHECK (source_page_number > 0),
+                original_relative_path TEXT NOT NULL
+                    CHECK (length(trim(original_relative_path)) > 0),
+                quarantine_relative_path TEXT NOT NULL UNIQUE
+                    CHECK (length(trim(quarantine_relative_path)) > 0),
+                reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 500),
+                state TEXT NOT NULL CHECK (state IN (
+                    'pending_quarantine', 'quarantined',
+                    'pending_restore', 'restored'
+                )),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                FOREIGN KEY (entry_id, source_page_number)
+                    REFERENCES download_pages(entry_id, source_page_number)
+            ) STRICT;
+            CREATE UNIQUE INDEX page_quarantine_active_page_idx
+                ON page_quarantine_records(entry_id, source_page_number)
+                WHERE state IN (
+                    'pending_quarantine', 'quarantined', 'pending_restore'
+                );
+            CREATE INDEX page_quarantine_pending_idx
+                ON page_quarantine_records(state, created_at);
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1194,8 +1308,8 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
-        assert_eq!(report.applied_versions, vec![12]);
-        assert_eq!(report.current_version, 12);
+        assert_eq!(report.applied_versions, vec![12, 13]);
+        assert_eq!(report.current_version, 13);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",

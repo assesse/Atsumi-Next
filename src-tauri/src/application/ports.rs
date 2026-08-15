@@ -5,8 +5,10 @@ use crate::domain::{
     DuplicateDecisionApplyOutcome, DuplicateDecisionRequest, DuplicatePageHash, DuplicateReview,
     DuplicateScanRun, DuplicateScanState, DuplicateSnapshot, ExternalRelationEvidence, FavoriteKey,
     FavoriteMutationResult, FavoriteRecord, FixtureDownloadJobStep, GalleryDetail, GalleryId,
-    GalleryPage, JobRef, JobState, SearchHistoryEntry, SearchRequest, SearchSubmission,
-    SettingsSnapshot, SourcePageNumber, WindowPlacementSnapshot,
+    GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot, InternalGroupRecord,
+    InternalRemovalPlan, InternalRemovalSelection, InternalScanRun, InternalScanState, JobRef,
+    JobState, PageQuarantineRecord, PageQuarantineSaga, SearchHistoryEntry, SearchRequest,
+    SearchSubmission, SettingsSnapshot, SourcePageNumber, WindowPlacementSnapshot,
 };
 
 use super::RepositoryError;
@@ -190,6 +192,83 @@ pub trait DuplicateRelationProvider: Send + Sync {
         parent_gallery_id: GalleryId,
         candidate_gallery_id: GalleryId,
     ) -> Result<Option<ExternalRelationEvidence>, RepositoryError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InternalPlanPrepareOutcome {
+    Prepared(InternalRemovalPlan),
+    EntryNotFound,
+    RevisionConflict {
+        group_id: String,
+        actual_revision: u64,
+    },
+    InvalidSelection(String),
+}
+
+pub trait InternalDuplicateRepository: Send + Sync {
+    fn internal_recover_interrupted(&self) -> Result<usize, RepositoryError>;
+
+    fn internal_scan_start(
+        &self,
+        profile_version: u32,
+        total_artifacts: u32,
+        total_pages: u32,
+    ) -> Result<InternalScanRun, RepositoryError>;
+
+    fn internal_scan_progress(
+        &self,
+        run_id: &str,
+        scanned_artifacts: u32,
+        compared_pairs: u64,
+    ) -> Result<Option<InternalScanRun>, RepositoryError>;
+
+    fn internal_group_replace(
+        &self,
+        record: &InternalGroupRecord,
+    ) -> Result<Option<InternalScanRun>, RepositoryError>;
+
+    fn internal_scan_finish(
+        &self,
+        run_id: &str,
+        state: InternalScanState,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<Option<InternalScanRun>, RepositoryError>;
+
+    fn internal_scan_is_running(&self, run_id: &str) -> Result<bool, RepositoryError>;
+    fn internal_snapshot(&self) -> Result<InternalDuplicateSnapshot, RepositoryError>;
+    fn internal_review_get(
+        &self,
+        entry_id: &str,
+    ) -> Result<Option<InternalDuplicateReview>, RepositoryError>;
+
+    fn internal_plan_prepare(
+        &self,
+        plan: &InternalRemovalPlan,
+    ) -> Result<InternalPlanPrepareOutcome, RepositoryError>;
+
+    fn internal_removal_begin(
+        &self,
+        plan_id: &str,
+        reason: &str,
+    ) -> Result<Vec<PageQuarantineSaga>, RepositoryError>;
+    fn internal_removal_complete(
+        &self,
+        plan_id: &str,
+    ) -> Result<Vec<PageQuarantineRecord>, RepositoryError>;
+    fn internal_restore_begin(
+        &self,
+        record_ids: &[String],
+    ) -> Result<Vec<PageQuarantineSaga>, RepositoryError>;
+    fn internal_restore_complete(
+        &self,
+        record_ids: &[String],
+    ) -> Result<Vec<PageQuarantineRecord>, RepositoryError>;
+    fn internal_pending_page_sagas(&self) -> Result<Vec<PageQuarantineSaga>, RepositoryError>;
+    fn internal_plan_selections(
+        &self,
+        plan_id: &str,
+    ) -> Result<Vec<InternalRemovalSelection>, RepositoryError>;
 }
 
 pub trait DownloadRepository: Send + Sync {

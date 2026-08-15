@@ -1,6 +1,6 @@
 # API Contract V2
 
-Phase 5의 실제 artifact 기반 작품 중복 판정과 Review까지 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다. 내부 페이지 중복과 Classic import command는 후속 계약으로 구분한다.
+Phase 6의 실제 artifact 기반 작품·내부 페이지 중복 판정과 page quarantine Review까지 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다. Classic import command는 후속 계약으로 구분한다.
 
 ## 공통 규칙
 
@@ -48,6 +48,13 @@ type ApiError = {
 | `duplicate_scan_cancel` | 없음 | `DuplicateScanRun` | 실행 중 run에 한 번 적용 |
 | `duplicate_review_get` | `{ candidateId }` | `DuplicateReview` | 예 |
 | `duplicate_decision_apply` | `{ request: DuplicateDecisionRequest }` | `DuplicateReview` | candidate revision CAS |
+| `internal_duplicate_snapshot` | 없음 | `InternalDuplicateSnapshot` | 예 |
+| `internal_duplicate_scan_start` | 없음 | `InternalScanRun` | 실행 중인 run 재사용 |
+| `internal_duplicate_scan_cancel` | 없음 | `InternalScanRun` | 실행 중 run에 한 번 적용 |
+| `internal_duplicate_review_get` | `{ entryId }` | `InternalDuplicateReview` | 예 |
+| `internal_removal_plan` | `{ request: InternalRemovalPlanRequest }` | `InternalRemovalPlan` | group revision·현재 page snapshot 고정 |
+| `internal_removal_apply` | `{ request: InternalRemovalApplyRequest }` | `InternalRemovalResult` | prepared plan 한 번 적용 |
+| `internal_removal_undo` | `{ request: InternalRemovalUndoRequest }` | `InternalRemovalResult` | quarantined record 한 번 복원 |
 | `download_queue_add` | `{ galleries: GalleryId[], requestId }` | `DownloadEntry[]` | requestId + active gallery 기반 |
 | `download_entries_list` | `DownloadListRequest` | `DownloadPage` | 예 |
 | `download_retry` | `{ entryIds }` | `JobRef[]` | 현재 active job 재사용 |
@@ -72,6 +79,7 @@ type ApiError = {
 | `settings:changed` | 다른 window에서 바뀐 설정 snapshot |
 | `auto-find:changed` | Auto Find run state, progress, candidate count와 revision |
 | `duplicate:changed` | 작품 중복 scan state, hash/pair progress, candidate count와 revision |
+| `internal-duplicate:changed` | 내부 페이지 scan state, artifact/page progress, group count와 revision |
 
 이벤트가 유실돼도 `list/get` command로 현재 상태를 다시 구성할 수 있어야 한다.
 
@@ -279,6 +287,16 @@ type ThumbnailRequest = {
 - Review page preview는 `{ kind: "artifactPage", entryId, sourcePage }` key로 같은 전역 thumbnail coordinator를 사용한다. backend는 root 내부의 검증된 local WebP만 읽고 1024px 이하 preview로 전달한다.
 - E-Hentai relation provider는 명시적으로 제공된 적법 session이 없으면 비활성이다. session·cookie를 SQLite, manifest, 로그에 저장하지 않는다.
 
+## 내부 페이지 중복 계약
+
+- scan은 gallery별 최신 verified complete artifact의 non-excluded page를 사용하고 작품 중복 HashProfile cache를 공유한다. exact SHA 반복은 단일 행으로 허용하지만 perceptual match는 shared panel 오탐을 막기 위해 최소 2행의 단조 장면 블록이어야 한다.
+- `InternalDuplicateGroup.pages[].sourcePage`는 immutable source page number다. Review와 manifest, 격리·undo가 배열 index로 다시 번호를 매기지 않는다.
+- `internal_removal_plan`은 각 행의 `expectedRevision`, 유지할 한 page와 격리할 나머지 page를 검증하고 현재 파일 수·byte 합계와 15분 만료 시각을 SQLite에 고정한다.
+- apply는 `prepared -> applying -> applied`, page record는 `pending_quarantine -> quarantined` saga다. 파일은 artifact 폴더의 `.atsumi-page-quarantine/<planId>/` 안에서만 이동한다.
+- undo는 `quarantined -> pending_restore -> restored`이며 원래 relative path와 source page number를 복원한다. 파일 move와 manifest/DB commit 사이에 종료되면 시작 시 pending saga를 재개한다.
+- 원본과 목적지가 모두 있거나 모두 없으면 overwrite/delete하지 않고 Review 오류로 중단한다. 영구 삭제 command는 없다.
+- Review preview는 작품 중복과 같은 `{ kind: "artifactPage", entryId, sourcePage }` key와 전역 thumbnail coordinator를 사용하며 live source image를 판정 증거로 대체하지 않는다.
+
 ## 후속 계약
 
-Phase 6~7에서 `internal scene block + page selection/removal plan/apply/undo`와 Classic import dry-run/apply/rollback command를 추가한다.
+Phase 7에서 Classic import dry-run/apply/rollback command를 추가한다.

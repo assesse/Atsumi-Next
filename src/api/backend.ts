@@ -23,6 +23,14 @@ import type {
   GalleryPage,
   JobEvent,
   JobRef,
+  InternalDuplicateReview,
+  InternalDuplicateSnapshot,
+  InternalRemovalApplyRequest,
+  InternalRemovalPlan,
+  InternalRemovalPlanRequest,
+  InternalRemovalResult,
+  InternalRemovalUndoRequest,
+  InternalScanRun,
   ReconcileReport,
   SearchHistoryEntry,
   SearchRequest,
@@ -50,6 +58,7 @@ import {
 export type BackendEventMap = {
   "auto-find:changed": AutoFindRun;
   "duplicate:changed": DuplicateScanRun;
+  "internal-duplicate:changed": InternalScanRun;
   "job:changed": JobEvent;
   "download:changed": DownloadChangedEvent;
   "thumbnail:ready": ThumbnailCompletionEvent;
@@ -83,6 +92,13 @@ export interface BackendClient {
   duplicateScanCancel(): Promise<ApiResult<DuplicateScanRun>>;
   duplicateReviewGet(candidateId: string): Promise<ApiResult<DuplicateReview>>;
   duplicateDecisionApply(request: DuplicateDecisionRequest): Promise<ApiResult<DuplicateReview>>;
+  internalDuplicateSnapshot(): Promise<ApiResult<InternalDuplicateSnapshot>>;
+  internalDuplicateScanStart(): Promise<ApiResult<InternalScanRun>>;
+  internalDuplicateScanCancel(): Promise<ApiResult<InternalScanRun>>;
+  internalDuplicateReviewGet(entryId: string): Promise<ApiResult<InternalDuplicateReview>>;
+  internalRemovalPlan(request: InternalRemovalPlanRequest): Promise<ApiResult<InternalRemovalPlan>>;
+  internalRemovalApply(request: InternalRemovalApplyRequest): Promise<ApiResult<InternalRemovalResult>>;
+  internalRemovalUndo(request: InternalRemovalUndoRequest): Promise<ApiResult<InternalRemovalResult>>;
   downloadQueueAdd(galleries: GalleryId[], requestId: string): Promise<ApiResult<DownloadEntry[]>>;
   downloadEntriesList(request: DownloadListRequest): Promise<ApiResult<DownloadPage>>;
   downloadRetry(entryIds: string[]): Promise<ApiResult<JobRef[]>>;
@@ -337,6 +353,24 @@ const cloneDuplicateSnapshot = (snapshot: DuplicateSnapshot): DuplicateSnapshot 
   candidates: snapshot.candidates.map(cloneDuplicateCandidate),
 });
 
+const cloneInternalScanRun = (run: InternalScanRun): InternalScanRun => ({ ...run });
+const cloneInternalReview = (review: InternalDuplicateReview): InternalDuplicateReview => ({
+  ...review,
+  groups: review.groups.map((group) => ({
+    ...group,
+    pages: group.pages.map((page) => ({ ...page })),
+  })),
+  quarantineRecords: review.quarantineRecords.map((record) => ({ ...record })),
+});
+const cloneInternalSnapshot = (snapshot: InternalDuplicateSnapshot): InternalDuplicateSnapshot => ({
+  ...(snapshot.run ? { run: cloneInternalScanRun(snapshot.run) } : {}),
+  groups: snapshot.groups.map((group) => ({
+    ...group,
+    pages: group.pages.map((page) => ({ ...page })),
+  })),
+  quarantineRecords: snapshot.quarantineRecords.map((record) => ({ ...record })),
+});
+
 type Handler<K extends keyof BackendEventMap> = (payload: BackendEventMap[K]) => void;
 
 class BrowserMockBackend implements BackendClient {
@@ -346,6 +380,7 @@ class BrowserMockBackend implements BackendClient {
   private listeners: { [K in keyof BackendEventMap]: Set<Handler<K>> } = {
     "auto-find:changed": new Set(),
     "duplicate:changed": new Set(),
+    "internal-duplicate:changed": new Set(),
     "job:changed": new Set(),
     "download:changed": new Set(),
     "thumbnail:ready": new Set(),
@@ -377,6 +412,11 @@ class BrowserMockBackend implements BackendClient {
   private duplicateGeneration = 0;
   private nextDuplicateRunId = 1;
   private nextDuplicateDecisionId = 1;
+  private internalSnapshotState: InternalDuplicateSnapshot = { groups: [], quarantineRecords: [] };
+  private internalGeneration = 0;
+  private nextInternalRunId = 1;
+  private internalPlans = new Map<string, InternalRemovalPlan>();
+  private nextInternalPlanId = 1;
 
   async settingsGet(): Promise<ApiResult<SettingsSnapshot>> {
     return ok({ ...this.settings });
@@ -780,6 +820,186 @@ class BrowserMockBackend implements BackendClient {
       };
     }
     return ok(cloneDuplicateReview(nextReview));
+  }
+
+  async internalDuplicateSnapshot(): Promise<ApiResult<InternalDuplicateSnapshot>> {
+    return ok(cloneInternalSnapshot(this.internalSnapshotState));
+  }
+
+  async internalDuplicateScanStart(): Promise<ApiResult<InternalScanRun>> {
+    const current = this.internalSnapshotState.run;
+    if (current?.state === "running") return ok(cloneInternalScanRun(current));
+    const generation = ++this.internalGeneration;
+    const completed = [...this.downloadEntries.values()].find((entry) => entry.state === "completed");
+    const entryId = completed?.entryId ?? "browser-artifact-4051038";
+    const targetGalleryId = completed?.galleryId ?? galleryId(4_051_038);
+    const now = new Date().toISOString();
+    const run: InternalScanRun = {
+      runId: `browser-internal-run-${this.nextInternalRunId++}`,
+      revision: 0,
+      state: "running",
+      totalArtifacts: 1,
+      scannedArtifacts: 0,
+      totalPages: 24,
+      comparedPairs: 0,
+      groupsFound: 0,
+      startedAt: now,
+      updatedAt: now,
+    };
+    this.internalSnapshotState = { ...this.internalSnapshotState, run };
+    queueMicrotask(() => this.emit("internal-duplicate:changed", cloneInternalScanRun(run)));
+    window.setTimeout(() => {
+      if (generation !== this.internalGeneration || this.internalSnapshotState.run?.state !== "running") return;
+      const finishedAt = new Date().toISOString();
+      const groups: InternalDuplicateSnapshot["groups"] = [
+        {
+          groupId: `${entryId}-exact-1`, blockId: `${entryId}-block-1`, sequenceIndex: 0,
+          revision: 0, entryId, galleryId: targetGalleryId, relation: "exact", confidence: 1,
+          recommendedKeepSourcePage: 2,
+          pages: [2, 8].map((sourcePage) => ({ sourcePage, exactSha256: true, visualSimilarity: 1, detailHashDistance: 0, lowInformation: false })),
+          resolved: false, createdAt: finishedAt, updatedAt: finishedAt,
+        },
+        {
+          groupId: `${entryId}-visual-1`, blockId: `${entryId}-block-2`, sequenceIndex: 0,
+          revision: 0, entryId, galleryId: targetGalleryId, relation: "translation_visual", confidence: 0.94,
+          recommendedKeepSourcePage: 14,
+          pages: [14, 20].map((sourcePage) => ({ sourcePage, exactSha256: false, visualSimilarity: 0.94, detailHashDistance: 17, lowInformation: false })),
+          resolved: false, createdAt: finishedAt, updatedAt: finishedAt,
+        },
+        {
+          groupId: `${entryId}-visual-2`, blockId: `${entryId}-block-2`, sequenceIndex: 1,
+          revision: 0, entryId, galleryId: targetGalleryId, relation: "translation_visual", confidence: 0.91,
+          recommendedKeepSourcePage: 15,
+          pages: [15, 21].map((sourcePage) => ({ sourcePage, exactSha256: false, visualSimilarity: 0.91, detailHashDistance: 22, lowInformation: false })),
+          resolved: false, createdAt: finishedAt, updatedAt: finishedAt,
+        },
+      ];
+      const finished: InternalScanRun = {
+        ...run,
+        revision: 2,
+        state: "completed",
+        scannedArtifacts: 1,
+        comparedPairs: 276,
+        groupsFound: groups.length,
+        updatedAt: finishedAt,
+        finishedAt,
+      };
+      this.internalSnapshotState = { ...this.internalSnapshotState, run: finished, groups };
+      this.emit("internal-duplicate:changed", cloneInternalScanRun(finished));
+    }, 80);
+    return ok(cloneInternalScanRun(run));
+  }
+
+  async internalDuplicateScanCancel(): Promise<ApiResult<InternalScanRun>> {
+    const current = this.internalSnapshotState.run;
+    if (!current || current.state !== "running") {
+      return notFoundError("INTERNAL_DUPLICATE_SCAN_NOT_RUNNING", "실행 중인 내부 중복 검사가 없습니다.");
+    }
+    this.internalGeneration += 1;
+    const now = new Date().toISOString();
+    const cancelled = { ...current, revision: current.revision + 1, state: "cancelled" as const, updatedAt: now, finishedAt: now };
+    this.internalSnapshotState = { ...this.internalSnapshotState, run: cancelled };
+    this.emit("internal-duplicate:changed", cloneInternalScanRun(cancelled));
+    return ok(cloneInternalScanRun(cancelled));
+  }
+
+  async internalDuplicateReviewGet(entryId: string): Promise<ApiResult<InternalDuplicateReview>> {
+    const normalized = entryId.trim();
+    const groups = this.internalSnapshotState.groups.filter((group) => group.entryId === normalized && !group.resolved);
+    const records = this.internalSnapshotState.quarantineRecords.filter((record) => record.entryId === normalized);
+    const gallery = [...this.downloadEntries.values()].find((entry) => entry.entryId === normalized);
+    const targetGalleryId = groups[0]?.galleryId ?? gallery?.galleryId;
+    if (!targetGalleryId && !records.length) {
+      return notFoundError("INTERNAL_DUPLICATE_ENTRY_NOT_FOUND", "내부 중복 검토 항목을 찾을 수 없습니다.", { entryId: normalized });
+    }
+    const resolvedGalleryId = targetGalleryId ?? records[0]?.galleryId;
+    if (!resolvedGalleryId) {
+      return notFoundError("INTERNAL_DUPLICATE_ENTRY_NOT_FOUND", "내부 중복 검토 항목을 찾을 수 없습니다.", { entryId: normalized });
+    }
+    const detail = targetGalleryId ? galleryDetailFixture(targetGalleryId) : undefined;
+    return ok(cloneInternalReview({
+      entryId: normalized,
+      galleryId: resolvedGalleryId,
+      title: detail?.title ?? `다운로드 ${normalized}`,
+      groups,
+      quarantineRecords: records,
+    }));
+  }
+
+  async internalRemovalPlan(request: InternalRemovalPlanRequest): Promise<ApiResult<InternalRemovalPlan>> {
+    if (!request.selections.length) return validationError("request.selections", "must not be empty");
+    for (const selection of request.selections) {
+      const group = this.internalSnapshotState.groups.find((item) => item.groupId === selection.groupId && item.entryId === request.entryId);
+      if (!group) return notFoundError("INTERNAL_DUPLICATE_ENTRY_NOT_FOUND", "내부 중복 그룹을 찾을 수 없습니다.");
+      if (group.revision !== selection.expectedRevision) return conflict("internalDuplicateGroup");
+      const pages = new Set(group.pages.map((page) => page.sourcePage));
+      if (!pages.has(selection.keepSourcePage) || !selection.removeSourcePages.length || selection.removeSourcePages.some((page) => !pages.has(page) || page === selection.keepSourcePage)) {
+        return validationError("request.selections", "keep/remove 페이지가 검토 행과 일치해야 합니다");
+      }
+    }
+    const files = new Set(request.selections.flatMap((selection) => selection.removeSourcePages));
+    const plan: InternalRemovalPlan = {
+      ...request,
+      selections: request.selections.map((selection) => ({ ...selection, removeSourcePages: [...selection.removeSourcePages] })),
+      planId: `browser-internal-plan-${this.nextInternalPlanId++}`,
+      filesToQuarantine: files.size,
+      bytesToQuarantine: files.size * 512_000,
+      expiresAt: String(Date.now() + 15 * 60 * 1_000),
+    };
+    this.internalPlans.set(plan.planId, plan);
+    return ok({ ...plan, selections: plan.selections.map((selection) => ({ ...selection, removeSourcePages: [...selection.removeSourcePages] })) });
+  }
+
+  async internalRemovalApply(request: InternalRemovalApplyRequest): Promise<ApiResult<InternalRemovalResult>> {
+    const plan = this.internalPlans.get(request.plan.planId);
+    if (!plan || Number(plan.expiresAt) < Date.now()) {
+      return notFoundError("INTERNAL_REMOVAL_PLAN_INVALID", "제거 계획이 만료되었거나 존재하지 않습니다.");
+    }
+    const now = new Date().toISOString();
+    const records = plan.selections.flatMap((selection) => selection.removeSourcePages.map((sourcePage) => ({
+      recordId: `browser-page-quarantine-${plan.planId}-${sourcePage}`,
+      planId: plan.planId,
+      entryId: plan.entryId,
+      galleryId: this.internalSnapshotState.groups.find((group) => group.groupId === selection.groupId)?.galleryId ?? galleryId(1),
+      sourcePage,
+      originalRelativePath: `browser/${plan.entryId}/${String(sourcePage).padStart(4, "0")}.webp`,
+      quarantineRelativePath: `browser/${plan.entryId}/.atsumi-page-quarantine/${plan.planId}/${String(sourcePage).padStart(4, "0")}.webp`,
+      reason: request.reason.trim() || "internal duplicate review",
+      state: "quarantined" as const,
+      createdAt: now,
+      updatedAt: now,
+    })));
+    const selected = new Set(plan.selections.map((selection) => selection.groupId));
+    this.internalSnapshotState = {
+      ...this.internalSnapshotState,
+      groups: this.internalSnapshotState.groups.map((group) => selected.has(group.groupId) ? { ...group, revision: group.revision + 1, resolved: true, updatedAt: now } : group),
+      quarantineRecords: [...this.internalSnapshotState.quarantineRecords, ...records],
+    };
+    const reviewResult = await this.internalDuplicateReviewGet(plan.entryId);
+    if (!reviewResult.ok) return reviewResult;
+    return ok({ review: reviewResult.data, records: records.map((record) => ({ ...record })) });
+  }
+
+  async internalRemovalUndo(request: InternalRemovalUndoRequest): Promise<ApiResult<InternalRemovalResult>> {
+    if (!request.recordIds.length) return validationError("request.recordIds", "must not be empty");
+    const requested = new Set(request.recordIds);
+    const records = this.internalSnapshotState.quarantineRecords.filter((record) => requested.has(record.recordId) && record.state === "quarantined");
+    if (!records.length) return notFoundError("INTERNAL_REMOVAL_PLAN_INVALID", "되돌릴 격리 기록을 찾을 수 없습니다.");
+    const firstRecord = records[0];
+    if (!firstRecord) return notFoundError("INTERNAL_REMOVAL_PLAN_INVALID", "되돌릴 격리 기록을 찾을 수 없습니다.");
+    const entryId = firstRecord.entryId;
+    if (records.some((record) => record.entryId !== entryId)) return validationError("request.recordIds", "한 다운로드의 페이지만 선택해야 합니다");
+    const plans = new Set(records.map((record) => record.planId));
+    const groupIds = new Set([...plans].flatMap((planId) => this.internalPlans.get(planId)?.selections.map((selection) => selection.groupId) ?? []));
+    const now = new Date().toISOString();
+    this.internalSnapshotState = {
+      ...this.internalSnapshotState,
+      groups: this.internalSnapshotState.groups.map((group) => groupIds.has(group.groupId) ? { ...group, revision: group.revision + 1, resolved: false, updatedAt: now } : group),
+      quarantineRecords: this.internalSnapshotState.quarantineRecords.map((record) => requested.has(record.recordId) ? { ...record, state: "restored" as const, updatedAt: now } : record),
+    };
+    const reviewResult = await this.internalDuplicateReviewGet(entryId);
+    if (!reviewResult.ok) return reviewResult;
+    return ok({ review: reviewResult.data, records: reviewResult.data.quarantineRecords.filter((record) => requested.has(record.recordId)) });
   }
 
   async downloadQueueAdd(
@@ -1362,6 +1582,34 @@ class TauriBackend implements BackendClient {
 
   duplicateDecisionApply(request: DuplicateDecisionRequest): Promise<ApiResult<DuplicateReview>> {
     return invoke("duplicate_decision_apply", { request });
+  }
+
+  internalDuplicateSnapshot(): Promise<ApiResult<InternalDuplicateSnapshot>> {
+    return invoke("internal_duplicate_snapshot");
+  }
+
+  internalDuplicateScanStart(): Promise<ApiResult<InternalScanRun>> {
+    return invoke("internal_duplicate_scan_start");
+  }
+
+  internalDuplicateScanCancel(): Promise<ApiResult<InternalScanRun>> {
+    return invoke("internal_duplicate_scan_cancel");
+  }
+
+  internalDuplicateReviewGet(entryId: string): Promise<ApiResult<InternalDuplicateReview>> {
+    return invoke("internal_duplicate_review_get", { entryId });
+  }
+
+  internalRemovalPlan(request: InternalRemovalPlanRequest): Promise<ApiResult<InternalRemovalPlan>> {
+    return invoke("internal_removal_plan", { request });
+  }
+
+  internalRemovalApply(request: InternalRemovalApplyRequest): Promise<ApiResult<InternalRemovalResult>> {
+    return invoke("internal_removal_apply", { request });
+  }
+
+  internalRemovalUndo(request: InternalRemovalUndoRequest): Promise<ApiResult<InternalRemovalResult>> {
+    return invoke("internal_removal_undo", { request });
   }
 
   downloadQueueAdd(

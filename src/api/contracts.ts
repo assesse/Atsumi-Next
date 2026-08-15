@@ -370,6 +370,117 @@ export type DuplicateSnapshot = {
   candidates: DuplicateCandidate[];
 };
 
+export type InternalScanState = "running" | "completed" | "failed" | "cancelled";
+
+export type InternalScanRun = {
+  runId: string;
+  revision: number;
+  state: InternalScanState;
+  totalArtifacts: number;
+  scannedArtifacts: number;
+  totalPages: number;
+  comparedPairs: number;
+  groupsFound: number;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+export type InternalMatchKind = "exact" | "translation_visual";
+
+export type InternalPageEvidence = {
+  sourcePage: number;
+  exactSha256: boolean;
+  visualSimilarity: number;
+  detailHashDistance: number;
+  lowInformation: boolean;
+};
+
+export type InternalDuplicateGroup = {
+  groupId: string;
+  blockId: string;
+  sequenceIndex: number;
+  revision: number;
+  entryId: string;
+  galleryId: GalleryId;
+  relation: InternalMatchKind;
+  confidence: number;
+  recommendedKeepSourcePage: number;
+  pages: InternalPageEvidence[];
+  resolved: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PageQuarantineState =
+  | "pending_quarantine"
+  | "quarantined"
+  | "pending_restore"
+  | "restored";
+
+export type PageQuarantineRecord = {
+  recordId: string;
+  planId: string;
+  entryId: string;
+  galleryId: GalleryId;
+  sourcePage: number;
+  originalRelativePath: string;
+  quarantineRelativePath: string;
+  reason: string;
+  state: PageQuarantineState;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type InternalDuplicateSnapshot = {
+  run?: InternalScanRun;
+  groups: InternalDuplicateGroup[];
+  quarantineRecords: PageQuarantineRecord[];
+};
+
+export type InternalDuplicateReview = {
+  entryId: string;
+  galleryId: GalleryId;
+  title: string;
+  groups: InternalDuplicateGroup[];
+  quarantineRecords: PageQuarantineRecord[];
+};
+
+export type InternalRemovalSelection = {
+  groupId: string;
+  expectedRevision: number;
+  keepSourcePage: number;
+  removeSourcePages: number[];
+};
+
+export type InternalRemovalPlanRequest = {
+  entryId: string;
+  selections: InternalRemovalSelection[];
+};
+
+export type InternalRemovalPlan = InternalRemovalPlanRequest & {
+  planId: string;
+  filesToQuarantine: number;
+  bytesToQuarantine: number;
+  expiresAt: string;
+};
+
+export type InternalRemovalApplyRequest = {
+  plan: InternalRemovalPlan;
+  reason: string;
+};
+
+export type InternalRemovalUndoRequest = {
+  recordIds: string[];
+};
+
+export type InternalRemovalResult = {
+  review: InternalDuplicateReview;
+  records: PageQuarantineRecord[];
+};
+
 export type GalleryDetail = GallerySummary & {
   related: GallerySummary[];
 };

@@ -18,9 +18,9 @@ use application::{
     ApplicationService, ArtifactRepository, ArtifactStore, AutoFindSupervisor,
     AutomationRepository, DisabledDuplicateRelationProvider, DownloadPipelineRepository,
     DownloadSourcePort, DownloadSupervisor, DuplicateRepository, DuplicateSupervisor,
-    SearchRepository, StateRepository,
+    InternalDuplicateRepository, InternalDuplicateSupervisor, SearchRepository, StateRepository,
 };
-use domain::{AutoFindRun, DownloadJobProjection, DuplicateScanRun};
+use domain::{AutoFindRun, DownloadJobProjection, DuplicateScanRun, InternalScanRun};
 use infrastructure::{
     CompositeThumbnailResolver, FilesystemArtifactStore, HitomiLiveAdapter, HitomiLiveConfig,
     SqliteRepository, WindowsFolderPicker,
@@ -137,7 +137,7 @@ pub fn run() -> tauri::Result<()> {
             let thumbnail_resolver: Arc<dyn ThumbnailResolver> = Arc::new(
                 CompositeThumbnailResolver::new(
                     remote_thumbnail_resolver,
-                    artifact_repository,
+                    Arc::clone(&artifact_repository),
                     thumbnail_settings,
                     Arc::clone(&artifact_store),
                 ),
@@ -159,7 +159,7 @@ pub fn run() -> tauri::Result<()> {
             let duplicate_settings: Arc<dyn StateRepository> = repository.clone();
             let (duplicate_event_tx, duplicate_event_rx) = mpsc::channel::<DuplicateScanRun>();
             let duplicates = DuplicateSupervisor::new(
-                duplicate_repository,
+                Arc::clone(&duplicate_repository),
                 duplicate_settings,
                 Arc::clone(&artifact_store),
                 Arc::new(DisabledDuplicateRelationProvider),
@@ -173,6 +173,46 @@ pub fn run() -> tauri::Result<()> {
                     while let Ok(run) = duplicate_event_rx.recv() {
                         if let Err(error) = duplicate_app.emit("duplicate:changed", &run) {
                             tracing::warn!(error = %error, "could not emit duplicate:changed");
+                        }
+                    }
+                })?;
+            let internal_repository: Arc<dyn InternalDuplicateRepository> = repository.clone();
+            let internal_artifact_repository: Arc<dyn ArtifactRepository> = repository.clone();
+            let internal_settings: Arc<dyn StateRepository> = repository.clone();
+            let (internal_event_tx, internal_event_rx) = mpsc::channel::<InternalScanRun>();
+            let internal_duplicates = InternalDuplicateSupervisor::new(
+                internal_repository,
+                duplicate_repository,
+                internal_artifact_repository,
+                internal_settings,
+                Arc::clone(&artifact_store),
+                internal_event_tx,
+            );
+            let recovered_internal_runs = internal_duplicates.recover_interrupted()?;
+            let reconciled_internal_pages = if download_root_configured {
+                match internal_duplicates.reconcile_pending_page_moves() {
+                    Ok(count) => count,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "startup internal page quarantine reconciliation was deferred"
+                        );
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+            let internal_app = app.handle().clone();
+            thread::Builder::new()
+                .name("atsumi-internal-duplicate-events".into())
+                .spawn(move || {
+                    while let Ok(run) = internal_event_rx.recv() {
+                        if let Err(error) = internal_app.emit("internal-duplicate:changed", &run) {
+                            tracing::warn!(
+                                error = %error,
+                                "could not emit internal-duplicate:changed"
+                            );
                         }
                     }
                 })?;
@@ -229,6 +269,7 @@ pub fn run() -> tauri::Result<()> {
                 downloads,
                 auto_find,
                 duplicates,
+                internal_duplicates,
                 Arc::new(WindowsFolderPicker::new()),
                 artifact_store,
             ));
@@ -243,6 +284,8 @@ pub fn run() -> tauri::Result<()> {
                 recovered_entries,
                 recovered_auto_find_runs,
                 recovered_duplicate_runs,
+                recovered_internal_runs,
+                reconciled_internal_pages,
                 reconciled_artifacts,
                 reconcile_issues,
                 resumed_jobs,
@@ -270,6 +313,13 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::duplicate_scan_cancel,
             interface::commands::duplicate_review_get,
             interface::commands::duplicate_decision_apply,
+            interface::commands::internal_duplicate_snapshot,
+            interface::commands::internal_duplicate_scan_start,
+            interface::commands::internal_duplicate_scan_cancel,
+            interface::commands::internal_duplicate_review_get,
+            interface::commands::internal_removal_plan,
+            interface::commands::internal_removal_apply,
+            interface::commands::internal_removal_undo,
             interface::commands::download_queue_add,
             interface::commands::download_entries_list,
             interface::commands::download_retry,

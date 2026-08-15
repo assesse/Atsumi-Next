@@ -571,7 +571,8 @@ impl ArtifactBundle {
                 && self.artifact.completed_at.is_some();
             let pages_ready = self.pages.len() == self.artifact.expected_page_count as usize
                 && self.pages.iter().all(|page| {
-                    page.state == PageArtifactState::Present
+                    ((page.state == PageArtifactState::Present && !page.excluded)
+                        || (page.state == PageArtifactState::Quarantined && page.excluded))
                         && page.byte_length.is_some()
                         && page.sha256.is_some()
                         && page.storage_format.is_some()

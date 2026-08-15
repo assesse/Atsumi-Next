@@ -151,6 +151,13 @@ pub trait ArtifactStore: Send + Sync {
         destination: &ArtifactRelativePath,
     ) -> Result<(), DownloadPipelineError>;
 
+    fn move_managed_file(
+        &self,
+        root: &Path,
+        source: &ArtifactRelativePath,
+        destination: &ArtifactRelativePath,
+    ) -> Result<(), DownloadPipelineError>;
+
     fn managed_path_exists(
         &self,
         root: &Path,

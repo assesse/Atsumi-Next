@@ -112,7 +112,7 @@ impl SqliteRepository {
         })
     }
 
-    fn connection(&self) -> Result<MutexGuard<'_, Connection>, RepositoryError> {
+    pub(crate) fn connection(&self) -> Result<MutexGuard<'_, Connection>, RepositoryError> {
         self.connection
             .lock()
             .map_err(|_| RepositoryError::Other("database mutex was poisoned".into()))

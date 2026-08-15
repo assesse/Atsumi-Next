@@ -11,6 +11,11 @@ import type {
   FavoriteKey,
   FavoriteNamespace,
   FavoriteRecord,
+  InternalDuplicateReview,
+  InternalDuplicateSnapshot,
+  InternalRemovalPlan,
+  InternalRemovalPlanRequest,
+  InternalScanRun,
   SearchHistoryEntry,
   SearchRequest,
   SettingsPatch,
@@ -18,6 +23,7 @@ import type {
 import { ActivityDrawer } from "./components/ActivityDrawer";
 import { DetailWorkspace } from "./components/DetailWorkspace";
 import { DuplicateReviewDialog } from "./components/DuplicateReviewDialog";
+import { InternalDuplicateDialog } from "./components/InternalDuplicateDialog";
 import { ExitConfirmDialog } from "./components/ExitConfirmDialog";
 import { FluentIcon } from "./components/FluentIcon";
 import { GalleryCard } from "./components/GalleryCard";
@@ -115,6 +121,16 @@ const duplicateStatusLabel = (loading: boolean, error: string | null, run?: Dupl
   return `중복 검사 완료 · 비교 ${run.comparedPairs}/${run.totalPairs} · 후보 ${run.candidatesFound}개`;
 };
 
+const internalStatusLabel = (loading: boolean, error: string | null, run?: InternalScanRun): string => {
+  if (loading) return "저장된 내부 중복 결과를 불러오는 중";
+  if (error) return `내부 중복 오류 · ${error}`;
+  if (!run) return "내부 중복 검사를 아직 실행하지 않았습니다.";
+  if (run.state === "running") return `내부 중복 검사 중 · 앨범 ${run.scannedArtifacts}/${run.totalArtifacts} · 페이지 ${run.totalPages} · 행 ${run.groupsFound}`;
+  if (run.state === "failed") return `내부 중복 검사 실패 · ${run.errorMessage ?? run.errorCode ?? "원인을 확인해 주세요."}`;
+  if (run.state === "cancelled") return `내부 중복 검사 취소됨 · 기존 검토 결과 보존`;
+  return `내부 중복 검사 완료 · 앨범 ${run.scannedArtifacts}개 · 검토 행 ${run.groupsFound}개`;
+};
+
 export default function App() {
   const [ui, dispatch] = useReducer(uiReducer, initialUiState);
   const [query, dispatchQuery] = useReducer(galleryQueryReducer, initialGalleryQueryState);
@@ -144,6 +160,16 @@ export default function App() {
   const [duplicateReviewLoading, setDuplicateReviewLoading] = useState(false);
   const [duplicateReviewError, setDuplicateReviewError] = useState<string | null>(null);
   const [duplicateDecisionPending, setDuplicateDecisionPending] = useState(false);
+  const [internalSnapshot, setInternalSnapshot] = useState<InternalDuplicateSnapshot>({ groups: [], quarantineRecords: [] });
+  const [internalRun, setInternalRun] = useState<InternalScanRun | undefined>(undefined);
+  const [internalLoading, setInternalLoading] = useState(true);
+  const [internalError, setInternalError] = useState<string | null>(null);
+  const [internalPending, setInternalPending] = useState(false);
+  const [internalReviewEntryId, setInternalReviewEntryId] = useState<string | null>(null);
+  const [internalReview, setInternalReview] = useState<InternalDuplicateReview | null>(null);
+  const [internalReviewLoading, setInternalReviewLoading] = useState(false);
+  const [internalReviewError, setInternalReviewError] = useState<string | null>(null);
+  const [internalPlan, setInternalPlan] = useState<InternalRemovalPlan | null>(null);
   const [toast, setToast] = useState<Toast>(null);
   const [reconcilingArtifacts, setReconcilingArtifacts] = useState(false);
   const [settingsPreview, setSettingsPreview] = useState<{ maxColumns: number; previewWidth: number } | null>(null);
@@ -162,6 +188,10 @@ export default function App() {
   const duplicateSnapshotRef = useRef<DuplicateSnapshot | null>(null);
   const duplicatePendingRef = useRef(false);
   const duplicateDecisionPendingRef = useRef(false);
+  const internalHydrationToken = useRef(0);
+  const internalReviewToken = useRef(0);
+  const internalRunRef = useRef<InternalScanRun | undefined>(undefined);
+  const internalPendingRef = useRef(false);
   const downloadHydrationToken = useRef(0);
   const queueRequestSequence = useRef(0);
   const pendingDownloadEntriesRef = useRef(new Set<string>());
@@ -267,6 +297,38 @@ export default function App() {
     }
   }, []);
 
+  const hydrateInternalSnapshot = useCallback(async (showLoading = false) => {
+    const token = ++internalHydrationToken.current;
+    if (showLoading) setInternalLoading(true);
+    try {
+      const result = await backend.internalDuplicateSnapshot();
+      if (token !== internalHydrationToken.current) return;
+      if (!result.ok) {
+        setInternalError(result.error.message);
+        return;
+      }
+      const incoming = result.data.run;
+      const current = internalRunRef.current;
+      const stale = Boolean(
+        incoming && current && (
+          (incoming.runId === current.runId && incoming.revision < current.revision)
+          || (incoming.runId !== current.runId && incoming.startedAt < current.startedAt)
+        ),
+      );
+      if (stale) return;
+      internalRunRef.current = incoming;
+      setInternalRun(incoming);
+      setInternalSnapshot(result.data);
+      setInternalError(null);
+    } catch {
+      if (token === internalHydrationToken.current) {
+        setInternalError("내부 중복 검사 backend에 연결하지 못했습니다.");
+      }
+    } finally {
+      if (token === internalHydrationToken.current) setInternalLoading(false);
+    }
+  }, []);
+
   const beginDownloadMutation = useCallback((entryId: string): boolean => {
     if (pendingDownloadEntriesRef.current.has(entryId)) return false;
     pendingDownloadEntriesRef.current.add(entryId);
@@ -286,7 +348,8 @@ export default function App() {
     void hydrateSearchHistory();
     void hydrateAutoFind(true);
     void hydrateDuplicateSnapshot(true);
-  }, [hydrateAutoFind, hydrateDuplicateSnapshot, hydrateFavorites, hydrateSearchHistory]);
+    void hydrateInternalSnapshot(true);
+  }, [hydrateAutoFind, hydrateDuplicateSnapshot, hydrateFavorites, hydrateInternalSnapshot, hydrateSearchHistory]);
 
   useLayoutEffect(() => {
     document.documentElement.style.setProperty("--preview-width", `${previewWidth}px`);
@@ -374,6 +437,29 @@ export default function App() {
       unsubscribe?.();
     };
   }, [hydrateDuplicateSnapshot]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    void backend.on("internal-duplicate:changed", (run) => {
+      const current = internalRunRef.current;
+      if (current?.runId === run.runId && current.revision >= run.revision) return;
+      if (current?.runId !== run.runId && current && run.startedAt < current.startedAt) return;
+      internalRunRef.current = run;
+      setInternalRun(run);
+      setInternalSnapshot((snapshot) => ({ ...snapshot, run }));
+      if (run.state !== "running") void hydrateInternalSnapshot();
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unsubscribe = cleanup;
+    }).catch(() => {
+      if (!disposed) setInternalError("내부 중복 상태 event stream에 연결하지 못했습니다.");
+    });
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [hydrateInternalSnapshot]);
 
   useEffect(() => {
     let cancelled = false;
@@ -674,6 +760,168 @@ export default function App() {
       setDuplicateDecisionPending(false);
     }
   }, [hydrateDuplicateReview, hydrateDuplicateSnapshot, showToast]);
+
+  const hydrateInternalReview = useCallback(async (entryId: string) => {
+    const token = ++internalReviewToken.current;
+    setInternalReviewLoading(true);
+    setInternalReviewError(null);
+    try {
+      const result = await backend.internalDuplicateReviewGet(entryId);
+      if (token !== internalReviewToken.current) return;
+      if (!result.ok) {
+        setInternalReviewError(result.error.message);
+        return;
+      }
+      setInternalReview(result.data);
+    } catch {
+      if (token === internalReviewToken.current) {
+        setInternalReviewError("내부 중복 검토 backend에 연결하지 못했습니다.");
+      }
+    } finally {
+      if (token === internalReviewToken.current) setInternalReviewLoading(false);
+    }
+  }, []);
+
+  const openInternalReview = useCallback((entryId: string) => {
+    setInternalReviewEntryId(entryId);
+    setInternalReview(null);
+    setInternalPlan(null);
+    setInternalReviewError(null);
+    void hydrateInternalReview(entryId);
+  }, [hydrateInternalReview]);
+
+  const closeInternalReview = useCallback(() => {
+    internalReviewToken.current += 1;
+    setInternalReviewEntryId(null);
+    setInternalReview(null);
+    setInternalPlan(null);
+    setInternalReviewError(null);
+    setInternalReviewLoading(false);
+  }, []);
+
+  const startInternalScan = useCallback(async () => {
+    if (internalPendingRef.current || internalRun?.state === "running") return;
+    internalPendingRef.current = true;
+    setInternalPending(true);
+    setInternalError(null);
+    try {
+      const result = await backend.internalDuplicateScanStart();
+      if (!result.ok) {
+        setInternalError(result.error.message);
+        showToast(result.error.message);
+        return;
+      }
+      internalRunRef.current = result.data;
+      setInternalRun(result.data);
+      setInternalSnapshot((snapshot) => ({ ...snapshot, run: result.data }));
+      await hydrateInternalSnapshot();
+      showToast("검증된 앨범 파일을 기준으로 내부 중복 페이지 검사를 시작했습니다.");
+    } catch {
+      const message = "내부 중복 검사를 시작하지 못했습니다.";
+      setInternalError(message);
+      showToast(message);
+    } finally {
+      internalPendingRef.current = false;
+      setInternalPending(false);
+    }
+  }, [hydrateInternalSnapshot, internalRun?.state, showToast]);
+
+  const cancelInternalScan = useCallback(async () => {
+    if (internalPendingRef.current || internalRun?.state !== "running") return;
+    internalPendingRef.current = true;
+    setInternalPending(true);
+    try {
+      const result = await backend.internalDuplicateScanCancel();
+      if (!result.ok) {
+        setInternalError(result.error.message);
+        showToast(result.error.message);
+        return;
+      }
+      internalRunRef.current = result.data;
+      setInternalRun(result.data);
+      setInternalSnapshot((snapshot) => ({ ...snapshot, run: result.data }));
+      showToast("내부 중복 검사를 취소했습니다. 기존 검토 결과는 유지됩니다.");
+    } catch {
+      showToast("내부 중복 검사 취소 요청을 전달하지 못했습니다.");
+    } finally {
+      internalPendingRef.current = false;
+      setInternalPending(false);
+    }
+  }, [internalRun?.state, showToast]);
+
+  const previewInternalRemoval = useCallback(async (request: InternalRemovalPlanRequest) => {
+    if (internalPendingRef.current) return;
+    internalPendingRef.current = true;
+    setInternalPending(true);
+    setInternalReviewError(null);
+    try {
+      const result = await backend.internalRemovalPlan(request);
+      if (!result.ok) {
+        setInternalReviewError(result.error.message);
+        if (result.error.code === "REVISION_CONFLICT") await hydrateInternalReview(request.entryId);
+        return;
+      }
+      setInternalPlan(result.data);
+    } catch {
+      setInternalReviewError("격리 계획을 계산하지 못했습니다.");
+    } finally {
+      internalPendingRef.current = false;
+      setInternalPending(false);
+    }
+  }, [hydrateInternalReview]);
+
+  const applyInternalRemoval = useCallback(async (plan: InternalRemovalPlan) => {
+    if (internalPendingRef.current) return;
+    internalPendingRef.current = true;
+    setInternalPending(true);
+    setInternalReviewError(null);
+    try {
+      const result = await backend.internalRemovalApply({
+        plan,
+        reason: "사용자가 내부 중복 검토에서 명시적으로 격리함",
+      });
+      if (!result.ok) {
+        setInternalReviewError(result.error.message);
+        if (result.error.code === "REVISION_CONFLICT" && internalReviewEntryId) {
+          await hydrateInternalReview(internalReviewEntryId);
+        }
+        return;
+      }
+      setInternalReview(result.data.review);
+      setInternalPlan(null);
+      await hydrateInternalSnapshot();
+      setDownloadsRefresh((value) => value + 1);
+      showToast(`${result.data.records.length}개 페이지를 안전 격리했습니다. 영구 삭제되지 않았습니다.`);
+    } catch {
+      setInternalReviewError("페이지 격리 요청을 완료하지 못했습니다. 앱 재시작 시 안전하게 조정됩니다.");
+    } finally {
+      internalPendingRef.current = false;
+      setInternalPending(false);
+    }
+  }, [hydrateInternalReview, hydrateInternalSnapshot, internalReviewEntryId, showToast]);
+
+  const undoInternalRemoval = useCallback(async (recordIds: string[]) => {
+    if (internalPendingRef.current || !recordIds.length) return;
+    internalPendingRef.current = true;
+    setInternalPending(true);
+    setInternalReviewError(null);
+    try {
+      const result = await backend.internalRemovalUndo({ recordIds });
+      if (!result.ok) {
+        setInternalReviewError(result.error.message);
+        return;
+      }
+      setInternalReview(result.data.review);
+      await hydrateInternalSnapshot();
+      setDownloadsRefresh((value) => value + 1);
+      showToast(`${result.data.records.length}개 페이지를 원래 위치로 복원했습니다.`);
+    } catch {
+      setInternalReviewError("격리 페이지 복원 요청을 완료하지 못했습니다. 앱 재시작 시 안전하게 조정됩니다.");
+    } finally {
+      internalPendingRef.current = false;
+      setInternalPending(false);
+    }
+  }, [hydrateInternalSnapshot, showToast]);
   const openActivity = useCallback(() => {
     activityOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dispatch({ type: "overlay.activity", open: true });
@@ -1037,6 +1285,11 @@ export default function App() {
   }, [query.phase, query.queryId]);
 
   const selectedIds = useMemo(() => [...ui.selection.ids], [ui.selection.ids]);
+  const selectedCompletedEntryId = useMemo(() => {
+    if (selectedIds.length !== 1) return null;
+    const download = displayGalleries.get(selectedIds[0]!)?.download;
+    return download?.state === "completed" ? download.entryId : null;
+  }, [displayGalleries, selectedIds]);
 
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
@@ -1149,6 +1402,7 @@ export default function App() {
   const resultSourceLabel = backend.runtime === "tauri" ? "Hitomi 실데이터" : "브라우저 fixture";
   const currentAutoFindStatus = autoFindStatusLabel(autoFindLoading, autoFindError, autoFindSnapshot.run);
   const currentDuplicateStatus = duplicateStatusLabel(duplicateLoading, duplicateError, duplicateRun);
+  const currentInternalStatus = internalStatusLabel(internalLoading, internalError, internalRun);
   const renderGalleryGrid = (items: Gallery[], ariaLabel: string) => (
     <div className={`gallery-grid${ui.selection.ids.size ? " is-selection-context" : ""}`} style={{ gridTemplateColumns: `repeat(${galleryColumns}, minmax(0, 1fr))` }} role="list" aria-label={ariaLabel}>
       {items.map((gallery, index) => (
@@ -1236,6 +1490,9 @@ export default function App() {
                   <button type="button" className="text-button" disabled={reconcilingArtifacts} onClick={() => void reconcileArtifacts()}><FluentIcon glyph="\uE9D9" /> {reconcilingArtifacts ? "무결성 검사 중" : "무결성 검사"}</button>
                   <button type="button" className="text-button" disabled={duplicateLoading || duplicatePending || duplicateRun?.state === "running"} onClick={() => void startDuplicateScan()}><FluentIcon glyph="\uE9D9" /> {duplicateRun?.state === "failed" ? "작품 중복 다시 검사" : "작품 중복 검사"}</button>
                   {duplicateRun?.state === "running" ? <button type="button" className="text-button danger-button" disabled={duplicatePending} onClick={() => void cancelDuplicateScan()}><FluentIcon glyph="\uE711" /> 중복 검사 취소</button> : null}
+                  <button type="button" className="text-button" disabled={internalLoading || internalPending || internalRun?.state === "running"} onClick={() => void startInternalScan()}><FluentIcon glyph="\uE9D9" /> {internalRun?.state === "failed" ? "내부 중복 다시 검사" : "내부 중복 검사"}</button>
+                  {internalRun?.state === "running" ? <button type="button" className="text-button danger-button" disabled={internalPending} onClick={() => void cancelInternalScan()}><FluentIcon glyph="\uE711" /> 내부 검사 취소</button> : null}
+                  <button type="button" className="text-button" disabled={!selectedCompletedEntryId || internalPending} title={selectedCompletedEntryId ? "선택한 완료 앨범의 내부 중복 페이지를 검토합니다." : "완료된 앨범 하나를 선택하세요."} onClick={() => selectedCompletedEntryId && openInternalReview(selectedCompletedEntryId)}><FluentIcon glyph="\uE890" /> 선택 앨범 내부 검토</button>
                   <button type="button" className="text-button primary" onClick={() => void queueGalleries(visibleIds)}><FluentIcon glyph="\uE896" /> 전체 다운로드</button>
                 </>
               ) : null}
@@ -1257,7 +1514,9 @@ export default function App() {
                     ))}
                   </div>
                   <span className={`context-summary duplicate-scan-status is-${duplicateRun?.state ?? "idle"}`} role="status">{currentDuplicateStatus}</span>
+                  <span className={`context-summary duplicate-scan-status is-${internalRun?.state ?? "idle"}`} role="status">{currentInternalStatus}</span>
                   {duplicateError ? <button type="button" className="text-button compact" onClick={() => void hydrateDuplicateSnapshot(true)}>결과 다시 불러오기</button> : null}
+                  {internalError ? <button type="button" className="text-button compact" onClick={() => void hydrateInternalSnapshot(true)}>내부 결과 다시 불러오기</button> : null}
                 </>
               )}
             </div>
@@ -1354,6 +1613,21 @@ export default function App() {
         onRetry={() => duplicateReviewCandidateId && void hydrateDuplicateReview(duplicateReviewCandidateId)}
         onRescan={() => void startDuplicateScan()}
         onDecision={(request) => void applyDuplicateDecision(request)}
+      />
+
+      <InternalDuplicateDialog
+        open={internalReviewEntryId !== null}
+        review={internalReview ?? undefined}
+        plan={internalPlan ?? undefined}
+        loading={internalReviewLoading}
+        busy={internalPending}
+        error={internalReviewError}
+        onClose={closeInternalReview}
+        onRetry={() => internalReviewEntryId && void hydrateInternalReview(internalReviewEntryId)}
+        onRescan={() => void startInternalScan()}
+        onPlan={(request) => void previewInternalRemoval(request)}
+        onApply={(plan) => void applyInternalRemoval(plan)}
+        onUndo={(recordIds) => void undoInternalRemoval(recordIds)}
       />
 
       <ExitConfirmDialog

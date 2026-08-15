@@ -42,6 +42,9 @@
 | `AUTO_FIND_NOT_RUNNING` | 취소할 Auto Find 갱신이 없습니다 | 아니오 | 최신 snapshot 확인 |
 | `DUPLICATE_SCAN_NOT_RUNNING` | 취소할 작품 중복 검사가 없습니다 | 아니오 | 최신 snapshot 확인 |
 | `DUPLICATE_CANDIDATE_NOT_FOUND` | 중복 후보가 더 이상 존재하지 않습니다 | 아니오 | 후보 목록 다시 로드 |
+| `INTERNAL_DUPLICATE_SCAN_NOT_RUNNING` | 취소할 내부 중복 검사가 없습니다 | 아니오 | 최신 snapshot 확인 |
+| `INTERNAL_DUPLICATE_ENTRY_NOT_FOUND` | 내부 중복 검토 대상 다운로드가 없습니다 | 아니오 | 완료 다운로드 하나 선택 후 다시 검사 |
+| `INTERNAL_REMOVAL_PLAN_INVALID` | 격리 계획이나 파일 상태가 최신 snapshot과 다릅니다 | 아니오 | Review·무결성 검사 후 계획 다시 생성 |
 | `JOB_INTERRUPTED` | 작업이 중단되었습니다 | 예 | 이어받기 |
 | `THUMBNAIL_REQUEST_INVALID` | 미리보기 요청 정보가 올바르지 않습니다 | 아니오 | 요청 key 확인 |
 | `THUMBNAIL_COORDINATOR_CLOSED` | 미리보기 작업기가 종료되었습니다 | 예 | 앱 상태 확인 후 재시도 |
@@ -92,3 +95,15 @@ worker 시작 실패 command는 현재 공통 `DATABASE_ERROR` envelope도 함�
 | `DUPLICATE_SCAN_APP_EXIT` | 앱 종료가 진행 중 검사를 취소함 | 다음 실행에서 다시 검사 |
 
 오류 문구에는 download root, 파일명, session, raw source URL을 넣지 않는다. 검증 파일의 구체적 불일치는 기존 artifact reconcile에서 안정 code로 확인한다.
+
+## 내부 페이지 중복 scan 오류
+
+| Run error code | 발생 조건 | 사용자 행동 |
+|---|---|---|
+| `INTERNAL_SCAN_WORKER_UNAVAILABLE` | background worker 시작 실패 | 앱 상태 확인 후 다시 검사 |
+| `INTERNAL_SCAN_FAILED` | verified page가 검사 중 변경·손상되거나 repository 작업 실패 | Downloads 무결성 검사 후 다시 검사 |
+| `INTERNAL_SCAN_INTERRUPTED` | 이전 프로세스가 `running` 상태로 종료됨 | 보존된 group 확인 후 다시 검사 |
+| `INTERNAL_SCAN_CANCELLED` | 사용자가 검사를 취소함 | 필요할 때 다시 검사 |
+| `INTERNAL_SCAN_APP_EXIT` | 앱 종료가 진행 중 검사를 취소함 | 다음 실행에서 다시 검사 |
+
+page quarantine에서 원본·격리 경로가 모두 있거나 모두 없으면 `INTERNAL_REMOVAL_PLAN_INVALID`와 Review action으로 중단한다. 경로·파일명을 WebView 오류나 기본 로그에 노출하지 않으며 자동 overwrite/delete하지 않는다.

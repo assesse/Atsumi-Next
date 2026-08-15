@@ -462,6 +462,14 @@ fn page_metric(
     })
 }
 
+pub(crate) fn compare_page_evidence(
+    left: &DuplicatePageHash,
+    right: &DuplicatePageHash,
+    profile: &HashProfile,
+) -> Option<DuplicatePagePair> {
+    page_metric(left, right, profile).map(|metric| metric.pair)
+}
+
 fn ratio_similarity(left: f64, right: f64, scale: f64) -> f64 {
     (1.0 - (left - right).abs() / scale).clamp(0.0, 1.0)
 }

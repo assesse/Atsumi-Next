@@ -199,11 +199,20 @@ type JobEvent = {
 - Review thumbnail은 기존 전역 coordinator의 `ArtifactPage(entryId, sourcePage)`를 사용한다. local root containment, byte length, SHA-256과 WebP decode를 재검증한 뒤 bounded preview만 WebView로 전달한다.
 - E-Hentai relation은 optional port다. production 기본은 명시적 session이 없어 disabled provider이고, session/cookie를 DB·manifest·로그에 남기지 않는다.
 
+### 내부 페이지 중복과 page quarantine
+
+- `InternalDuplicateSupervisor`는 작품 중복과 별도의 단일 worker·run state를 가지며 verified complete artifact 안에서만 page를 비교한다. SHA/profile cache와 `ArtifactPage` thumbnail resolver는 공유하지만 gallery pair 후보와 내부 scene group은 별도 SQLite projection이다.
+- exact SHA 반복은 한 synchronized row로 허용한다. perceptual match는 한 장짜리 shared panel 오탐을 차단하기 위해 원본 순서가 증가하는 최소 두 row, 각 방향 최대 2 missing-page gap을 통과해야 한다.
+- Review는 block/sequence별 원본 source page를 나란히 표시하고 한 page를 keep으로 명시한다. plan은 group revision, remove set, 현재 byte 합계와 만료 시각을 저장하므로 UI가 파일 수나 경로를 추정하지 않는다.
+- page quarantine은 DB intent를 먼저 commit한 뒤 artifact 내부 `.atsumi-page-quarantine/<plan-id>/`로 atomic move하고 manifest를 temp/sync/atomic replace한다. 마지막 transaction이 page state·artifact revision·group resolved·plan state를 함께 확정한다.
+- undo와 시작 시 recovery는 원본/격리 경로 존재 조합을 확인한다. 한쪽만 있으면 의도한 상태로 수렴하고, 둘 다 있거나 둘 다 없으면 Review 대상으로 남기며 자동 삭제·덮어쓰지 않는다.
+- 격리된 page는 original source page number와 verification metadata를 보존하고 `excluded=true`로 downloader/duplicate scan에서 제외한다. artifact 전체는 complete 상태를 유지할 수 있다.
+
 ## 삭제와 복구
 
 - 삭제는 먼저 quarantine으로 이동한다.
 - DB에는 원래 경로, 격리 경로, 이유와 시각을 기록한다.
-- UI는 undo와 사용자가 직접 실행하는 quarantine 비우기를 제공한다.
+- UI는 undo를 제공한다. 현재 구현에는 영구 purge command가 의도적으로 없다.
 - 자동 만료·자동 영구 삭제는 하지 않는다.
 - 다운로드 root 밖으로 해석되는 경로는 거부한다.
 
