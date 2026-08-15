@@ -1,9 +1,11 @@
+mod auto_find_supervisor;
 mod download_pipeline;
 mod download_supervisor;
 mod error;
 mod ports;
 mod service;
 
+pub use auto_find_supervisor::AutoFindSupervisor;
 pub use download_pipeline::{
     ArtifactLayout, ArtifactStore, DownloadArtifactPlan, DownloadCheckpoint,
     DownloadGallerySnapshot, DownloadPageAttempt, DownloadPageAttemptOutcome,
@@ -15,7 +17,7 @@ pub use download_pipeline::{
 pub use download_supervisor::DownloadSupervisor;
 pub use error::{ApplicationError, RepositoryError};
 pub use ports::{
-    ArtifactRepository, DownloadMutationOutcome, DownloadQueueAddOutcome, DownloadQueueRecord,
-    DownloadRepository, SearchRepository, StateRepository,
+    ArtifactRepository, AutomationRepository, DownloadMutationOutcome, DownloadQueueAddOutcome,
+    DownloadQueueRecord, DownloadRepository, SearchRepository, StateRepository,
 };
 pub use service::{ApplicationService, DownloadQueueLaunch};

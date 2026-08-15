@@ -10,11 +10,19 @@ const matchesQuery = (gallery: Gallery, query: string): boolean => {
     const value = needle.slice(separator + 1);
     if (namespace === "artist") return gallery.artist.toLocaleLowerCase().includes(value);
     if (namespace === "group") return gallery.group?.toLocaleLowerCase().includes(value) ?? false;
+    if (namespace === "series") {
+      const metadataValue = value.replaceAll("_", " ");
+      return (gallery.series ?? []).some((item) => item.toLocaleLowerCase().includes(metadataValue));
+    }
+    if (namespace === "character") {
+      const metadataValue = value.replaceAll("_", " ");
+      return (gallery.characters ?? []).some((item) => item.toLocaleLowerCase().includes(metadataValue));
+    }
     if (namespace === "language") return gallery.language.includes(value);
     return gallery.tags.some((tag) => tag.toLocaleLowerCase().includes(needle));
   }
 
-  return [gallery.title, gallery.subtitle, gallery.artist, gallery.group ?? "", ...gallery.tags]
+  return [gallery.title, gallery.subtitle, gallery.artist, gallery.group ?? "", ...(gallery.series ?? []), ...(gallery.characters ?? []), ...gallery.tags]
     .join(" ")
     .toLocaleLowerCase()
     .includes(needle);

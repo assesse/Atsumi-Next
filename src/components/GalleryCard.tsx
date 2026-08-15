@@ -29,6 +29,10 @@ type GalleryCardProps = {
 };
 
 const VISIBLE_TAG_LIMIT = 4;
+const VISIBLE_SERIES_LIMIT = 1;
+const VISIBLE_CHARACTER_LIMIT = 1;
+const metadataSearchToken = (namespace: "series" | "character", value: string): string =>
+  `${namespace}:${value.trim().replace(/\s+/g, "_")}`;
 
 const workLabel: Partial<Record<NonNullable<Gallery["download"]>["state"], string>> = {
   queued: "대기",
@@ -74,6 +78,8 @@ function GalleryCardComponent({
   const thumbnailConsumer = thumbnailConsumerForView(view);
   const visibleTags = gallery.tags.slice(0, VISIBLE_TAG_LIMIT);
   const hiddenTags = gallery.tags.slice(VISIBLE_TAG_LIMIT);
+  const visibleSeries = (gallery.series ?? []).slice(0, VISIBLE_SERIES_LIMIT);
+  const visibleCharacters = (gallery.characters ?? []).slice(0, VISIBLE_CHARACTER_LIMIT);
   const iconOnlyStatus = download?.state === "downloading" || download?.state === "review_required";
   const cardStatusClass = download?.state === "completed"
     ? " is-complete"
@@ -238,6 +244,32 @@ function GalleryCardComponent({
           ) : null}
         </div>
         <div className="tag-list" aria-label={`태그: ${gallery.tags.join(", ")}`}>
+          {visibleSeries.map((series) => (
+            <MetadataChip
+              key={`series:${series}`}
+              value={`series:${series}`}
+              searchValue={metadataSearchToken("series", series)}
+              label={`시리즈 · ${series.replaceAll("_", " ")}`}
+              favorite={favoriteMetadata.has(`series:${series}`)}
+              kind="meta-chip"
+              onClickCapture={selectFromInteractiveTarget}
+              onSearch={onMetadataSearch}
+              onToggleFavorite={onMetadataFavorite}
+            />
+          ))}
+          {visibleCharacters.map((character) => (
+            <MetadataChip
+              key={`character:${character}`}
+              value={`character:${character}`}
+              searchValue={metadataSearchToken("character", character)}
+              label={`캐릭터 · ${character.replaceAll("_", " ")}`}
+              favorite={favoriteMetadata.has(`character:${character}`)}
+              kind="meta-chip"
+              onClickCapture={selectFromInteractiveTarget}
+              onSearch={onMetadataSearch}
+              onToggleFavorite={onMetadataFavorite}
+            />
+          ))}
           {visibleTags.map((tag) => (
             <MetadataChip
               key={tag}

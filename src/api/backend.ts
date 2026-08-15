@@ -3,15 +3,22 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { GalleryId } from "../core/types";
 import type {
   ApiResult,
+  AutoFindExclusionResult,
+  AutoFindRun,
+  AutoFindSnapshot,
   DownloadChangedEvent,
   DownloadEntry,
   DownloadListRequest,
   DownloadPage,
+  FavoriteKey,
+  FavoriteMutationResult,
+  FavoriteRecord,
   GalleryDetail,
   GalleryPage,
   JobEvent,
   JobRef,
   ReconcileReport,
+  SearchHistoryEntry,
   SearchRequest,
   SearchSubmission,
   SettingsPatch,
@@ -26,6 +33,7 @@ import type {
 } from "./contracts";
 import {
   galleryDetailFixture,
+  normalizeSearchRequest,
   runSearchFixture,
   searchFixturePage,
   searchFixtureQueryId,
@@ -34,6 +42,7 @@ import {
 } from "./searchFixture";
 
 export type BackendEventMap = {
+  "auto-find:changed": AutoFindRun;
   "job:changed": JobEvent;
   "download:changed": DownloadChangedEvent;
   "thumbnail:ready": ThumbnailCompletionEvent;
@@ -55,6 +64,13 @@ export interface BackendClient {
   searchSubmit(request: SearchRequest): Promise<ApiResult<SearchSubmission>>;
   searchPageGet(queryId: string, page: number): Promise<ApiResult<GalleryPage>>;
   galleryDetailGet(galleryId: GalleryDetail["id"]): Promise<ApiResult<GalleryDetail>>;
+  favoritesList(): Promise<ApiResult<FavoriteRecord[]>>;
+  favoriteSet(key: FavoriteKey, enabled: boolean): Promise<ApiResult<FavoriteMutationResult>>;
+  searchHistoryList(limit: number): Promise<ApiResult<SearchHistoryEntry[]>>;
+  autoFindSnapshot(): Promise<ApiResult<AutoFindSnapshot>>;
+  autoFindRefresh(): Promise<ApiResult<AutoFindRun>>;
+  autoFindCancel(): Promise<ApiResult<AutoFindRun>>;
+  autoFindExclude(galleryIds: GalleryId[], reason: string): Promise<ApiResult<AutoFindExclusionResult>>;
   downloadQueueAdd(galleries: GalleryId[], requestId: string): Promise<ApiResult<DownloadEntry[]>>;
   downloadEntriesList(request: DownloadListRequest): Promise<ApiResult<DownloadPage>>;
   downloadRetry(entryIds: string[]): Promise<ApiResult<JobRef[]>>;
@@ -161,6 +177,28 @@ const normalizedGallerySet = (galleries: GalleryId[]): GalleryId[] =>
 
 const gallerySetKey = (galleries: GalleryId[]): string => galleries.join(",");
 
+const cloneFavorite = (favorite: FavoriteRecord): FavoriteRecord => ({ ...favorite });
+
+const cloneSearchHistory = (entry: SearchHistoryEntry): SearchHistoryEntry => ({
+  ...entry,
+  includeTags: [...entry.includeTags],
+  excludeTags: [...entry.excludeTags],
+  languages: [...entry.languages],
+});
+
+const cloneAutoFindRun = (run: AutoFindRun): AutoFindRun => ({ ...run });
+
+const cloneAutoFindSnapshot = (snapshot: AutoFindSnapshot): AutoFindSnapshot => ({
+  ...(snapshot.run ? { run: cloneAutoFindRun(snapshot.run) } : {}),
+  candidates: snapshot.candidates.map((candidate) => ({
+    ...candidate,
+    tags: [...candidate.tags],
+    series: [...(candidate.series ?? [])],
+    characters: [...(candidate.characters ?? [])],
+    matchedFavorite: { ...candidate.matchedFavorite },
+  })),
+});
+
 type Handler<K extends keyof BackendEventMap> = (payload: BackendEventMap[K]) => void;
 
 class BrowserMockBackend implements BackendClient {
@@ -168,6 +206,7 @@ class BrowserMockBackend implements BackendClient {
   private settings = { ...defaultSettings };
   private placement = { ...defaultPlacement };
   private listeners: { [K in keyof BackendEventMap]: Set<Handler<K>> } = {
+    "auto-find:changed": new Set(),
     "job:changed": new Set(),
     "download:changed": new Set(),
     "thumbnail:ready": new Set(),
@@ -182,6 +221,13 @@ class BrowserMockBackend implements BackendClient {
   private nextThumbnailRequestId = 1;
   private pendingThumbnailRequests = new Map<string, ThumbnailRequestDto>();
   private thumbnailRequestsTotal = 0;
+  private favorites = new Map<string, FavoriteRecord>();
+  private searchHistory = new Map<string, SearchHistoryEntry>();
+  private nextSearchHistoryId = 1;
+  private autoFind: AutoFindSnapshot = { candidates: [] };
+  private autoFindExclusions = new Set<number>();
+  private autoFindGeneration = 0;
+  private nextAutoFindRunId = 1;
 
   async settingsGet(): Promise<ApiResult<SettingsSnapshot>> {
     return ok({ ...this.settings });
@@ -222,6 +268,7 @@ class BrowserMockBackend implements BackendClient {
     const queryId = searchFixtureQueryId(request);
     const fixture = runSearchFixture(request);
     this.searchQueries.set(queryId, fixture);
+    this.recordSearchHistory(request);
     const firstPage = searchFixturePage(fixture, 1);
     return ok({ queryId, firstPage });
   }
@@ -260,6 +307,133 @@ class BrowserMockBackend implements BackendClient {
         "The gallery could not be found in the current source",
         { galleryId },
       );
+  }
+
+  async favoritesList(): Promise<ApiResult<FavoriteRecord[]>> {
+    return ok([...this.favorites.values()]
+      .sort((left, right) => left.namespace.localeCompare(right.namespace) || left.value.localeCompare(right.value))
+      .map(cloneFavorite));
+  }
+
+  async favoriteSet(
+    key: FavoriteKey,
+    enabled: boolean,
+  ): Promise<ApiResult<FavoriteMutationResult>> {
+    const value = key.value.trim().toLocaleLowerCase().split(/\s+/).join(" ");
+    if (!value) return validationError("favorite.value", "must not be empty");
+    if (new TextEncoder().encode(value).length > 200) {
+      return validationError("favorite.value", "must be at most 200 bytes");
+    }
+    if (/[\u0000-\u001f\u007f]/.test(value)) {
+      return validationError("favorite.value", "must not contain control characters");
+    }
+    const normalized: FavoriteKey = { namespace: key.namespace, value };
+    const mapKey = `${normalized.namespace}:${normalized.value}`;
+    if (!enabled) {
+      this.favorites.delete(mapKey);
+      return ok({ enabled: false });
+    }
+
+    const current = this.favorites.get(mapKey);
+    const now = new Date().toISOString();
+    const favorite: FavoriteRecord = current
+      ? { ...current, revision: current.revision + 1, updatedAt: now }
+      : { ...normalized, revision: 0, createdAt: now, updatedAt: now };
+    this.favorites.set(mapKey, favorite);
+    return ok({ enabled: true, favorite: cloneFavorite(favorite) });
+  }
+
+  async searchHistoryList(limit: number): Promise<ApiResult<SearchHistoryEntry[]>> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      return validationError("limit", "must be between 1 and 100");
+    }
+    return ok([...this.searchHistory.values()]
+      .sort((left, right) => right.lastUsedAt.localeCompare(left.lastUsedAt) || right.historyId - left.historyId)
+      .slice(0, limit)
+      .map(cloneSearchHistory));
+  }
+
+  async autoFindSnapshot(): Promise<ApiResult<AutoFindSnapshot>> {
+    return ok(cloneAutoFindSnapshot(this.autoFind));
+  }
+
+  async autoFindRefresh(): Promise<ApiResult<AutoFindRun>> {
+    if (this.autoFind.run?.state === "running") return ok(cloneAutoFindRun(this.autoFind.run));
+
+    const artists = [...this.favorites.values()].filter((favorite) => favorite.namespace === "artist");
+    const now = new Date().toISOString();
+    const generation = ++this.autoFindGeneration;
+    const run: AutoFindRun = {
+      runId: `browser-auto-find-${this.nextAutoFindRunId++}`,
+      revision: 0,
+      state: artists.length ? "running" : "completed",
+      totalFavorites: artists.length,
+      completedFavorites: 0,
+      candidatesFound: 0,
+      startedAt: now,
+      updatedAt: now,
+      ...(!artists.length ? { finishedAt: now } : {}),
+    };
+    this.autoFind = { run, candidates: [] };
+    queueMicrotask(() => this.emit("auto-find:changed", cloneAutoFindRun(run)));
+
+    artists.forEach((favorite, index) => {
+      window.setTimeout(() => this.runAutoFindFixture(generation, favorite, index === artists.length - 1), 60 * (index + 1));
+    });
+    return ok(cloneAutoFindRun(run));
+  }
+
+  async autoFindCancel(): Promise<ApiResult<AutoFindRun>> {
+    const current = this.autoFind.run;
+    if (!current || current.state !== "running") {
+      return {
+        ok: false,
+        error: {
+          code: "AUTO_FIND_NOT_RUNNING",
+          message: "실행 중인 자동 탐색이 없습니다.",
+          retryable: false,
+          action: "none",
+        },
+      };
+    }
+    this.autoFindGeneration += 1;
+    const now = new Date().toISOString();
+    const cancelled: AutoFindRun = {
+      ...current,
+      revision: current.revision + 1,
+      state: "cancelled",
+      updatedAt: now,
+      finishedAt: now,
+    };
+    this.autoFind = { ...this.autoFind, run: cancelled };
+    this.emit("auto-find:changed", cloneAutoFindRun(cancelled));
+    return ok(cloneAutoFindRun(cancelled));
+  }
+
+  async autoFindExclude(
+    galleryIds: GalleryId[],
+    reason: string,
+  ): Promise<ApiResult<AutoFindExclusionResult>> {
+    if (!galleryIds.length) return validationError("galleryIds", "must not be empty");
+    if (galleryIds.length > 200) return validationError("galleryIds", "must contain at most 200 IDs");
+    if (galleryIds.some((galleryId) => !Number.isInteger(galleryId) || galleryId <= 0)) {
+      return validationError("galleryIds", "gallery IDs must be positive integers");
+    }
+    const normalizedReason = reason.trim();
+    if (!normalizedReason || new TextEncoder().encode(normalizedReason).length > 500) {
+      return validationError("reason", "must contain between 1 and 500 bytes");
+    }
+    const normalizedIds = normalizedGallerySet(galleryIds);
+    normalizedIds.forEach((galleryId) => this.autoFindExclusions.add(galleryId));
+    const excluded = new Set(normalizedIds);
+    this.autoFind = {
+      ...this.autoFind,
+      candidates: this.autoFind.candidates.filter((candidate) => !excluded.has(candidate.id)),
+    };
+    return ok({
+      excludedGalleryIds: normalizedIds,
+      snapshot: cloneAutoFindSnapshot(this.autoFind),
+    });
   }
 
   async downloadQueueAdd(
@@ -599,6 +773,69 @@ class BrowserMockBackend implements BackendClient {
     handlers.forEach((handler) => handler(payload));
   }
 
+  private recordSearchHistory(input: SearchRequest): void {
+    const request = normalizeSearchRequest(input);
+    if (!request.text && !request.includeTags.length && !request.excludeTags.length) return;
+    const fingerprint = JSON.stringify(request);
+    const current = this.searchHistory.get(fingerprint);
+    const now = new Date().toISOString();
+    const entry: SearchHistoryEntry = current
+      ? { ...current, useCount: current.useCount + 1, lastUsedAt: now }
+      : {
+          historyId: this.nextSearchHistoryId++,
+          ...request,
+          useCount: 1,
+          lastUsedAt: now,
+        };
+    this.searchHistory.set(fingerprint, entry);
+  }
+
+  private runAutoFindFixture(
+    generation: number,
+    favorite: FavoriteRecord,
+    finalFavorite: boolean,
+  ): void {
+    const current = this.autoFind.run;
+    if (generation !== this.autoFindGeneration || !current || current.state !== "running") return;
+
+    const fixture = runSearchFixture({
+      text: `artist:${favorite.value}`,
+      includeTags: [],
+      excludeTags: [],
+      languages: ["korean", "japanese", "chinese", "english"],
+      sort: "recent",
+      pageSize: 200,
+    });
+    const downloaded = new Set([...this.downloadEntries.values()].map((entry) => entry.galleryId));
+    const existing = new Set(this.autoFind.candidates.map((candidate) => candidate.id));
+    const discoveredAt = new Date().toISOString();
+    const candidates = fixture.items
+      .filter((gallery) => !downloaded.has(gallery.id))
+      .filter((gallery) => !this.autoFindExclusions.has(gallery.id))
+      .filter((gallery) => !existing.has(gallery.id))
+      .map((gallery) => ({
+        ...gallery,
+        runId: current.runId,
+        matchedFavorite: { namespace: favorite.namespace, value: favorite.value },
+        discoveredAt,
+      }));
+    const allCandidates = [...this.autoFind.candidates, ...candidates];
+    const completedFavorites = current.completedFavorites + 1;
+    const completed = finalFavorite || completedFavorites >= current.totalFavorites;
+    const now = new Date().toISOString();
+    const run: AutoFindRun = {
+      ...current,
+      revision: current.revision + 1,
+      state: completed ? "completed" : "running",
+      completedFavorites,
+      candidatesFound: allCandidates.length,
+      updatedAt: now,
+      ...(completed ? { finishedAt: now } : {}),
+    };
+    this.autoFind = { run, candidates: allCandidates };
+    this.emit("auto-find:changed", cloneAutoFindRun(run));
+  }
+
   private runFixtureDownload(entryId: string, workerAttempt: number): void {
     const steps: Array<{
       delay: number;
@@ -690,6 +927,37 @@ class TauriBackend implements BackendClient {
 
   galleryDetailGet(galleryId: GalleryDetail["id"]): Promise<ApiResult<GalleryDetail>> {
     return invoke("gallery_detail_get", { galleryId });
+  }
+
+  favoritesList(): Promise<ApiResult<FavoriteRecord[]>> {
+    return invoke("favorites_list");
+  }
+
+  favoriteSet(key: FavoriteKey, enabled: boolean): Promise<ApiResult<FavoriteMutationResult>> {
+    return invoke("favorite_set", { key, enabled });
+  }
+
+  searchHistoryList(limit: number): Promise<ApiResult<SearchHistoryEntry[]>> {
+    return invoke("search_history_list", { limit });
+  }
+
+  autoFindSnapshot(): Promise<ApiResult<AutoFindSnapshot>> {
+    return invoke("auto_find_snapshot");
+  }
+
+  autoFindRefresh(): Promise<ApiResult<AutoFindRun>> {
+    return invoke("auto_find_refresh");
+  }
+
+  autoFindCancel(): Promise<ApiResult<AutoFindRun>> {
+    return invoke("auto_find_cancel");
+  }
+
+  autoFindExclude(
+    galleryIds: GalleryId[],
+    reason: string,
+  ): Promise<ApiResult<AutoFindExclusionResult>> {
+    return invoke("auto_find_exclude", { galleryIds, reason });
   }
 
   downloadQueueAdd(

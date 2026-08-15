@@ -17,14 +17,14 @@
 | 영역 | 상태 | 현재 근거 |
 |---|---|---|
 | startup·single-instance | 완료 | 두 번째 실행은 기존 창을 복원하며, fatal startup은 non-zero exit·사용자 안내·로컬 오류 로그를 남긴다 |
-| DB·migration | 완료 | schema v9, future-schema 무변경 거부, timestamp/version backup, WAL·explicit startup recovery 검증 완료 |
+| DB·migration | 완료 | schema v11, v10→v11 후보 보존, future-schema 무변경 거부, timestamp/version backup, WAL·explicit startup recovery 검증 완료 |
 | Hitomi search | 완료 | production live adapter, query serialization, paging/filter/popular fixture contract 검증 완료; live smoke만 미검증 |
 | detail·Related | 완료 | typed galleryinfo detail·Related 5개와 source-page identity를 저장 fixture 통합 테스트로 검증 |
 | thumbnail | 완료 | 전역 coordinator와 live resolver·viewport 구독·우선순위·취소·memory/negative cache 검증 완료 |
 | download | 완료 | 실제 source page를 `.part`→decode/WebP→SHA-256→atomic rename→manifest 순서로 저장하고 검증 뒤에만 완료 |
 | resume·reconcile | 완료 | verified page checkpoint resume, startup/manual DB·manifest·파일 검사와 quarantine saga 복구 검증 |
 | file open | 완료 | verified first non-quarantined page를 root 내부 canonical path로 확인하고 Windows ShellExecute로 실행 |
-| Auto Find | blocker | Phase 안내 동작만 존재 |
+| Auto Find | 완료 | SQLite favorite/history/run/candidate/exclusion, 실제 source supervisor, 5개 namespace 카드·상세·Related projection, 명시적 갱신·취소·복원·local filter/group·batch queue 검증 완료 |
 | gallery duplicate | blocker | Review UI는 있으나 실제 evidence·decision 영속 경로 없음 |
 | internal duplicate | blocker | 실제 artifact 기반 scan·removal plan 미구현 |
 | quarantine | 완료 | root 내부 atomic move, pending saga, startup 복구, undo와 무자동삭제 검증 |
@@ -59,12 +59,25 @@
 - frontend는 실제 `artifact_open_first`, 수동 무결성 검사, Downloads 격리·undo를 typed client로 호출한다. 브라우저 review mode는 실제 파일이 없음을 안정 오류로 표시한다.
 - 데이터 호환성: DB schema는 9로 상승한다. v8은 artifact 검증 metadata, v9는 crash-safe quarantine 상태를 추가하며 기존 v7 column 의미를 바꾸지 않는다.
 
+### Milestone D — favorites·search history·Auto Find
+
+- `domain/auto_find.rs`와 `application/ports.rs`: 5개 metadata namespace의 정규화 favorite key, typed search history, revisioned Auto Find run·candidate·snapshot·exclusion과 `AutomationRepository` port를 추가했다.
+- `migrations.rs`와 `sqlite_repository.rs`: migration 10으로 favorite, search request history, Auto Find run/candidate/exclusion을 additive schema로 추가했다. migration 11은 후보에 `series_json`, `characters_json`을 기본값 `[]`로 추가해 기존 v10 run과 후보를 손실 없이 보존한다. 성공한 non-empty 검색만 전체 정규화 요청 fingerprint로 upsert하며, run과 후보는 앱 재시작 뒤에도 남는다.
+- `application/auto_find_supervisor.rs`: 명시적 refresh만 실제 `SearchRepository`를 호출한다. 현재 artist favorite를 전체 4개 언어·Recent·page size 200으로 순회하고, 한 작가당 250 page 안전 상한 안에서 후보를 저장한다. 실행 중 refresh는 같은 run을 재사용하고 cancel token과 DB state로 늦은 결과를 차단한다.
+- 후보 조회는 상태와 무관한 기존 download entry, 전역 Auto Find exclusion을 제외한다. Phase 5 이전에는 아직 존재하지 않는 작품 숨김·중복 판정을 추측하거나 메모리 flag로 대체하지 않는다.
+- `interface/commands.rs`와 `lib.rs`: favorite/history/snapshot/refresh/cancel/exclude command와 `auto-find:changed` event를 연결했다. startup은 남은 running run을 `AUTO_FIND_INTERRUPTED`, 정상 앱 종료는 active run을 `AUTO_FIND_APP_EXIT`로 안전 종결한다.
+- `domain/search.rs`, live/fixture source와 frontend projection: `GallerySummary`에 non-optional `series[]`, `characters[]`를 추가했다. 검색·상세·Related·Auto Find restore가 이를 보존하며, 여러 단어 값은 `series:rain_archives`, `character:mira_lane` token으로 각각의 Nozomi namespace endpoint에 직렬화한다.
+- `App.tsx`, `GalleryCard.tsx`, `DetailWorkspace.tsx`, `ViewHeader.tsx`와 typed frontend client: startup에서 favorite/history/Auto Find snapshot을 복원하고, 5개 namespace favorite state를 카드·상세·Related가 공유하는 projection으로 계산한다. 시리즈·캐릭터 chip의 좌클릭은 namespace 검색, 우클릭은 canonical spaced favorite toggle이다. 검색 suggestion은 text/tag/language/sort/page size를 포함한 영속 요청을 재생하며 입력 change는 local draft만 바꾼다.
+- Auto Find 화면은 명시적 갱신, running/completed/cancelled/failed 진행 상태, 취소와 부분 후보 보존, 다시 탐색, local 문자열·언어 filter, 전체/작가별 묶음, 현재 표시 후보 batch queue를 제공한다. toolbar와 Delete는 선택 후보를 영속 제외하고 다음 run에도 반영한다.
+- 브라우저 검토 모드는 실제 원격 source를 호출하지 않는 fixture adapter 경계를 유지하면서 같은 lifecycle을 재현한다. 취소 generation 뒤 늦은 fixture 결과를 무시하고 download/exclusion을 후보에서 제거한다.
+- 데이터 호환성: DB schema는 11로 상승한다. v10은 새 automation table만 추가하고 v11은 Auto Find 후보의 visible namespace metadata만 additive column으로 확장한다. v1~v10의 기존 의미, download manifest schema와 HashProfile은 변경하지 않는다.
+
 ## 4. Contracts and versions
 
 - 앱/package/Tauri version: `0.1.0`
 - Rust MSRV: `1.88.0` (working tree)
-- DB schema version: 9
-- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`
+- DB schema version: 11
+- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`, `favorites_search_history_and_auto_find`, `auto_find_visible_metadata`
 - manifest schema version: 1
 - HashProfile version: 1 (artifact SHA-256 profile; perceptual duplicate profile은 Milestone E에서 별도 추가)
 - Hitomi parser version: 1
@@ -87,6 +100,9 @@
 - SQLite는 WAL·busy timeout·짧은 transaction을 사용하며 repository open 자체는 job 복구나 독점 잠금을 수행하지 않는다.
 - single-instance를 획득한 앱 setup만 중단된 job을 명시적으로 복구한다.
 - 오류 문자열을 parsing해 상태나 retry 정책을 결정하지 않는다.
+- 검색 입력은 local draft이며 명시적 검색 제출 또는 Auto Find refresh 외에는 원격 요청을 만들지 않는다.
+- favorite, search history, Auto Find run·후보·제외의 canonical source도 SQLite다. `auto-find:changed` event나 frontend set을 복원 원본으로 사용하지 않는다.
+- Auto Find 취소와 종료 뒤에는 cancellation token뿐 아니라 SQLite run state도 확인해 늦은 source 결과를 저장하지 않는다.
 - URL query, cookie, session token, 로컬 사용자 경로를 로그에 남기지 않는다.
 
 ## 6. Tests and evidence
@@ -98,10 +114,19 @@
 - 외부 Hitomi live smoke는 일반 fixture CI와 분리했다. 2026-08-15 실행은 sandbox network/승인 사용량 제한 때문에 완료하지 못했으며 production 구현 완료와 live 검증 상태를 분리한다.
 - Milestone C 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — Rust lib 83/83 + startup 1/1, frontend 89/89, typecheck·production build·Clippy `-D warnings`·Tauri release·whitespace 검사를 통과했다. synthetic PNG를 실제 WebP 파일·SHA-256·manifest로 만들고, 2-page 중단/재시작에서 page 1을 재요청하지 않는 resume, quarantine 이동/undo와 DB commit 직전 fault recovery를 검증했다. 로그는 `.runtime/verification/verify-20260815-180348.log`에 있다.
 - 실제 Windows ShellExecute는 자동 테스트에서 외부 뷰어를 띄우지 않았으며, canonical first-page 선택까지 자동 검증했다. 최종 수동 앱 검토에서 실제 open을 확인한다.
+- Milestone D backend 집중 검증: `cargo +stable test --locked --manifest-path src-tauri/Cargo.toml --lib application::auto_find_supervisor::tests -- --test-threads=1`에서 6/6 통과했다. 5개 namespace 정규화·영속, non-empty 제출 이력, 단일 refresh 직렬화, download/명시적 제외, restart 결과 복원, 취소 뒤 늦은 후보 차단, startup interrupted와 부분 후보 보존을 검증했다.
+- Milestone D backend 전체 검증: `cargo +stable test --locked --manifest-path src-tauri/Cargo.toml --all-targets`에서 Rust lib 90/90(외부 live smoke 1개 opt-in 제외), main 1/1을 통과했다. v10→v11 후보 보존과 series/character Nozomi serializer를 포함하며 `cargo fmt --check`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`도 통과했다.
+- Milestone D frontend 집중 검증: TypeScript typecheck와 Vite production build(63 modules)가 통과했다. `tools/run_frontend.ps1 test`는 16 files, 100/100 tests를 통과해 5개 namespace card/detail/Related favorite 일관성, multiword namespace 검색, remount 복원, 구조화 이력 재생, 입력 중 무요청, 명시적 Auto Find lifecycle, 부분 후보 취소 보존, download/exclusion filter와 stale fixture 차단을 검증했다. 기존 React act-environment warning은 실패가 아니며 별도 운영 polish 항목이다.
+- Milestone D 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend 100/100, Rust lib 90/90(외부 live smoke 1개 opt-in 제외), startup 1/1, typecheck·production build·Clippy `-D warnings`·Tauri release·whitespace 검사를 통과했다. 로그는 `.runtime/verification/verify-20260815-184914.log`에 있다.
 
 ## 7. Known limitations and blockers
 
 현재 제품을 막는 blocker는 completion status 표에 기록한다. 각 milestone 구현 후 정확한 재현, 영향, 필요한 입력과 임시 안전 동작을 이 절에 남긴다.
+
+- Auto Find의 현재 안전 상한은 작가당 250 page다. 그 이상을 가진 작가에서는 source가 보고한 전체 page 중 후반 후보가 이번 run에 포함되지 않는다. 범위를 임의로 무제한화하지 말고 scheduler 부하·중단 복구와 함께 정책을 조정해야 한다.
+- 현재 Auto Find 후보 제외는 download entry와 명시적 `auto_find_exclusions`다. gallery 숨김·중복 decision은 Milestone E schema가 아직 없으므로 연동되지 않는다. frontend 임시 flag로 완료처럼 표시하지 않는다.
+- Classic favorite/search history import는 Milestone G의 read-only dry-run·conflict·rollback 경계 전에는 수행하지 않는다.
+- artifact decode는 현재 검증된 WebP와 JPEG/PNG 입력을 지원한다. source의 AVIF 가능 flag와 후보는 parse하지만 raw AVIF만 남은 page를 실제 WebP로 decode하는 기능은 아직 없다. downloader는 WebP와 원본 JPEG/PNG fallback을 우선하며 지원 후보가 없으면 typed failure로 종료한다.
 
 ## 8. Future change cautions
 
@@ -113,6 +138,9 @@
 - retry 시 새 download entry를 만들지 말고 기존 entry/job attempt를 증가시킨다.
 - quarantine, duplicate decision, manifest, DB artifact를 서로 독립적으로 갱신하지 않는다.
 - parser 변경 시 저장 fixture와 golden contract test를 함께 갱신한다.
+- Auto Find 입력 change handler에서 `search_submit`이나 `auto_find_refresh`를 호출하지 않는다. 명시적 사용자 command 경계를 유지한다.
+- `auto-find:changed`만으로 후보 목록을 구성하지 말고 revisioned run event 뒤 `auto_find_snapshot`을 다시 읽을 수 있게 유지한다.
+- 새 Auto Find run을 메모리에만 만들거나 기존 running run과 병렬 시작하지 않는다. SQLite의 단일 running invariant와 supervisor gate를 함께 보존한다.
 
 ## 9. Recovery and rollback
 
@@ -129,5 +157,6 @@
 - 기준 원격: `origin` → `assesse/Atsumi-Next`
 - `6a2c96a` — `chore: harden startup database safety and windows ci`
 - `af9878a` — `feat: connect live hitomi search metadata and thumbnails`
-- Milestone C 이후 commit, push 결과와 PR 상태는 완료 시 SHA와 함께 누적한다.
+- `80919bd` — `feat: implement resilient artifact downloads and recovery`
+- Milestone D 이후 commit, push 결과와 PR 상태는 완료 시 SHA와 함께 누적한다.
 - PR merge, `main` 직접 push, force push, release/tag 생성은 수행하지 않는다.

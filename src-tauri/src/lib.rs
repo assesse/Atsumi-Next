@@ -15,10 +15,11 @@ use std::{
 };
 
 use application::{
-    ApplicationService, ArtifactStore, DownloadPipelineRepository, DownloadSourcePort,
-    DownloadSupervisor, StateRepository,
+    ApplicationService, ArtifactStore, AutoFindSupervisor, AutomationRepository,
+    DownloadPipelineRepository, DownloadSourcePort, DownloadSupervisor, SearchRepository,
+    StateRepository,
 };
-use domain::DownloadJobProjection;
+use domain::{AutoFindRun, DownloadJobProjection};
 use infrastructure::{
     FilesystemArtifactStore, HitomiLiveAdapter, HitomiLiveConfig, SqliteRepository,
     WindowsFolderPicker,
@@ -100,8 +101,28 @@ pub fn run() -> tauri::Result<()> {
             })?);
             let service = ApplicationService::new(repository.clone())
                 .with_download_repository(repository.clone())
-                .with_search_repository(live_source.clone());
+                .with_search_repository(live_source.clone())
+                .with_automation_repository(repository.clone());
             let recovered_entries = service.download_recover_interrupted()?;
+            let automation_repository: Arc<dyn AutomationRepository> = repository.clone();
+            let auto_find_search: Arc<dyn SearchRepository> = live_source.clone();
+            let (auto_find_event_tx, auto_find_event_rx) = mpsc::channel::<AutoFindRun>();
+            let auto_find = AutoFindSupervisor::new(
+                automation_repository,
+                auto_find_search,
+                auto_find_event_tx,
+            );
+            let recovered_auto_find_runs = auto_find.recover_interrupted()?;
+            let auto_find_app = app.handle().clone();
+            thread::Builder::new()
+                .name("atsumi-auto-find-events".into())
+                .spawn(move || {
+                    while let Ok(run) = auto_find_event_rx.recv() {
+                        if let Err(error) = auto_find_app.emit("auto-find:changed", &run) {
+                            tracing::warn!(error = %error, "could not emit auto-find:changed");
+                        }
+                    }
+                })?;
             let thumbnail_config = ThumbnailCoordinatorConfig {
                 max_concurrency: settings.concurrent_image_requests as usize,
                 request_start_interval: Duration::from_millis(settings.request_start_interval_ms),
@@ -174,6 +195,7 @@ pub fn run() -> tauri::Result<()> {
                 thumbnails,
                 thumbnail_completion_tx,
                 downloads,
+                auto_find,
                 Arc::new(WindowsFolderPicker::new()),
                 artifact_store,
             ));
@@ -186,6 +208,7 @@ pub fn run() -> tauri::Result<()> {
                 database_file = "atsumi-next.sqlite3",
                 app_version = env!("CARGO_PKG_VERSION"),
                 recovered_entries,
+                recovered_auto_find_runs,
                 reconciled_artifacts,
                 reconcile_issues,
                 resumed_jobs,
@@ -201,6 +224,13 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::search_submit,
             interface::commands::search_page_get,
             interface::commands::gallery_detail_get,
+            interface::commands::favorites_list,
+            interface::commands::favorite_set,
+            interface::commands::search_history_list,
+            interface::commands::auto_find_snapshot,
+            interface::commands::auto_find_refresh,
+            interface::commands::auto_find_cancel,
+            interface::commands::auto_find_exclude,
             interface::commands::download_queue_add,
             interface::commands::download_entries_list,
             interface::commands::download_retry,

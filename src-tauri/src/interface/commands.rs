@@ -7,13 +7,16 @@ use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
 use crate::{
     application::{
-        ApplicationError, ApplicationService, ArtifactStore, DownloadPipelineError,
-        DownloadPipelineErrorCode, DownloadRootPicker, DownloadSupervisor, ReconcileReport,
+        ApplicationError, ApplicationService, ArtifactStore, AutoFindSupervisor,
+        DownloadPipelineError, DownloadPipelineErrorCode, DownloadRootPicker, DownloadSupervisor,
+        ReconcileReport,
     },
     domain::{
-        DownloadChangedEvent, DownloadEntry, DownloadListRequest, DownloadPage, GalleryDetail,
-        GalleryPage, JobRef, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot,
-        WindowPlacement, WindowPlacementSnapshot,
+        AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot, DownloadChangedEvent,
+        DownloadEntry, DownloadListRequest, DownloadPage, FavoriteKey, FavoriteMutationResult,
+        FavoriteRecord, GalleryDetail, GalleryPage, JobRef, SearchHistoryEntry, SearchRequest,
+        SearchSubmission, SettingsPatch, SettingsSnapshot, WindowPlacement,
+        WindowPlacementSnapshot,
     },
     thumbnail::{
         ThumbnailCompletionEventDto, ThumbnailCoordinator, ThumbnailCoordinatorError,
@@ -29,6 +32,7 @@ pub struct AppState {
     thumbnails: ThumbnailCoordinator,
     thumbnail_completions: Sender<ThumbnailCompletionEventDto>,
     downloads: DownloadSupervisor,
+    auto_find: AutoFindSupervisor,
     download_root_picker: Arc<dyn DownloadRootPicker>,
     artifact_store: Arc<dyn ArtifactStore>,
 }
@@ -39,6 +43,7 @@ impl AppState {
         thumbnails: ThumbnailCoordinator,
         thumbnail_completions: Sender<ThumbnailCompletionEventDto>,
         downloads: DownloadSupervisor,
+        auto_find: AutoFindSupervisor,
         download_root_picker: Arc<dyn DownloadRootPicker>,
         artifact_store: Arc<dyn ArtifactStore>,
     ) -> Self {
@@ -47,10 +52,65 @@ impl AppState {
             thumbnails,
             thumbnail_completions,
             downloads,
+            auto_find,
             download_root_picker,
             artifact_store,
         }
     }
+}
+
+#[tauri::command]
+pub async fn favorites_list(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<Vec<FavoriteRecord>>, ApiError> {
+    Ok(state.service.favorites_list().into())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn favorite_set(
+    state: State<'_, AppState>,
+    key: FavoriteKey,
+    enabled: bool,
+) -> Result<ApiResult<FavoriteMutationResult>, ApiError> {
+    Ok(state.service.favorite_set(key, enabled).into())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn search_history_list(
+    state: State<'_, AppState>,
+    limit: u32,
+) -> Result<ApiResult<Vec<SearchHistoryEntry>>, ApiError> {
+    Ok(state.service.search_history_list(limit).into())
+}
+
+#[tauri::command]
+pub async fn auto_find_snapshot(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<AutoFindSnapshot>, ApiError> {
+    Ok(state.service.auto_find_snapshot().into())
+}
+
+#[tauri::command]
+pub async fn auto_find_refresh(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<AutoFindRun>, ApiError> {
+    Ok(state.auto_find.refresh().into())
+}
+
+#[tauri::command]
+pub async fn auto_find_cancel(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<AutoFindRun>, ApiError> {
+    Ok(state.auto_find.cancel().into())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn auto_find_exclude(
+    state: State<'_, AppState>,
+    gallery_ids: Vec<i64>,
+    reason: String,
+) -> Result<ApiResult<AutoFindExclusionResult>, ApiError> {
+    Ok(state.service.auto_find_exclude(gallery_ids, reason).into())
 }
 
 #[tauri::command]
@@ -330,7 +390,9 @@ pub async fn app_quit(
     state: State<'_, AppState>,
 ) -> Result<ApiResult<()>, ApiError> {
     let downloads = state.downloads.clone();
+    let auto_find = state.auto_find.clone();
     if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
+        auto_find.shutdown_and_wait();
         downloads.shutdown_and_wait();
     })
     .await

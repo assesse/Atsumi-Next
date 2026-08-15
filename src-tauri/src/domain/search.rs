@@ -86,6 +86,8 @@ pub struct GallerySummary {
     pub artist: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    pub series: Vec<String>,
+    pub characters: Vec<String>,
     pub pages: u32,
     pub language: Language,
     pub tags: Vec<String>,

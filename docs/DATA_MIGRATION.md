@@ -4,7 +4,7 @@
 
 새 버전의 영속 데이터 기준은 SQLite 하나로 통합한다. 파일 시스템은 artifact의 실제 존재를 증명하며, DB와 불일치하면 reconciliation job이 해결한다.
 
-## 현재 구현 schema (v9)
+## 현재 구현 schema (v11)
 
 | 테이블 | 책임 |
 |---|---|
@@ -19,15 +19,18 @@
 | `download_pages` | source page와 local artifact 상태 |
 | `download_page_attempts` | job attempt 안의 source page/candidate 결과 |
 | `quarantine_records` | 원본·격리 상대 경로와 crash-safe move/restore saga |
+| `favorites` | 작가·그룹·시리즈·캐릭터·태그의 정규화 key와 revision |
+| `search_history` | 성공한 명시적 검색의 전체 정규화 요청 fingerprint, 사용 횟수와 최근 시각 |
+| `auto_find_runs` | 명시적 작가 갱신의 상태·revision·진행률·안전 오류 |
+| `auto_find_candidates` | run별 `GallerySummary` snapshot(시리즈·캐릭터 포함)과 일치한 즐겨찾기 key |
+| `auto_find_exclusions` | gallery ID별 영속 후보 제외와 이유 |
 | `schema_migrations` | migration 적용 이력 |
 
-아래 테이블은 Phase 4~7에서 추가할 계획 schema다.
+아래 테이블은 Phase 5~7에서 추가할 계획 schema다.
 
 | 계획 테이블 | 책임 |
 |---|---|
 | `gallery_tags` | namespace가 보존된 tag 관계 |
-| `favorites` | 작가, 그룹, 시리즈, 캐릭터, 태그 즐겨찾기 |
-| `search_history` | 전체 검색 기록과 최근 사용 시각 |
 | `page_hashes` | versioned SHA-256, dHash, pHash |
 | `duplicate_candidates` | 후보쌍과 생성 상태 |
 | `duplicate_evidence` | 관계, 제목, 해시, 순서 근거 |
@@ -38,6 +41,22 @@
 | `thumbnail_cache_entries` | cache index와 접근 시각 |
 
 정확한 현재 DDL과 CHECK/FK는 `src-tauri/src/infrastructure/migrations.rs`가 기준이다. 기존 migration의 이름·순서·column 의미는 바꾸지 않고 additive migration만 추가한다.
+
+### v10 추가 규칙
+
+- migration 이름은 `favorites_search_history_and_auto_find`다.
+- 즐겨찾기는 `(namespace, value)`가 primary key이며 값은 application 경계에서 trim·소문자·공백 정규화한다. 별도의 frontend memory 목록을 canonical source로 사용하지 않는다.
+- 검색 이력은 성공한 non-empty 제출만 SHA-256 fingerprint로 합치며 text, include/exclude tags, language, sort, page size를 함께 보존한다. Classic 검색 기록 import는 Phase 7의 read-only workflow 전에는 수행하지 않는다.
+- Auto Find는 동시에 하나의 `running` row만 허용한다. run·후보·전역 gallery 제외는 재시작 뒤에도 유지되고, snapshot은 최신 run의 후보 중 현재 download entry 또는 명시적 제외가 없는 항목만 반환한다.
+- startup에서 남은 `running` run은 파일이나 후보를 삭제하지 않고 `failed/AUTO_FIND_INTERRUPTED`로 종결한다. 부분 후보는 증거로 보존된다.
+- `auto_find_candidates`는 원격 source의 당시 metadata snapshot이다. 이후 실제 다운로드 artifact나 Phase 5 duplicate decision의 canonical record를 대신하지 않는다.
+
+### v11 추가 규칙
+
+- migration 이름은 `auto_find_visible_metadata`다.
+- `auto_find_candidates.series_json`과 `characters_json`을 `NOT NULL`, valid JSON, 기본값 `[]`로 additive하게 추가한다.
+- v10에서 저장된 run과 후보는 그대로 유지하고 새 namespace metadata만 빈 배열로 backfill한다. v10→v11 보존 migration test가 이 조건을 검증한다.
+- 새 후보는 source의 `GallerySummary.series`와 `characters`를 저장하며 snapshot 복원 뒤 카드·상세·Related가 같은 metadata와 favorite projection을 사용한다.
 
 ## Classic 입력원
 

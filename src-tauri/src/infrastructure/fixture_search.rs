@@ -22,6 +22,10 @@ struct FixtureGallery {
     title: String,
     artist: String,
     group: Option<String>,
+    #[serde(default)]
+    series: Vec<String>,
+    #[serde(default)]
+    characters: Vec<String>,
     pages: u32,
     language: Language,
     tags: Vec<String>,
@@ -51,6 +55,8 @@ impl FixtureSearchRepository {
             fixture.title = required_fixture_text(fixture.title, "title")?;
             fixture.artist = required_fixture_text(fixture.artist, "artist")?;
             fixture.group = normalized_fixture_text(fixture.group);
+            fixture.series = normalized_fixture_names(fixture.series);
+            fixture.characters = normalized_fixture_names(fixture.characters);
             if fixture.pages == 0 {
                 return Err(RepositoryError::Corrupt(format!(
                     "search fixture gallery {id} has no pages"
@@ -194,6 +200,15 @@ fn normalized_fixture_text(value: Option<String>) -> Option<String> {
     })
 }
 
+fn normalized_fixture_names(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .filter_map(|value| normalized_fixture_text(Some(value)))
+        .filter(|value| seen.insert(value.to_lowercase()))
+        .collect()
+}
+
 fn fixture_corruption(error: impl std::fmt::Display) -> RepositoryError {
     RepositoryError::Corrupt(format!("search fixture is invalid: {error}"))
 }
@@ -222,17 +237,31 @@ fn gallery_matches(gallery: &FixtureGallery, request: &SearchRequest) -> bool {
         return true;
     }
 
+    let artist = gallery.artist.to_lowercase();
     let mut searchable = format!(
-        "{} {} artist:{}",
+        "{} {artist} artist:{artist} artist:{}",
         gallery.title.to_lowercase(),
-        gallery.artist.to_lowercase(),
-        gallery.artist.to_lowercase()
+        artist.replace(' ', "_")
     );
     if let Some(group) = &gallery.group {
+        let group = group.to_lowercase();
         searchable.push_str(&format!(
-            " {} group:{}",
-            group.to_lowercase(),
-            group.to_lowercase()
+            " {group} group:{group} group:{}",
+            group.replace(' ', "_")
+        ));
+    }
+    for series in &gallery.series {
+        let series = series.to_lowercase();
+        searchable.push_str(&format!(
+            " {series} series:{series} series:{}",
+            series.replace(' ', "_")
+        ));
+    }
+    for character in &gallery.characters {
+        let character = character.to_lowercase();
+        searchable.push_str(&format!(
+            " {character} character:{character} character:{}",
+            character.replace(' ', "_")
         ));
     }
     for tag in &gallery.tags {
@@ -270,6 +299,8 @@ fn gallery_summary(gallery: &FixtureGallery) -> GallerySummary {
         title: gallery.title.clone(),
         artist: gallery.artist.clone(),
         group: gallery.group.clone(),
+        series: gallery.series.clone(),
+        characters: gallery.characters.clone(),
         pages: gallery.pages,
         language: gallery.language,
         tags: gallery.tags.clone(),

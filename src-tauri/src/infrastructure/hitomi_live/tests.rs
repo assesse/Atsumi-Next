@@ -22,7 +22,7 @@ use crate::{
 
 use super::{
     http::{validate_source_url, HttpPayload, HttpRequest, HttpTransport},
-    search::tag_nozomi_path,
+    search::{prefixed_nozomi_path, tag_nozomi_path},
     HitomiLiveAdapter, HitomiLiveConfig,
 };
 
@@ -105,6 +105,14 @@ fn structured_tag_paths_preserve_hitomi_gender_namespace() {
         tag_nozomi_path("full color").as_deref(),
         Some("n/tag/full%20color-all.nozomi")
     );
+    assert_eq!(
+        prefixed_nozomi_path("series:rain_archives").as_deref(),
+        Some("n/series/rain%20archives-all.nozomi")
+    );
+    assert_eq!(
+        prefixed_nozomi_path("character:mira_lane").as_deref(),
+        Some("n/character/mira%20lane-all.nozomi")
+    );
 }
 
 #[test]
@@ -159,6 +167,11 @@ fn search_and_thumbnail_share_the_same_metadata_cache_without_live_network() {
         })
         .unwrap();
     assert_eq!(submission.first_page.items.len(), 1);
+    assert_eq!(submission.first_page.items[0].series, vec!["original"]);
+    assert_eq!(
+        submission.first_page.items[0].characters,
+        vec!["Example Character"]
+    );
 
     let thumbnail = adapter
         .resolve(
@@ -286,6 +299,8 @@ fn live_search_contract_covers_paging_filters_popular_and_related_without_networ
         .unwrap()
         .expect("detail exists");
     assert_eq!(detail.summary.title, "Sunlit Archive Fixture");
+    assert_eq!(detail.summary.series, vec!["original"]);
+    assert_eq!(detail.summary.characters, vec!["Example Character"]);
     assert_eq!(
         detail
             .related

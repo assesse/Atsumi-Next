@@ -88,7 +88,7 @@ fn primary_group_migration_preserves_existing_gallery_rows() {
         .expect("insert v3 gallery");
 
     let report = MigrationRunner::run(&mut connection).expect("apply v4 migration");
-    assert_eq!(report.applied_versions, vec![4, 5, 6, 7, 8, 9]);
+    assert_eq!(report.applied_versions, vec![4, 5, 6, 7, 8, 9, 10, 11]);
     let stored: (String, Option<String>) = connection
         .query_row(
             "SELECT title, primary_group FROM galleries WHERE gallery_id = 44",
@@ -167,7 +167,7 @@ fn lifecycle_migration_preserves_v6_download_graph_and_enables_cancelled() {
         .expect("seed v6 download graph");
 
     let report = MigrationRunner::run(&mut connection).expect("apply lifecycle migration");
-    assert_eq!(report.applied_versions, vec![7, 8, 9]);
+    assert_eq!(report.applied_versions, vec![7, 8, 9, 10, 11]);
     let lifecycle: (i64, String, Option<String>, i64) = connection
         .query_row(
             r#"
@@ -217,6 +217,77 @@ fn lifecycle_migration_preserves_v6_download_graph_and_enables_cancelled() {
 }
 
 #[test]
+fn visible_metadata_migration_defaults_existing_auto_find_candidates() {
+    let mut connection = Connection::open_in_memory().expect("open v10 database");
+    connection
+        .execute_batch(
+            r#"
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL DEFAULT (
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                ) STRICT;
+            "#,
+        )
+        .expect("create migration history");
+    for migration in MIGRATIONS.iter().take(10) {
+        connection
+            .execute_batch(migration.sql)
+            .expect("apply through v10 migration");
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                params![migration.version, migration.name],
+            )
+            .expect("record v10 migration");
+    }
+    connection
+        .execute_batch(
+            r#"
+                INSERT INTO auto_find_runs (
+                    run_id, revision, state, total_favorites,
+                    completed_favorites, candidates_found,
+                    started_at, updated_at, finished_at
+                ) VALUES (
+                    'v10-run', 1, 'completed', 1, 1, 1,
+                    '2026-08-15T00:00:00Z', '2026-08-15T00:00:01Z',
+                    '2026-08-15T00:00:01Z'
+                );
+                INSERT INTO auto_find_candidates (
+                    run_id, gallery_id, title, artist, group_name, pages,
+                    language, tags_json, published_rank, popularity,
+                    thumbnail_key, thumbnail_width, thumbnail_height,
+                    favorite_namespace, favorite_value, discovered_at
+                ) VALUES (
+                    'v10-run', 424242, 'Legacy candidate', 'artist', NULL, 12,
+                    'english', '[]', 20260815, 0,
+                    NULL, 512, 512, 'artist', 'artist',
+                    '2026-08-15T00:00:00Z'
+                );
+            "#,
+        )
+        .expect("seed v10 Auto Find candidate");
+
+    let report = MigrationRunner::run(&mut connection).expect("apply visible metadata migration");
+    assert_eq!(report.applied_versions, vec![11]);
+    let metadata: (String, String) = connection
+        .query_row(
+            r#"
+                SELECT series_json, characters_json
+                FROM auto_find_candidates
+                WHERE run_id = 'v10-run' AND gallery_id = 424242
+            "#,
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("load compatible metadata defaults");
+    assert_eq!(metadata, ("[]".into(), "[]".into()));
+}
+
+#[test]
 fn settings_constraint_migration_clamps_legacy_values() {
     let mut connection = Connection::open_in_memory().expect("open legacy database");
     connection
@@ -259,7 +330,10 @@ fn settings_constraint_migration_clamps_legacy_values() {
         .expect("create legacy schema");
 
     let report = MigrationRunner::run(&mut connection).expect("upgrade legacy schema");
-    assert_eq!(report.applied_versions, vec![2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(
+        report.applied_versions,
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    );
     let tightened: (i64, i64, i64, i64, i64, i64) = connection
         .query_row(
             r#"
@@ -1452,6 +1526,46 @@ fn fixture_search_applies_tag_language_and_group_clauses() {
         group_result.first_page.items[0].group.as_deref(),
         Some("paper studio")
     );
+
+    let series_result = service
+        .search_submit(SearchRequest {
+            text: "series:rain_archives".into(),
+            include_tags: Vec::new(),
+            exclude_tags: Vec::new(),
+            languages: Vec::new(),
+            sort: SearchSort::Recent,
+            page_size: 20,
+        })
+        .expect("search fixture series chip token");
+    assert_eq!(
+        series_result
+            .first_page
+            .items
+            .iter()
+            .map(|gallery| gallery.id.get())
+            .collect::<Vec<_>>(),
+        vec![4_051_038, 4_050_754]
+    );
+
+    let character_result = service
+        .search_submit(SearchRequest {
+            text: "character:mira_lane".into(),
+            include_tags: Vec::new(),
+            exclude_tags: Vec::new(),
+            languages: Vec::new(),
+            sort: SearchSort::Recent,
+            page_size: 20,
+        })
+        .expect("search fixture character chip token");
+    assert_eq!(
+        character_result
+            .first_page
+            .items
+            .iter()
+            .map(|gallery| gallery.id.get())
+            .collect::<Vec<_>>(),
+        vec![4_051_038, 4_050_754]
+    );
 }
 
 #[test]
@@ -1463,6 +1577,8 @@ fn fixture_gallery_detail_matches_the_typescript_projection() {
     assert_eq!(detail.summary.id.get(), 4_051_038);
     assert_eq!(detail.summary.artist, "serein");
     assert_eq!(detail.summary.group.as_deref(), Some("nocturne circle"));
+    assert_eq!(detail.summary.series, vec!["rain archives"]);
+    assert_eq!(detail.summary.characters, vec!["mira lane", "ren kujo"]);
     assert!(detail.summary.tags.contains(&"female:glasses".into()));
     assert_eq!(detail.related.len(), 2);
 
@@ -1475,6 +1591,8 @@ fn fixture_gallery_detail_matches_the_typescript_projection() {
                 "title": "Archive of Rain",
                 "artist": "serein",
                 "group": "nocturne circle",
+                "series": ["rain archives"],
+                "characters": ["mira lane", "ren kujo"],
                 "pages": 64,
                 "language": "korean",
                 "tags": ["female:glasses", "female:long_hair", "full_color", "mystery"],
@@ -1489,6 +1607,8 @@ fn fixture_gallery_detail_matches_the_typescript_projection() {
                         "title": "The Last Tram",
                         "artist": "serein",
                         "group": "nocturne circle",
+                        "series": ["rain archives"],
+                        "characters": ["mira lane"],
                         "pages": 76,
                         "language": "korean",
                         "tags": ["drama", "female:coat", "male:suit", "night", "rain"],
@@ -1503,6 +1623,8 @@ fn fixture_gallery_detail_matches_the_typescript_projection() {
                         "title": "The Green Window",
                         "artist": "paperlane",
                         "group": "paper studio",
+                        "series": ["paper city"],
+                        "characters": ["hana ito"],
                         "pages": 42,
                         "language": "english",
                         "tags": ["female:schoolgirl_uniform", "female:short_hair", "library", "mystery"],

@@ -65,6 +65,8 @@ export function projectGallerySummary(summary: GallerySummary, current?: Gallery
     coverIndex: current?.coverIndex ?? coverIndexFor(summary.id, thumbnailKey),
     language: language(runtime.language) ?? current?.language ?? "korean",
     tags: stringArray(runtime.tags) ?? (current ? [...current.tags] : []),
+    series: stringArray(runtime.series) ?? (Array.isArray(current?.series) ? [...current.series] : []),
+    characters: stringArray(runtime.characters) ?? (Array.isArray(current?.characters) ? [...current.characters] : []),
     ...(thumbnailKey ? { thumbnailKey } : {}),
     ...(thumbnailWidth !== undefined ? { thumbnailWidth } : {}),
     ...(thumbnailHeight !== undefined ? { thumbnailHeight } : {}),
@@ -109,6 +111,8 @@ const placeholderGallery = (id: GalleryId): Gallery => ({
   coverIndex: Math.abs(Number(id)) % 6,
   language: "korean",
   tags: [],
+  series: [],
+  characters: [],
 });
 
 export function mergeDownloadEntries(

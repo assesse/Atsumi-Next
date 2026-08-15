@@ -10,6 +10,8 @@ type FixtureGallery = {
   pages: number;
   language: Language;
   tags: string[];
+  series?: string[];
+  characters?: string[];
   publishedRank: number;
   popularity: number;
   related: number[];
@@ -83,6 +85,12 @@ const searchableText = (gallery: FixtureGallery): string => {
     const group = gallery.group.toLowerCase();
     values.push(group, `group:${group}`);
   }
+  for (const series of normalizedTags(gallery.series ?? [])) {
+    values.push(series, `series:${series.replace(/\s+/g, "_")}`);
+  }
+  for (const character of normalizedTags(gallery.characters ?? [])) {
+    values.push(character, `character:${character.replace(/\s+/g, "_")}`);
+  }
   values.push(...normalizedFixtureTags(gallery));
   return values.join(" ");
 };
@@ -95,6 +103,8 @@ const toSummary = (gallery: FixtureGallery): GallerySummary => ({
   pages: gallery.pages,
   language: gallery.language,
   tags: normalizedFixtureTags(gallery),
+  series: normalizedTags(gallery.series ?? []),
+  characters: normalizedTags(gallery.characters ?? []),
   publishedRank: gallery.publishedRank,
   popularity: gallery.popularity,
   thumbnailKey: `fixture-gallery-${gallery.id}-cover`,

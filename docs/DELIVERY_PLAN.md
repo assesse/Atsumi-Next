@@ -86,12 +86,25 @@
 
 ## Phase 4: Auto Find와 운영 UX
 
-- 즐겨찾기와 검색 기록 import
-- 즐겨찾기 작가 갱신
-- 작가별 그룹
-- Downloads 상태 filter
-- 오류 detail과 재시도
-- cache/data cleanup 범위
+Milestone D의 즐겨찾기·검색 이력·Auto Find workflow를 실제 SQLite와 production source adapter에 연결했다. Classic 데이터 import는 원본을 읽는 Phase 7 workflow 전에는 수행하지 않는다.
+
+구현 범위:
+
+- 작가·그룹·시리즈·캐릭터·태그 즐겨찾기 영속, namespace 검색 serializer와 카드·상세·Related의 공통 favorite projection
+- 성공한 명시적 검색 이력과 최근 suggestion 복원
+- 사용자가 시작하는 `즐겨찾기 작가 갱신`; 입력 중 원격 요청 없음
+- run·후보·진행률·취소·오류의 영속 상태와 restart snapshot 복원
+- 이미 download entry가 있거나 명시적으로 제외한 gallery의 후보 제거
+- 전체/작가별 보기와 결과 문자열·언어 local filter
+- 선택 또는 현재 filter 결과의 기존 download queue 일괄 추가
+- source 실패·중단·취소 상태 표시와 명시적 재갱신
+
+현재 경계:
+
+- source pagination은 전체 기간을 순회하되 한 작가당 250 page 안전 상한을 둔다.
+- 작품 숨김·중복 판정·pair 제외는 Phase 5의 실제 decision schema가 만들어진 뒤 Auto Find 후보 조건에 결합한다.
+- Classic 즐겨찾기·검색 기록 import와 충돌 보고는 Phase 7에 속한다.
+- 일반 cache/data cleanup UI와 전체 운영 polish는 Phase 7 import 이후 최종 UI·운영·보안 마무리(Milestone H)에서 검증한다.
 
 ## Phase 5: 작품 중복
 
@@ -136,4 +149,6 @@
 4. 완료: 공용 thumbnail key/component와 프로세스 전역 coordinator, priority, in-flight dedupe, 취소, 성공/실패 cache 기반.
 5. 완료: 실제 Hitomi metadata/thumbnail resolver, 공용 HTTP gate, 저장 fixture 기반 404/429/503/timeout 정책과 이미지 안전 검증.
 6. 완료: 앱 내부 single-instance 계약과 migration 전 SQLite backup/future-schema 거부. repository open은 WAL·busy timeout을 사용하고 job 복구는 single-instance를 획득한 app setup에서만 명시적으로 실행한다.
-7. 정식 queue runner와 artifact 저장·검증·resume·reconcile, 첫 이미지 열기를 연결한 뒤 Phase 3 E2E를 수행한다.
+7. 완료: 정식 queue runner와 artifact 저장·검증·resume·reconcile, 첫 이미지 열기와 Phase 3 filesystem/SQLite 통합 검증.
+8. 완료: 영속 즐겨찾기·검색 이력, 명시적 작가 갱신, Auto Find 진행·취소·복원과 local grouping/filter/batch queue 연결.
+9. 다음: 실제 artifact evidence를 사용하는 작품 단위 중복 후보·판정·Review와 Auto Find decision 제외 연동.

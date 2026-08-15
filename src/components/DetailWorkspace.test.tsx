@@ -68,4 +68,61 @@ describe("DetailWorkspace page previews", () => {
       }
     }
   });
+
+  it("keeps series and character favorites consistent in detail and related metadata", async () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
+    const parent: Gallery = { ...mockGalleries[0]!, relatedIds: [mockGalleries[6]!.id] };
+    const related = mockGalleries[6]!;
+    const onMetadataSearch = vi.fn();
+    const onMetadataFavorite = vi.fn();
+    const client = new ThumbnailClient({
+      resolve: () => ({ kind: "missing", reason: "test fixture" }),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => root.render(
+        <DetailWorkspace
+          tabs={[parent.id]}
+          activeId={parent.id}
+          minimized={false}
+          galleries={new Map([[parent.id, parent], [related.id, related]])}
+          favoriteMetadata={new Set(["series:rain archives", "character:mira lane"])}
+          thumbnailClient={client}
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          onCloseAll={vi.fn()}
+          onMinimize={vi.fn()}
+          onRestore={vi.fn()}
+          onOpenRelated={vi.fn()}
+          onQueue={vi.fn()}
+          onMetadataSearch={onMetadataSearch}
+          onMetadataFavorite={onMetadataFavorite}
+          onPreview={vi.fn()}
+        />,
+      ));
+
+      const mainSeries = container.querySelector<HTMLButtonElement>('[title^="rain archives"]');
+      const relatedSeries = container.querySelector<HTMLButtonElement>('[title^="시리즈 · rain archives"]');
+      const mainCharacter = container.querySelector<HTMLButtonElement>('[title^="mira lane ·"]');
+      const relatedCharacter = container.querySelector<HTMLButtonElement>('[title^="캐릭터 · mira lane"]');
+      expect(mainSeries).toHaveClass("favorite");
+      expect(relatedSeries).toHaveClass("favorite");
+      expect(mainCharacter).toHaveClass("favorite");
+      expect(relatedCharacter).toHaveClass("favorite");
+
+      await act(async () => {
+        mainSeries?.click();
+        relatedCharacter?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+      });
+      expect(onMetadataSearch).toHaveBeenCalledWith("series:rain_archives");
+      expect(onMetadataFavorite).toHaveBeenCalledWith("character:mira lane");
+    } finally {
+      await act(async () => root.unmount());
+      client.dispose();
+      container.remove();
+    }
+  });
 });

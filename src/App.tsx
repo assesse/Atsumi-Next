@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { backend } from "./api/backend";
-import type { DownloadChangedEvent, SearchRequest, SettingsPatch } from "./api/contracts";
+import type {
+  AutoFindRun,
+  AutoFindSnapshot,
+  DownloadChangedEvent,
+  FavoriteKey,
+  FavoriteNamespace,
+  FavoriteRecord,
+  SearchHistoryEntry,
+  SearchRequest,
+  SettingsPatch,
+} from "./api/contracts";
 import { ActivityDrawer } from "./components/ActivityDrawer";
 import { DetailWorkspace } from "./components/DetailWorkspace";
 import { DuplicateReviewDialog } from "./components/DuplicateReviewDialog";
@@ -10,7 +20,7 @@ import { GalleryCard } from "./components/GalleryCard";
 import { SelectionToolbar } from "./components/SelectionToolbar";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SideRail } from "./components/SideRail";
-import { ViewHeader } from "./components/ViewHeader";
+import { ViewHeader, type SearchSuggestion } from "./components/ViewHeader";
 import { retryableDownloadStates, type DownloadState, type Gallery, type GalleryId, type SearchSort, type ViewId } from "./core/types";
 import { useSettings } from "./hooks/useSettings";
 import { useWindowPlacement } from "./hooks/useWindowPlacement";
@@ -47,6 +57,42 @@ const activeDownloadStates: ReadonlySet<DownloadState> = new Set([
 
 type Toast = { id: number; message: string } | null;
 
+const normalizeMetadataToken = (value: string): string => value.trim().toLocaleLowerCase();
+
+const favoriteToken = (favorite: Pick<FavoriteRecord, "namespace" | "value">): string =>
+  favorite.namespace === "tag"
+    ? normalizeMetadataToken(favorite.value)
+    : `${favorite.namespace}:${normalizeMetadataToken(favorite.value)}`;
+
+const favoriteKeyFromToken = (token: string): FavoriteKey => {
+  const normalized = normalizeMetadataToken(token);
+  const separator = normalized.indexOf(":");
+  const possibleNamespace = separator > 0 ? normalized.slice(0, separator) : "";
+  const namespaces: ReadonlySet<string> = new Set(["artist", "group", "series", "character"]);
+  if (separator > 0 && namespaces.has(possibleNamespace)) {
+    return {
+      namespace: possibleNamespace as Exclude<FavoriteNamespace, "tag">,
+      value: normalized.slice(separator + 1),
+    };
+  }
+  return { namespace: "tag", value: normalized };
+};
+
+const historySuggestionValue = (entry: SearchHistoryEntry): string =>
+  entry.text || entry.includeTags.at(0) || entry.excludeTags.at(0) || "";
+
+const autoFindStatusLabel = (loading: boolean, error: string | null, run?: AutoFindRun): string => {
+  if (loading) return "저장된 자동 탐색 결과를 불러오는 중";
+  if (error) return `자동 탐색 오류 · ${error}`;
+  if (!run) return "아직 실행한 자동 탐색이 없습니다.";
+  if (run.state === "running") {
+    return `탐색 중 · 작가 ${run.completedFavorites}/${run.totalFavorites} · 후보 ${run.candidatesFound}개`;
+  }
+  if (run.state === "failed") return `탐색 실패 · ${run.errorMessage ?? run.errorCode ?? "원인을 확인해 주세요."}`;
+  if (run.state === "cancelled") return `탐색 취소됨 · 후보 ${run.candidatesFound}개 보존`;
+  return `탐색 완료 · 작가 ${run.completedFavorites}/${run.totalFavorites} · 후보 ${run.candidatesFound}개`;
+};
+
 export default function App() {
   const [ui, dispatch] = useReducer(uiReducer, initialUiState);
   const [query, dispatchQuery] = useReducer(galleryQueryReducer, initialGalleryQueryState);
@@ -56,10 +102,16 @@ export default function App() {
   const [downloadsLoading, setDownloadsLoading] = useState(true);
   const [downloadsError, setDownloadsError] = useState<string | null>(null);
   const [searchRefresh, setSearchRefresh] = useState(0);
+  const [exploreSearchOverride, setExploreSearchOverride] = useState<SearchRequest | null>(null);
   const [downloadsRefresh, setDownloadsRefresh] = useState(0);
-  const [favoriteMetadata, setFavoriteMetadata] = useState<ReadonlySet<string>>(
-    () => new Set(["female:glasses", "female:kimono"]),
-  );
+  const [favoriteMetadata, setFavoriteMetadata] = useState<ReadonlySet<string>>(() => new Set());
+  const [favoriteRecords, setFavoriteRecords] = useState<FavoriteRecord[]>([]);
+  const [searchHistory, setSearchHistory] = useState<SearchHistoryEntry[]>([]);
+  const [autoFindSnapshot, setAutoFindSnapshot] = useState<AutoFindSnapshot>({ candidates: [] });
+  const [autoFindIds, setAutoFindIds] = useState<GalleryId[]>([]);
+  const [autoFindLoading, setAutoFindLoading] = useState(true);
+  const [autoFindError, setAutoFindError] = useState<string | null>(null);
+  const [autoFindPending, setAutoFindPending] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const [reconcilingArtifacts, setReconcilingArtifacts] = useState(false);
   const [settingsPreview, setSettingsPreview] = useState<{ maxColumns: number; previewWidth: number } | null>(null);
@@ -71,9 +123,11 @@ export default function App() {
   const exitActionPendingRef = useRef(false);
   const toastTimer = useRef<number | undefined>(undefined);
   const searchToken = useRef(0);
+  const autoFindHydrationToken = useRef(0);
   const downloadHydrationToken = useRef(0);
   const queueRequestSequence = useRef(0);
   const pendingDownloadEntriesRef = useRef(new Set<string>());
+  const pendingFavoriteTokens = useRef(new Set<string>());
   const hydratedDetails = useRef(new Set<GalleryId>());
   const galleriesRef = useRef(galleries);
   const visibleIdsRef = useRef<GalleryId[]>([]);
@@ -92,6 +146,60 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(null), 2400);
   }, []);
 
+  const applyAutoFindSnapshot = useCallback((snapshot: AutoFindSnapshot) => {
+    setAutoFindSnapshot(snapshot);
+    setAutoFindIds(snapshot.candidates.map((candidate) => candidate.id));
+    setGalleries((current) => mergeGalleryPage(current, {
+      page: 1,
+      totalPages: snapshot.candidates.length ? 1 : 0,
+      items: snapshot.candidates,
+    }).galleries);
+  }, []);
+
+  const hydrateFavorites = useCallback(async () => {
+    try {
+      const result = await backend.favoritesList();
+      if (!result.ok) {
+        showToast(result.error.message);
+        return;
+      }
+      setFavoriteRecords(result.data);
+      setFavoriteMetadata(new Set(result.data.map(favoriteToken)));
+    } catch {
+      showToast("즐겨찾기 목록을 불러오지 못했습니다.");
+    }
+  }, [showToast]);
+
+  const hydrateSearchHistory = useCallback(async () => {
+    try {
+      const result = await backend.searchHistoryList(20);
+      if (result.ok) setSearchHistory(result.data);
+    } catch {
+      // Search history is an enhancement; a transient failure must not block searching.
+    }
+  }, []);
+
+  const hydrateAutoFind = useCallback(async (showLoading = false) => {
+    const token = ++autoFindHydrationToken.current;
+    if (showLoading) setAutoFindLoading(true);
+    try {
+      const result = await backend.autoFindSnapshot();
+      if (token !== autoFindHydrationToken.current) return;
+      if (!result.ok) {
+        setAutoFindError(result.error.message);
+        return;
+      }
+      setAutoFindError(null);
+      applyAutoFindSnapshot(result.data);
+    } catch {
+      if (token === autoFindHydrationToken.current) {
+        setAutoFindError("자동 탐색 backend에 연결하지 못했습니다.");
+      }
+    } finally {
+      if (token === autoFindHydrationToken.current) setAutoFindLoading(false);
+    }
+  }, [applyAutoFindSnapshot]);
+
   const beginDownloadMutation = useCallback((entryId: string): boolean => {
     if (pendingDownloadEntriesRef.current.has(entryId)) return false;
     pendingDownloadEntriesRef.current.add(entryId);
@@ -105,6 +213,12 @@ export default function App() {
   }, []);
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
+
+  useEffect(() => {
+    void hydrateFavorites();
+    void hydrateSearchHistory();
+    void hydrateAutoFind(true);
+  }, [hydrateAutoFind, hydrateFavorites, hydrateSearchHistory]);
 
   useLayoutEffect(() => {
     document.documentElement.style.setProperty("--preview-width", `${previewWidth}px`);
@@ -145,9 +259,30 @@ export default function App() {
   }, [showToast]);
 
   useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    void backend.on("auto-find:changed", (run) => {
+      setAutoFindSnapshot((current) => {
+        if (current.run?.runId === run.runId && current.run.revision > run.revision) return current;
+        return { ...current, run };
+      });
+      void hydrateAutoFind();
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unsubscribe = cleanup;
+    }).catch(() => {
+      if (!disposed) setAutoFindError("자동 탐색 상태 event stream에 연결하지 못했습니다.");
+    });
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [hydrateAutoFind]);
+
+  useEffect(() => {
     let cancelled = false;
     const token = ++searchToken.current;
-    const request: SearchRequest = {
+    const request: SearchRequest = exploreSearchOverride ?? {
       text: ui.search.explore.committed,
       includeTags: [],
       excludeTags: [],
@@ -165,6 +300,9 @@ export default function App() {
       dispatchQuery({ type: "submit.succeeded", token, submission: result.data });
       setExploreIds(result.data.firstPage.items.map((item) => item.id));
       setGalleries((current) => mergeGalleryPage(current, result.data.firstPage).galleries);
+      if (request.text.trim() || request.includeTags.length || request.excludeTags.length) {
+        void hydrateSearchHistory();
+      }
     }).catch(() => {
       if (!cancelled && token === searchToken.current) {
         dispatchQuery({
@@ -177,7 +315,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [searchRefresh, ui.exploreSort, ui.search.explore.committed, ui.search.explore.languages]);
+  }, [exploreSearchOverride, hydrateSearchHistory, searchRefresh, ui.exploreSort, ui.search.explore.committed, ui.search.explore.languages]);
 
   useEffect(() => {
     let cancelled = false;
@@ -220,19 +358,49 @@ export default function App() {
     };
   }, [downloadsRefresh]);
 
+  const displayGalleries = useMemo<ReadonlyMap<GalleryId, Gallery>>(() => {
+    const next = new Map<GalleryId, Gallery>();
+    galleries.forEach((gallery, id) => {
+      const favorite = favoriteMetadata.has(`artist:${normalizeMetadataToken(gallery.artist)}`);
+      next.set(id, gallery.favorite === favorite ? gallery : { ...gallery, favorite });
+    });
+    return next;
+  }, [favoriteMetadata, galleries]);
+  const favoriteMetadataForDisplay = useMemo<ReadonlySet<string>>(() => {
+    const next = new Set(favoriteMetadata);
+    galleries.forEach((gallery) => {
+      if (gallery.group) {
+        const token = `group:${gallery.group}`;
+        if (favoriteMetadata.has(normalizeMetadataToken(token))) next.add(token);
+      }
+      gallery.tags.forEach((tag) => {
+        if (favoriteMetadata.has(normalizeMetadataToken(tag))) next.add(tag);
+      });
+      (gallery.series ?? []).forEach((series) => {
+        const token = `series:${series}`;
+        if (favoriteMetadata.has(normalizeMetadataToken(token))) next.add(token);
+      });
+      (gallery.characters ?? []).forEach((character) => {
+        const token = `character:${character}`;
+        if (favoriteMetadata.has(normalizeMetadataToken(token))) next.add(token);
+      });
+    });
+    return next;
+  }, [favoriteMetadata, galleries]);
+
   const scopedGalleries = useMemo(() => {
-    const ids = ui.view === "explore" ? exploreIds : ui.view === "downloads" ? downloadIds : [...galleries.keys()];
+    const ids = ui.view === "explore" ? exploreIds : ui.view === "downloads" ? downloadIds : autoFindIds;
     return ids.flatMap((id) => {
-      const gallery = galleries.get(id);
+      const gallery = displayGalleries.get(id);
       return gallery ? [gallery] : [];
     });
-  }, [downloadIds, exploreIds, galleries, ui.view]);
+  }, [autoFindIds, displayGalleries, downloadIds, exploreIds, ui.view]);
   const visible = useMemo(() => visibleGalleries(ui, scopedGalleries), [ui, scopedGalleries]);
   const visibleIds = useMemo(() => visible.map((gallery) => gallery.id), [visible]);
-  galleriesRef.current = galleries;
+  galleriesRef.current = displayGalleries;
   visibleIdsRef.current = visibleIds;
-  const allGalleries = useMemo(() => [...galleries.values()], [galleries]);
-  const autoFindCount = useMemo(() => allGalleries.filter((gallery) => gallery.favorite).length, [allGalleries]);
+  const allGalleries = useMemo(() => [...displayGalleries.values()], [displayGalleries]);
+  const autoFindCount = autoFindIds.length;
   const attentionCount = useMemo(
     () => allGalleries.filter((gallery) => ["failed", "interrupted", "review_required"].includes(gallery.download?.state ?? "")).length,
     [allGalleries],
@@ -371,25 +539,36 @@ export default function App() {
     dispatch({ type: "search.commit", view: "explore", value });
   }, []);
 
-  const toggleMetadataFavorite = useCallback((value: string) => {
-    setFavoriteMetadata((current) => {
-      const next = new Set(current);
-      if (next.has(value)) next.delete(value);
-      else next.add(value);
-      return next;
-    });
-    if (value.startsWith("artist:")) {
-      const artist = value.slice("artist:".length);
-      setGalleries((current) => {
-        const next = new Map(current);
-        current.forEach((gallery, id) => {
-          if (gallery.artist === artist) next.set(id, { ...gallery, favorite: !gallery.favorite });
-        });
+  const toggleMetadataFavorite = useCallback(async (value: string) => {
+    const token = normalizeMetadataToken(value);
+    if (!token || pendingFavoriteTokens.current.has(token)) return;
+    const key = favoriteKeyFromToken(token);
+    const enabled = !favoriteMetadata.has(token);
+    pendingFavoriteTokens.current.add(token);
+    try {
+      const result = await backend.favoriteSet(key, enabled);
+      if (!result.ok) {
+        showToast(result.error.message);
+        return;
+      }
+      const normalizedToken = result.data.favorite ? favoriteToken(result.data.favorite) : token;
+      setFavoriteMetadata((current) => {
+        const next = new Set(current);
+        if (result.data.enabled) next.add(normalizedToken);
+        else next.delete(normalizedToken);
         return next;
       });
+      setFavoriteRecords((current) => {
+        const withoutKey = current.filter((favorite) => favoriteToken(favorite) !== normalizedToken);
+        return result.data.favorite ? [...withoutKey, result.data.favorite] : withoutKey;
+      });
+      showToast(`${value} 즐겨찾기를 ${result.data.enabled ? "추가" : "해제"}했습니다.`);
+    } catch {
+      showToast("즐겨찾기 변경을 저장하지 못했습니다.");
+    } finally {
+      pendingFavoriteTokens.current.delete(token);
     }
-    showToast(`${value} 즐겨찾기를 변경했습니다.`);
-  }, [showToast]);
+  }, [favoriteMetadata, showToast]);
 
   const queueGalleries = useCallback(
     async (ids: GalleryId[]) => {
@@ -539,6 +718,64 @@ export default function App() {
     }
   }, [reconcilingArtifacts, showToast]);
 
+  const refreshAutoFind = useCallback(async () => {
+    if (autoFindPending || autoFindSnapshot.run?.state === "running") return;
+    setAutoFindPending(true);
+    setAutoFindError(null);
+    try {
+      const result = await backend.autoFindRefresh();
+      if (!result.ok) {
+        setAutoFindError(result.error.message);
+        showToast(result.error.message);
+        return;
+      }
+      setAutoFindSnapshot((current) => ({ ...current, run: result.data }));
+      await hydrateAutoFind();
+    } catch {
+      const message = "자동 탐색을 시작하지 못했습니다.";
+      setAutoFindError(message);
+      showToast(message);
+    } finally {
+      setAutoFindPending(false);
+    }
+  }, [autoFindPending, autoFindSnapshot.run?.state, hydrateAutoFind, showToast]);
+
+  const cancelAutoFind = useCallback(async () => {
+    if (autoFindPending || autoFindSnapshot.run?.state !== "running") return;
+    setAutoFindPending(true);
+    try {
+      const result = await backend.autoFindCancel();
+      if (!result.ok) {
+        showToast(result.error.message);
+        return;
+      }
+      setAutoFindSnapshot((current) => ({ ...current, run: result.data }));
+      await hydrateAutoFind();
+      showToast("자동 탐색을 취소했습니다. 지금까지 찾은 후보는 보존됩니다.");
+    } catch {
+      showToast("자동 탐색 취소 요청을 전달하지 못했습니다.");
+    } finally {
+      setAutoFindPending(false);
+    }
+  }, [autoFindPending, autoFindSnapshot.run?.state, hydrateAutoFind, showToast]);
+
+  const excludeAutoFindCandidates = useCallback(async (ids: GalleryId[]) => {
+    const candidateIds = [...new Set(ids)].filter((id) => autoFindIds.includes(id));
+    if (!candidateIds.length) return;
+    try {
+      const result = await backend.autoFindExclude(candidateIds, "사용자가 Auto Find 후보 목록에서 제외함");
+      if (!result.ok) {
+        showToast(result.error.message);
+        return;
+      }
+      applyAutoFindSnapshot(result.data.snapshot);
+      dispatch({ type: "selection.clear" });
+      showToast(`${result.data.excludedGalleryIds.length}개 후보를 다음 탐색에서도 제외합니다.`);
+    } catch {
+      showToast("자동 탐색 후보 제외 요청을 저장하지 못했습니다.");
+    }
+  }, [applyAutoFindSnapshot, autoFindIds, showToast]);
+
   const loadExplorePage = useCallback(async (page: number) => {
     if (!query.queryId || page < 1 || query.phase === "loading-page") return;
     const queryId = query.queryId;
@@ -599,14 +836,15 @@ export default function App() {
       if (event.key === "Delete" && selectedIds.length) {
         event.preventDefault();
         if (ui.view === "downloads") void quarantineGalleries(selectedIds);
-        else showToast(`${selectedIds.length}개 항목의 제외 확인을 엽니다.`);
+        else if (ui.view === "auto-find") void excludeAutoFindCandidates(selectedIds);
+        else showToast("후보 제외는 Auto Find 화면에서 사용할 수 있습니다.");
       }
     };
     window.addEventListener("keydown", keyDown);
     return () => window.removeEventListener("keydown", keyDown);
-  }, [closeActivity, galleries, openArtifact, openExitConfirm, quarantineGalleries, queueGalleries, selectedIds, showToast, ui.detail.activeId, ui.overlays, ui.search, ui.view]);
+  }, [closeActivity, excludeAutoFindCandidates, galleries, openArtifact, openExitConfirm, quarantineGalleries, queueGalleries, selectedIds, showToast, ui.detail.activeId, ui.overlays, ui.search, ui.view]);
 
-  const reviewParent = ui.overlays.reviewGalleryId === null ? undefined : galleries.get(ui.overlays.reviewGalleryId);
+  const reviewParent = ui.overlays.reviewGalleryId === null ? undefined : displayGalleries.get(ui.overlays.reviewGalleryId);
   const reviewCandidate = reviewParent
     ? allGalleries.find((gallery) => gallery.id !== reviewParent.id && gallery.artist === reviewParent.artist) ?? allGalleries.find((gallery) => gallery.id !== reviewParent.id)
     : undefined;
@@ -620,11 +858,87 @@ export default function App() {
     [saveSettings, showToast],
   );
 
+  const searchSuggestions = useMemo<SearchSuggestion[]>(() => {
+    const suggestions: SearchSuggestion[] = [];
+    const seen = new Set<string>();
+    for (const entry of searchHistory) {
+      const value = historySuggestionValue(entry);
+      if (!value) continue;
+      const dedupeKey = `history:${JSON.stringify({
+        text: entry.text,
+        includeTags: entry.includeTags,
+        excludeTags: entry.excludeTags,
+        languages: entry.languages,
+        sort: entry.sort,
+      })}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      const filterCount = entry.includeTags.length + entry.excludeTags.length;
+      suggestions.push({
+        type: "HISTORY",
+        value,
+        extra: `최근 검색 · ${entry.useCount}회${filterCount ? ` · 태그 조건 ${filterCount}개` : ""}`,
+        favorite: favoriteMetadata.has(normalizeMetadataToken(value)),
+        request: {
+          text: entry.text,
+          includeTags: [...entry.includeTags],
+          excludeTags: [...entry.excludeTags],
+          languages: [...entry.languages],
+          sort: entry.sort,
+          pageSize: entry.pageSize,
+        },
+      });
+    }
+    for (const favorite of favoriteRecords) {
+      const value = favoriteToken(favorite);
+      const dedupeKey = `favorite:${value}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      suggestions.push({
+        type: favorite.namespace === "artist" ? "ARTIST" : "TAG",
+        value,
+        extra: `${favorite.namespace} 즐겨찾기`,
+        favorite: true,
+      });
+    }
+    return suggestions;
+  }, [favoriteMetadata, favoriteRecords, searchHistory]);
+
+  const autoFindGroups = useMemo(() => {
+    const groups = new Map<string, Gallery[]>();
+    for (const gallery of visible) {
+      const current = groups.get(gallery.artist);
+      if (current) current.push(gallery);
+      else groups.set(gallery.artist, [gallery]);
+    }
+    return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
+  }, [visible]);
+
   const config = viewConfig[ui.view];
   const resultSourceLabel = backend.runtime === "tauri" ? "Hitomi 실데이터" : "브라우저 fixture";
-  const autoFindRefreshLabel = backend.runtime === "tauri"
-    ? "자동 갱신 · 미연결"
-    : "마지막 갱신 · 브라우저 fixture";
+  const currentAutoFindStatus = autoFindStatusLabel(autoFindLoading, autoFindError, autoFindSnapshot.run);
+  const renderGalleryGrid = (items: Gallery[], ariaLabel: string) => (
+    <div className={`gallery-grid${ui.selection.ids.size ? " is-selection-context" : ""}`} style={{ gridTemplateColumns: `repeat(${galleryColumns}, minmax(0, 1fr))` }} role="list" aria-label={ariaLabel}>
+      {items.map((gallery, index) => (
+        <GalleryCard
+          key={gallery.id}
+          gallery={gallery}
+          thumbnailPriority={index < galleryColumns ? "visible" : "prefetch"}
+          view={ui.view}
+          selected={ui.selection.ids.has(gallery.id)}
+          selectionContext={ui.selection.ids.size > 0}
+          favoriteMetadata={favoriteMetadataForDisplay}
+          onSelect={selectGallery}
+          onOpenDetail={openDetail}
+          onOpenArtifact={openArtifact}
+          onOpenReview={openReview}
+          onStatusDetail={openStatusDetail}
+          onMetadataSearch={searchMetadata}
+          onMetadataFavorite={toggleMetadataFavorite}
+        />
+      ))}
+    </div>
+  );
 
   return (
     <>
@@ -641,19 +955,34 @@ export default function App() {
           <ViewHeader
             view={ui.view}
             search={ui.search[ui.view]}
+            suggestions={searchSuggestions}
             activityCount={activeDownloadCount}
             activityOpen={ui.overlays.activityOpen}
             onDraft={(value) => dispatch({ type: "search.draft", view: ui.view, value })}
             onSuggestions={(open, active) => dispatch({ type: "search.suggestions", view: ui.view, open, active })}
             onCommit={(value) => {
+              if (ui.view === "explore") setExploreSearchOverride(null);
               dispatch({ type: "search.commit", view: ui.view, value });
               if (ui.view !== "explore") showToast("현재 결과를 필터했습니다.");
             }}
-            onLanguages={(languages) => dispatch({ type: "search.languages", view: ui.view, languages })}
+            onSelectSuggestion={(suggestion) => {
+              if (ui.view === "explore" && suggestion.request) {
+                setExploreSearchOverride(suggestion.request);
+                dispatch({ type: "search.languages", view: "explore", languages: suggestion.request.languages });
+                dispatch({ type: "sort.set", sort: suggestion.request.sort });
+              } else if (ui.view === "explore") {
+                setExploreSearchOverride(null);
+              }
+              dispatch({ type: "search.commit", view: ui.view, value: suggestion.value });
+            }}
+            onLanguages={(languages) => {
+              if (ui.view === "explore") setExploreSearchOverride(null);
+              dispatch({ type: "search.languages", view: ui.view, languages });
+            }}
             onRefresh={() => {
               if (ui.view === "explore") setSearchRefresh((value) => value + 1);
               else if (ui.view === "downloads") setDownloadsRefresh((value) => value + 1);
-              else showToast("즐겨찾기 작가 갱신은 Phase 4 계약으로 연결합니다.");
+              else void refreshAutoFind();
             }}
             onActivity={() => ui.overlays.activityOpen ? closeActivity() : openActivity()}
             onSettings={() => dispatch({ type: "overlay.settings", open: true })}
@@ -664,7 +993,8 @@ export default function App() {
               {ui.view === "auto-find" ? (
                 <>
                   <GroupingControl value={ui.grouping["auto-find"]} onChange={(grouping) => dispatch({ type: "grouping.set", view: "auto-find", grouping })} />
-                  <button type="button" className="text-button" onClick={() => showToast("즐겨찾기 작가 갱신은 Phase 4 계약으로 연결합니다.")}><FluentIcon glyph="\uE72C" /> 즐겨찾기 작가 갱신</button>
+                  <button type="button" className="text-button" disabled={autoFindPending || autoFindSnapshot.run?.state === "running"} onClick={() => void refreshAutoFind()}><FluentIcon glyph="\uE72C" /> {autoFindSnapshot.run?.state === "failed" ? "다시 탐색" : "즐겨찾기 작가 갱신"}</button>
+                  {autoFindSnapshot.run?.state === "running" ? <button type="button" className="text-button danger-button" disabled={autoFindPending} onClick={() => void cancelAutoFind()}><FluentIcon glyph="\uE711" /> 탐색 취소</button> : null}
                   <button type="button" className="text-button dark" onClick={() => void queueGalleries(visibleIds)}><FluentIcon glyph="\uE896" /> 후보 다운로드</button>
                 </>
               ) : ui.view === "downloads" ? (
@@ -680,9 +1010,9 @@ export default function App() {
           <section className="context-row">
             <div className="context-left">
               {ui.view === "explore" ? (
-                <div className="select-control"><label htmlFor="sort-select">정렬</label><select id="sort-select" value={ui.exploreSort} onChange={(event) => dispatch({ type: "sort.set", sort: event.target.value as SearchSort })}>{sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
+                <div className="select-control"><label htmlFor="sort-select">정렬</label><select id="sort-select" value={ui.exploreSort} onChange={(event) => { setExploreSearchOverride(null); dispatch({ type: "sort.set", sort: event.target.value as SearchSort }); }}>{sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
               ) : ui.view === "auto-find" ? (
-                <span className="context-summary">{autoFindRefreshLabel}</span>
+                <span className={`context-summary auto-find-status is-${autoFindSnapshot.run?.state ?? "idle"}`} role="status">{currentAutoFindStatus}</span>
               ) : (
                 <div className="segmented status-filter" role="group" aria-label="다운로드 상태 필터">
                   {(["all", "active", "review", "failed", "complete"] as const).map((filter) => (
@@ -698,42 +1028,38 @@ export default function App() {
           <SelectionToolbar
             count={ui.selection.ids.size}
             downloadsView={ui.view === "downloads"}
-            restoreMode={selectedIds.length > 0 && selectedIds.every((id) => galleries.get(id)?.download?.state === "quarantined")}
+            restoreMode={selectedIds.length > 0 && selectedIds.every((id) => displayGalleries.get(id)?.download?.state === "quarantined")}
             onAll={() => dispatch({ type: "selection.all", ids: visibleIds })}
             onClear={() => dispatch({ type: "selection.clear" })}
             onPrimary={() => void queueGalleries(selectedIds)}
-            onDelete={() => ui.view === "downloads" ? void quarantineGalleries(selectedIds) : showToast("제외 확인 화면을 준비합니다.")}
+            onDelete={() => ui.view === "downloads"
+              ? void quarantineGalleries(selectedIds)
+              : ui.view === "auto-find"
+                ? void excludeAutoFindCandidates(selectedIds)
+                : showToast("후보 제외는 Auto Find 화면에서 사용할 수 있습니다.")}
           />
           <section ref={galleryViewport} className="gallery-viewport">
-            {settingsLoading || (ui.view === "explore" && query.phase === "submitting") || (ui.view === "downloads" && downloadsLoading) ? (
-              <div className="loading-state" role="status"><span className="spinner" /> {settingsLoading ? "저장된 화면 설정을 불러오는 중" : ui.view === "explore" ? "갤러리를 검색하는 중" : "다운로드 목록을 불러오는 중"}</div>
+            {settingsLoading || (ui.view === "explore" && query.phase === "submitting") || (ui.view === "downloads" && downloadsLoading) || (ui.view === "auto-find" && autoFindLoading) ? (
+              <div className="loading-state" role="status"><span className="spinner" /> {settingsLoading ? "저장된 화면 설정을 불러오는 중" : ui.view === "explore" ? "갤러리를 검색하는 중" : ui.view === "auto-find" ? "저장된 자동 탐색 결과를 불러오는 중" : "다운로드 목록을 불러오는 중"}</div>
             ) : ui.view === "explore" && query.error && !query.page ? (
               <div className="empty-state" role="alert"><FluentIcon glyph="\uE7BA" /><h2>검색 결과를 불러오지 못했습니다</h2><p>{query.error.message}</p><button type="button" className="text-button" onClick={() => setSearchRefresh((value) => value + 1)}>다시 시도</button></div>
             ) : ui.view === "downloads" && downloadsError ? (
               <div className="empty-state" role="alert"><FluentIcon glyph="\uE7BA" /><h2>다운로드 목록을 불러오지 못했습니다</h2><p>{downloadsError}</p><button type="button" className="text-button" onClick={() => setDownloadsRefresh((value) => value + 1)}>다시 시도</button></div>
+            ) : ui.view === "auto-find" && autoFindError && !autoFindSnapshot.candidates.length ? (
+              <div className="empty-state" role="alert"><FluentIcon glyph="\uE7BA" /><h2>자동 탐색 결과를 불러오지 못했습니다</h2><p>{autoFindError}</p><button type="button" className="text-button" onClick={() => void hydrateAutoFind(true)}>다시 시도</button></div>
             ) : visible.length ? (
-              <div className={`gallery-grid${ui.selection.ids.size ? " is-selection-context" : ""}`} style={{ gridTemplateColumns: `repeat(${galleryColumns}, minmax(0, 1fr))` }} role="list" aria-label={config.title}>
-                {visible.map((gallery, index) => (
-                  <GalleryCard
-                    key={gallery.id}
-                    gallery={gallery}
-                    thumbnailPriority={index < galleryColumns ? "visible" : "prefetch"}
-                    view={ui.view}
-                    selected={ui.selection.ids.has(gallery.id)}
-                    selectionContext={ui.selection.ids.size > 0}
-                    favoriteMetadata={favoriteMetadata}
-                    onSelect={selectGallery}
-                    onOpenDetail={openDetail}
-                    onOpenArtifact={openArtifact}
-                    onOpenReview={openReview}
-                    onStatusDetail={openStatusDetail}
-                    onMetadataSearch={searchMetadata}
-                    onMetadataFavorite={toggleMetadataFavorite}
-                  />
-                ))}
-              </div>
+              ui.view === "auto-find" && ui.grouping["auto-find"] === "artist" ? (
+                <div className="gallery-groups">
+                  {autoFindGroups.map(([artist, items]) => (
+                    <section className="gallery-group" key={artist} aria-labelledby={`auto-find-artist-${items[0]?.id}`}>
+                      <h2 id={`auto-find-artist-${items[0]?.id}`}><span>★</span> {artist}<small>{items.length}개 후보</small></h2>
+                      {renderGalleryGrid(items, `${artist} 자동 탐색 후보`)}
+                    </section>
+                  ))}
+                </div>
+              ) : renderGalleryGrid(visible, config.title)
             ) : (
-              <div className="empty-state"><FluentIcon glyph="\uE11A" /><h2>표시할 갤러리가 없습니다</h2><p>검색어나 언어·상태 필터를 바꿔 보세요.</p></div>
+              <div className="empty-state"><FluentIcon glyph="\uE11A" /><h2>표시할 갤러리가 없습니다</h2><p>{ui.view === "auto-find" ? "즐겨찾기 작가를 추가한 뒤 명시적으로 갱신하거나 현재 검색·언어 필터를 바꿔 보세요." : "검색어나 언어·상태 필터를 바꿔 보세요."}</p></div>
             )}
             {ui.view === "explore" && query.page ? <div className="pager"><button type="button" className="text-button" disabled={query.phase === "loading-page" || query.page.page <= 1} onClick={() => void loadExplorePage(query.page!.page - 1)}>이전</button><span>{query.page.page} / {Math.max(1, query.page.totalPages)}{query.phase === "loading-page" ? " · 불러오는 중" : ""}</span><button type="button" className="text-button" disabled={query.phase === "loading-page" || query.page.page >= query.page.totalPages} onClick={() => void loadExplorePage(query.page!.page + 1)}>다음</button></div> : null}
           </section>
@@ -753,8 +1079,8 @@ export default function App() {
         tabs={ui.detail.tabs}
         activeId={ui.detail.activeId}
         minimized={ui.detail.minimized}
-        galleries={galleries}
-        favoriteMetadata={favoriteMetadata}
+        galleries={displayGalleries}
+        favoriteMetadata={favoriteMetadataForDisplay}
         onActivate={(id) => dispatch({ type: "detail.activate", id })}
         onClose={(id) => dispatch({ type: "detail.close", id })}
         onCloseAll={() => dispatch({ type: "detail.closeAll" })}

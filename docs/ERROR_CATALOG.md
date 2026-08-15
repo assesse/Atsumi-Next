@@ -39,6 +39,7 @@
 | `IDEMPOTENCY_CONFLICT` | 같은 요청 식별자가 다른 대상에 이미 사용되었습니다 | 아니오 | 호출 내용 검토 |
 | `DOWNLOAD_ENTRY_NOT_FOUND` | 다운로드 항목을 다시 불러오세요 | 아니오 | 목록 새로고침 |
 | `INVALID_DOWNLOAD_STATE` | 현재 상태에서는 요청한 작업을 수행할 수 없습니다 | 아니오 | 최신 상태 검토 |
+| `AUTO_FIND_NOT_RUNNING` | 취소할 Auto Find 갱신이 없습니다 | 아니오 | 최신 snapshot 확인 |
 | `JOB_INTERRUPTED` | 작업이 중단되었습니다 | 예 | 이어받기 |
 | `THUMBNAIL_REQUEST_INVALID` | 미리보기 요청 정보가 올바르지 않습니다 | 아니오 | 요청 key 확인 |
 | `THUMBNAIL_COORDINATOR_CLOSED` | 미리보기 작업기가 종료되었습니다 | 예 | 앱 상태 확인 후 재시도 |
@@ -61,3 +62,17 @@ elapsed_ms, app_version, schema_version
 URL query, cookie, session token, 로컬 사용자 이름은 기본 로그에서 제거한다.
 
 Thumbnail event는 같은 원인을 camelCase code(`candidatesExhausted`, `responseInvalid`, `decodeFailed`)와 명시적 `retryable`로 전달한다. WebView는 이 값을 보존해 사용자 문구와 재시도를 결정하며 raw source 오류 문자열을 분기 조건으로 사용하지 않는다.
+
+## Auto Find run 오류
+
+아래 code는 command의 `ApiError`가 아니라 영속 `AutoFindRun.errorCode`다. UI는 `state`, `revision`, `errorCode`, `errorMessage`를 함께 표시하고 최신 상태는 `auto_find_snapshot`으로 다시 읽는다.
+
+| Run error code | 발생 조건 | 사용자 행동 |
+|---|---|---|
+| `AUTO_FIND_SOURCE_FAILED` | 명시적 갱신 중 source 조회 실패 | 연결·source 상태 확인 후 다시 갱신 |
+| `AUTO_FIND_WORKER_UNAVAILABLE` | background worker 시작 실패 | 앱 상태 확인 후 다시 갱신 |
+| `AUTO_FIND_INTERRUPTED` | 이전 프로세스가 `running` 상태로 종료됨 | 보존된 부분 결과 확인 후 다시 갱신 |
+| `AUTO_FIND_CANCELLED` | 사용자가 갱신을 취소함 | 필요할 때 다시 갱신 |
+| `AUTO_FIND_APP_EXIT` | 앱 종료가 진행 중 갱신을 취소함 | 다음 실행에서 다시 갱신 |
+
+worker 시작 실패 command는 현재 공통 `DATABASE_ERROR` envelope도 함께 반환할 수 있으므로, frontend는 반환 오류와 복원된 run snapshot 중 어느 하나도 성공으로 오인하지 않는다. source의 raw URL·검색어·transport detail은 `AutoFindRun.errorMessage`에 넣지 않는다.

@@ -1,7 +1,9 @@
 use crate::domain::{
-    ArtifactBundle, DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
-    DownloadListRequest, DownloadPage, FixtureDownloadJobStep, GalleryDetail, GalleryId,
-    GalleryPage, JobRef, JobState, SearchRequest, SearchSubmission, SettingsSnapshot,
+    ArtifactBundle, AutoFindCandidateRecord, AutoFindExclusionResult, AutoFindRun,
+    AutoFindRunState, AutoFindSnapshot, DownloadEntry, DownloadEntryId, DownloadJobDescriptor,
+    DownloadJobProjection, DownloadListRequest, DownloadPage, FavoriteKey, FavoriteMutationResult,
+    FavoriteRecord, FixtureDownloadJobStep, GalleryDetail, GalleryId, GalleryPage, JobRef,
+    JobState, SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsSnapshot,
     WindowPlacementSnapshot,
 };
 
@@ -69,6 +71,56 @@ pub trait SearchRepository: Send + Sync {
         &self,
         gallery_id: GalleryId,
     ) -> Result<Option<GalleryDetail>, RepositoryError>;
+}
+
+pub trait AutomationRepository: Send + Sync {
+    fn favorites_list(&self) -> Result<Vec<FavoriteRecord>, RepositoryError>;
+
+    fn favorite_set(
+        &self,
+        key: &FavoriteKey,
+        enabled: bool,
+    ) -> Result<FavoriteMutationResult, RepositoryError>;
+
+    fn search_history_record(
+        &self,
+        request: &SearchRequest,
+    ) -> Result<SearchHistoryEntry, RepositoryError>;
+
+    fn search_history_list(&self, limit: u32) -> Result<Vec<SearchHistoryEntry>, RepositoryError>;
+
+    fn auto_find_recover_interrupted(&self) -> Result<usize, RepositoryError>;
+
+    fn auto_find_start(&self, total_favorites: u32) -> Result<AutoFindRun, RepositoryError>;
+
+    fn auto_find_candidate_add(
+        &self,
+        candidate: &AutoFindCandidateRecord,
+    ) -> Result<Option<AutoFindRun>, RepositoryError>;
+
+    fn auto_find_progress(
+        &self,
+        run_id: &str,
+        completed_favorites: u32,
+    ) -> Result<Option<AutoFindRun>, RepositoryError>;
+
+    fn auto_find_finish(
+        &self,
+        run_id: &str,
+        state: AutoFindRunState,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<Option<AutoFindRun>, RepositoryError>;
+
+    fn auto_find_is_running(&self, run_id: &str) -> Result<bool, RepositoryError>;
+
+    fn auto_find_snapshot(&self) -> Result<AutoFindSnapshot, RepositoryError>;
+
+    fn auto_find_exclude(
+        &self,
+        gallery_ids: &[GalleryId],
+        reason: &str,
+    ) -> Result<AutoFindExclusionResult, RepositoryError>;
 }
 
 pub trait DownloadRepository: Send + Sync {

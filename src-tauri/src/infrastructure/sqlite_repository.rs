@@ -8,21 +8,26 @@ use std::{
 use rusqlite::{
     params, Connection, ErrorCode, OptionalExtension, Row, Transaction, TransactionBehavior,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
     application::{
-        ArtifactRepository, DownloadArtifactPlan, DownloadCheckpoint, DownloadMutationOutcome,
-        DownloadPageAttempt, DownloadPageAttemptResult, DownloadPipelineRepository,
-        DownloadPrepared, DownloadQueueAddOutcome, DownloadQueueRecord, DownloadRepository,
-        QuarantineSaga, QuarantineSagaState, RepositoryError, StateRepository, StoredPage,
+        ArtifactRepository, AutomationRepository, DownloadArtifactPlan, DownloadCheckpoint,
+        DownloadMutationOutcome, DownloadPageAttempt, DownloadPageAttemptResult,
+        DownloadPipelineRepository, DownloadPrepared, DownloadQueueAddOutcome, DownloadQueueRecord,
+        DownloadRepository, QuarantineSaga, QuarantineSagaState, RepositoryError, StateRepository,
+        StoredPage,
     },
     domain::{
         ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
-        ArtifactStorageFormat, DownloadArtifact, DownloadArtifactState, DownloadChangedEvent,
-        DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
-        DownloadListRequest, DownloadPage, DownloadReviewKind, FixtureDownloadJobStep, Gallery,
-        GalleryId, GalleryMetadata, JobEvent, JobRef, JobState, PageArtifact, PageArtifactState,
+        ArtifactStorageFormat, AutoFindCandidate, AutoFindCandidateRecord, AutoFindExclusionResult,
+        AutoFindRun, AutoFindRunState, AutoFindSnapshot, DownloadArtifact, DownloadArtifactState,
+        DownloadChangedEvent, DownloadEntry, DownloadEntryId, DownloadJobDescriptor,
+        DownloadJobProjection, DownloadListRequest, DownloadPage, DownloadReviewKind, FavoriteKey,
+        FavoriteMutationResult, FavoriteNamespace, FavoriteRecord, FixtureDownloadJobStep, Gallery,
+        GalleryId, GalleryMetadata, GallerySummary, JobEvent, JobRef, JobState, Language,
+        PageArtifact, PageArtifactState, SearchHistoryEntry, SearchRequest, SearchSort,
         SettingsSnapshot, SourcePageNumber, WindowPlacementSnapshot,
     },
 };
@@ -299,6 +304,366 @@ impl StateRepository for SqliteRepository {
             )
             .map_err(map_sqlite_error)?;
         Ok(changed == 1)
+    }
+}
+
+impl AutomationRepository for SqliteRepository {
+    fn favorites_list(&self) -> Result<Vec<FavoriteRecord>, RepositoryError> {
+        let connection = self.connection()?;
+        read_favorites(&connection)
+    }
+
+    fn favorite_set(
+        &self,
+        key: &FavoriteKey,
+        enabled: bool,
+    ) -> Result<FavoriteMutationResult, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        if enabled {
+            transaction
+                .execute(
+                    r#"
+                        INSERT INTO favorites (
+                            namespace, value, revision, created_at, updated_at
+                        ) VALUES (
+                            ?1, ?2, 0,
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                        ON CONFLICT(namespace, value) DO UPDATE SET
+                            revision = favorites.revision + 1,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    "#,
+                    params![key.namespace.as_str(), key.value],
+                )
+                .map_err(map_sqlite_error)?;
+            let favorite = read_favorite(&transaction, key)?.ok_or_else(|| {
+                RepositoryError::Corrupt("favorite upsert did not produce a row".into())
+            })?;
+            transaction.commit().map_err(map_sqlite_error)?;
+            Ok(FavoriteMutationResult {
+                enabled: true,
+                favorite: Some(favorite),
+            })
+        } else {
+            transaction
+                .execute(
+                    "DELETE FROM favorites WHERE namespace = ?1 AND value = ?2",
+                    params![key.namespace.as_str(), key.value],
+                )
+                .map_err(map_sqlite_error)?;
+            transaction.commit().map_err(map_sqlite_error)?;
+            Ok(FavoriteMutationResult {
+                enabled: false,
+                favorite: None,
+            })
+        }
+    }
+
+    fn search_history_record(
+        &self,
+        request: &SearchRequest,
+    ) -> Result<SearchHistoryEntry, RepositoryError> {
+        let canonical = serde_json::to_vec(request)
+            .map_err(|error| RepositoryError::Other(error.to_string()))?;
+        let fingerprint = format!("{:x}", Sha256::digest(canonical));
+        let include_tags = serde_json::to_string(&request.include_tags)
+            .map_err(|error| RepositoryError::Other(error.to_string()))?;
+        let exclude_tags = serde_json::to_string(&request.exclude_tags)
+            .map_err(|error| RepositoryError::Other(error.to_string()))?;
+        let languages = serde_json::to_string(&request.languages)
+            .map_err(|error| RepositoryError::Other(error.to_string()))?;
+        let connection = self.connection()?;
+        connection
+            .execute(
+                r#"
+                    INSERT INTO search_history (
+                        fingerprint, text, include_tags_json, exclude_tags_json,
+                        languages_json, sort, page_size, use_count, last_used_at
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, 1,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                    ON CONFLICT(fingerprint) DO UPDATE SET
+                        use_count = search_history.use_count + 1,
+                        last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                "#,
+                params![
+                    fingerprint,
+                    request.text,
+                    include_tags,
+                    exclude_tags,
+                    languages,
+                    search_sort_text(request.sort),
+                    i64::from(request.page_size),
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        read_search_history_by_fingerprint(&connection, &fingerprint)?.ok_or_else(|| {
+            RepositoryError::Corrupt("search history upsert did not produce a row".into())
+        })
+    }
+
+    fn search_history_list(&self, limit: u32) -> Result<Vec<SearchHistoryEntry>, RepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                r#"
+                    SELECT history_id, text, include_tags_json, exclude_tags_json,
+                           languages_json, sort, page_size, use_count, last_used_at
+                    FROM search_history
+                    ORDER BY last_used_at DESC, history_id DESC
+                    LIMIT ?1
+                "#,
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map([i64::from(limit)], stored_search_history)
+            .map_err(map_sqlite_error)?;
+        rows.map(|row| row.map_err(map_sqlite_error)?.try_into_domain())
+            .collect()
+    }
+
+    fn auto_find_recover_interrupted(&self) -> Result<usize, RepositoryError> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                r#"
+                    UPDATE auto_find_runs
+                    SET revision = revision + 1,
+                        state = 'failed',
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        error_code = 'AUTO_FIND_INTERRUPTED',
+                        error_message = 'The previous Auto Find refresh stopped before completion'
+                    WHERE state = 'running'
+                "#,
+                [],
+            )
+            .map_err(map_sqlite_error)
+    }
+
+    fn auto_find_start(&self, total_favorites: u32) -> Result<AutoFindRun, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        if let Some(existing) = read_running_auto_find(&transaction)? {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(existing);
+        }
+        let run_id = format!("auto-find-{}", Uuid::new_v4());
+        transaction
+            .execute(
+                r#"
+                    INSERT INTO auto_find_runs (
+                        run_id, revision, state, total_favorites,
+                        completed_favorites, candidates_found,
+                        started_at, updated_at
+                    ) VALUES (
+                        ?1, 0, 'running', ?2, 0, 0,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                "#,
+                params![run_id, i64::from(total_favorites)],
+            )
+            .map_err(map_sqlite_error)?;
+        let run = read_auto_find_run(&transaction, &run_id)?.ok_or_else(|| {
+            RepositoryError::Corrupt("Auto Find start did not produce a run".into())
+        })?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(run)
+    }
+
+    fn auto_find_candidate_add(
+        &self,
+        candidate: &AutoFindCandidateRecord,
+    ) -> Result<Option<AutoFindRun>, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        if !auto_find_run_is_running(&transaction, &candidate.run_id)? {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(None);
+        }
+        let excluded: bool = transaction
+            .query_row(
+                r#"
+                    SELECT EXISTS (
+                        SELECT 1 FROM auto_find_exclusions WHERE gallery_id = ?1
+                        UNION ALL
+                        SELECT 1 FROM download_entries WHERE gallery_id = ?1
+                    )
+                "#,
+                [candidate.gallery.id.get()],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite_error)?;
+        if excluded {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(None);
+        }
+        let tags = serde_json::to_string(&candidate.gallery.tags)
+            .map_err(|error| RepositoryError::Other(error.to_string()))?;
+        let series = serde_json::to_string(&candidate.gallery.series)
+            .map_err(|error| RepositoryError::Other(error.to_string()))?;
+        let characters = serde_json::to_string(&candidate.gallery.characters)
+            .map_err(|error| RepositoryError::Other(error.to_string()))?;
+        let inserted = transaction
+            .execute(
+                r#"
+                    INSERT OR IGNORE INTO auto_find_candidates (
+                        run_id, gallery_id, title, artist, group_name, pages,
+                        language, tags_json, series_json, characters_json,
+                        published_rank, popularity,
+                        thumbnail_key, thumbnail_width, thumbnail_height,
+                        favorite_namespace, favorite_value, discovered_at
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                        ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                "#,
+                params![
+                    candidate.run_id,
+                    candidate.gallery.id.get(),
+                    candidate.gallery.title,
+                    candidate.gallery.artist,
+                    candidate.gallery.group,
+                    i64::from(candidate.gallery.pages),
+                    language_text(candidate.gallery.language),
+                    tags,
+                    series,
+                    characters,
+                    i64::from(candidate.gallery.published_rank),
+                    i64::from(candidate.gallery.popularity),
+                    candidate.gallery.thumbnail_key,
+                    i64::from(candidate.gallery.thumbnail_width),
+                    i64::from(candidate.gallery.thumbnail_height),
+                    candidate.matched_favorite.namespace.as_str(),
+                    candidate.matched_favorite.value,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if inserted == 1 {
+            transaction
+                .execute(
+                    r#"
+                        UPDATE auto_find_runs
+                        SET revision = revision + 1,
+                            candidates_found = candidates_found + 1,
+                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        WHERE run_id = ?1 AND state = 'running'
+                    "#,
+                    [candidate.run_id.as_str()],
+                )
+                .map_err(map_sqlite_error)?;
+        }
+        let run = read_auto_find_run(&transaction, &candidate.run_id)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(run.filter(|_| inserted == 1))
+    }
+
+    fn auto_find_progress(
+        &self,
+        run_id: &str,
+        completed_favorites: u32,
+    ) -> Result<Option<AutoFindRun>, RepositoryError> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                r#"
+                    UPDATE auto_find_runs
+                    SET revision = revision + 1,
+                        completed_favorites = MIN(total_favorites, MAX(completed_favorites, ?2)),
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE run_id = ?1 AND state = 'running'
+                "#,
+                params![run_id, i64::from(completed_favorites)],
+            )
+            .map_err(map_sqlite_error)?;
+        read_auto_find_run(&connection, run_id)
+    }
+
+    fn auto_find_finish(
+        &self,
+        run_id: &str,
+        state: AutoFindRunState,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<Option<AutoFindRun>, RepositoryError> {
+        if state == AutoFindRunState::Running {
+            return Err(RepositoryError::Other(
+                "Auto Find finish cannot keep a run in running state".into(),
+            ));
+        }
+        let connection = self.connection()?;
+        connection
+            .execute(
+                r#"
+                    UPDATE auto_find_runs
+                    SET revision = revision + 1,
+                        state = ?2,
+                        completed_favorites = CASE
+                            WHEN ?2 = 'completed' THEN total_favorites
+                            ELSE completed_favorites
+                        END,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        error_code = ?3,
+                        error_message = ?4
+                    WHERE run_id = ?1 AND state = 'running'
+                "#,
+                params![run_id, state.as_str(), error_code, error_message],
+            )
+            .map_err(map_sqlite_error)?;
+        read_auto_find_run(&connection, run_id)
+    }
+
+    fn auto_find_is_running(&self, run_id: &str) -> Result<bool, RepositoryError> {
+        let connection = self.connection()?;
+        auto_find_run_is_running(&connection, run_id)
+    }
+
+    fn auto_find_snapshot(&self) -> Result<AutoFindSnapshot, RepositoryError> {
+        let connection = self.connection()?;
+        read_auto_find_snapshot(&connection)
+    }
+
+    fn auto_find_exclude(
+        &self,
+        gallery_ids: &[GalleryId],
+        reason: &str,
+    ) -> Result<AutoFindExclusionResult, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        for gallery_id in gallery_ids {
+            transaction
+                .execute(
+                    r#"
+                        INSERT INTO auto_find_exclusions (gallery_id, reason, created_at)
+                        VALUES (
+                            ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                        ON CONFLICT(gallery_id) DO UPDATE SET reason = excluded.reason
+                    "#,
+                    params![gallery_id.get(), reason],
+                )
+                .map_err(map_sqlite_error)?;
+        }
+        let snapshot = read_auto_find_snapshot(&transaction)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(AutoFindExclusionResult {
+            excluded_gallery_ids: gallery_ids.to_vec(),
+            snapshot,
+        })
     }
 }
 
@@ -3109,6 +3474,439 @@ fn stored_page_artifact(row: &Row<'_>) -> rusqlite::Result<StoredPageArtifact> {
         source_revision: row.get(7)?,
         verified_at: row.get(8)?,
         excluded: row.get(9)?,
+    })
+}
+
+fn read_favorites(connection: &Connection) -> Result<Vec<FavoriteRecord>, RepositoryError> {
+    let mut statement = connection
+        .prepare(
+            r#"
+                SELECT namespace, value, revision, created_at, updated_at
+                FROM favorites
+                ORDER BY namespace ASC, value COLLATE NOCASE ASC
+            "#,
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([], stored_favorite)
+        .map_err(map_sqlite_error)?;
+    rows.map(|row| row.map_err(map_sqlite_error)?.try_into_domain())
+        .collect()
+}
+
+fn read_favorite(
+    connection: &Connection,
+    key: &FavoriteKey,
+) -> Result<Option<FavoriteRecord>, RepositoryError> {
+    connection
+        .query_row(
+            r#"
+                SELECT namespace, value, revision, created_at, updated_at
+                FROM favorites
+                WHERE namespace = ?1 AND value = ?2
+            "#,
+            params![key.namespace.as_str(), key.value],
+            stored_favorite,
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map(StoredFavorite::try_into_domain)
+        .transpose()
+}
+
+struct StoredFavorite {
+    namespace: String,
+    value: String,
+    revision: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+impl StoredFavorite {
+    fn try_into_domain(self) -> Result<FavoriteRecord, RepositoryError> {
+        Ok(FavoriteRecord {
+            namespace: FavoriteNamespace::from_database(&self.namespace).ok_or_else(|| {
+                RepositoryError::Corrupt(format!(
+                    "favorite namespace {:?} is unsupported",
+                    self.namespace
+                ))
+            })?,
+            value: self.value,
+            revision: stored_u64(self.revision, "favorite revision")?,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+fn stored_favorite(row: &Row<'_>) -> rusqlite::Result<StoredFavorite> {
+    Ok(StoredFavorite {
+        namespace: row.get(0)?,
+        value: row.get(1)?,
+        revision: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
+
+fn read_search_history_by_fingerprint(
+    connection: &Connection,
+    fingerprint: &str,
+) -> Result<Option<SearchHistoryEntry>, RepositoryError> {
+    connection
+        .query_row(
+            r#"
+                SELECT history_id, text, include_tags_json, exclude_tags_json,
+                       languages_json, sort, page_size, use_count, last_used_at
+                FROM search_history
+                WHERE fingerprint = ?1
+            "#,
+            [fingerprint],
+            stored_search_history,
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map(StoredSearchHistory::try_into_domain)
+        .transpose()
+}
+
+struct StoredSearchHistory {
+    history_id: i64,
+    text: String,
+    include_tags_json: String,
+    exclude_tags_json: String,
+    languages_json: String,
+    sort: String,
+    page_size: i64,
+    use_count: i64,
+    last_used_at: String,
+}
+
+impl StoredSearchHistory {
+    fn try_into_domain(self) -> Result<SearchHistoryEntry, RepositoryError> {
+        Ok(SearchHistoryEntry {
+            history_id: self.history_id,
+            text: self.text,
+            include_tags: serde_json::from_str(&self.include_tags_json)
+                .map_err(domain_corruption)?,
+            exclude_tags: serde_json::from_str(&self.exclude_tags_json)
+                .map_err(domain_corruption)?,
+            languages: serde_json::from_str(&self.languages_json).map_err(domain_corruption)?,
+            sort: parse_search_sort(&self.sort)?,
+            page_size: stored_u32(self.page_size, "search history page size")?,
+            use_count: stored_u64(self.use_count, "search history use count")?,
+            last_used_at: self.last_used_at,
+        })
+    }
+}
+
+fn stored_search_history(row: &Row<'_>) -> rusqlite::Result<StoredSearchHistory> {
+    Ok(StoredSearchHistory {
+        history_id: row.get(0)?,
+        text: row.get(1)?,
+        include_tags_json: row.get(2)?,
+        exclude_tags_json: row.get(3)?,
+        languages_json: row.get(4)?,
+        sort: row.get(5)?,
+        page_size: row.get(6)?,
+        use_count: row.get(7)?,
+        last_used_at: row.get(8)?,
+    })
+}
+
+fn search_sort_text(sort: SearchSort) -> &'static str {
+    match sort {
+        SearchSort::Recent => "recent",
+        SearchSort::PopularToday => "popular_today",
+        SearchSort::PopularWeek => "popular_week",
+        SearchSort::PopularMonth => "popular_month",
+        SearchSort::PopularYear => "popular_year",
+        SearchSort::Random => "random",
+    }
+}
+
+fn parse_search_sort(value: &str) -> Result<SearchSort, RepositoryError> {
+    match value {
+        "recent" => Ok(SearchSort::Recent),
+        "popular_today" => Ok(SearchSort::PopularToday),
+        "popular_week" => Ok(SearchSort::PopularWeek),
+        "popular_month" => Ok(SearchSort::PopularMonth),
+        "popular_year" => Ok(SearchSort::PopularYear),
+        "random" => Ok(SearchSort::Random),
+        _ => Err(RepositoryError::Corrupt(format!(
+            "search sort {value:?} is unsupported"
+        ))),
+    }
+}
+
+fn language_text(language: Language) -> &'static str {
+    match language {
+        Language::Korean => "korean",
+        Language::Japanese => "japanese",
+        Language::Chinese => "chinese",
+        Language::English => "english",
+    }
+}
+
+fn parse_language(value: &str) -> Result<Language, RepositoryError> {
+    match value {
+        "korean" => Ok(Language::Korean),
+        "japanese" => Ok(Language::Japanese),
+        "chinese" => Ok(Language::Chinese),
+        "english" => Ok(Language::English),
+        _ => Err(RepositoryError::Corrupt(format!(
+            "gallery language {value:?} is unsupported"
+        ))),
+    }
+}
+
+fn auto_find_run_is_running(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<bool, RepositoryError> {
+    connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM auto_find_runs WHERE run_id = ?1 AND state = 'running')",
+            [run_id],
+            |row| row.get(0),
+        )
+        .map_err(map_sqlite_error)
+}
+
+fn read_running_auto_find(connection: &Connection) -> Result<Option<AutoFindRun>, RepositoryError> {
+    connection
+        .query_row(
+            r#"
+                SELECT run_id, revision, state, total_favorites,
+                       completed_favorites, candidates_found,
+                       started_at, updated_at, finished_at,
+                       error_code, error_message
+                FROM auto_find_runs
+                WHERE state = 'running'
+                LIMIT 1
+            "#,
+            [],
+            stored_auto_find_run,
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map(StoredAutoFindRun::try_into_domain)
+        .transpose()
+}
+
+fn read_auto_find_run(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Option<AutoFindRun>, RepositoryError> {
+    connection
+        .query_row(
+            r#"
+                SELECT run_id, revision, state, total_favorites,
+                       completed_favorites, candidates_found,
+                       started_at, updated_at, finished_at,
+                       error_code, error_message
+                FROM auto_find_runs
+                WHERE run_id = ?1
+            "#,
+            [run_id],
+            stored_auto_find_run,
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map(StoredAutoFindRun::try_into_domain)
+        .transpose()
+}
+
+struct StoredAutoFindRun {
+    run_id: String,
+    revision: i64,
+    state: String,
+    total_favorites: i64,
+    completed_favorites: i64,
+    candidates_found: i64,
+    started_at: String,
+    updated_at: String,
+    finished_at: Option<String>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+impl StoredAutoFindRun {
+    fn try_into_domain(self) -> Result<AutoFindRun, RepositoryError> {
+        Ok(AutoFindRun {
+            run_id: self.run_id,
+            revision: stored_u64(self.revision, "Auto Find revision")?,
+            state: AutoFindRunState::from_database(&self.state).ok_or_else(|| {
+                RepositoryError::Corrupt(format!("Auto Find state {:?} is unsupported", self.state))
+            })?,
+            total_favorites: stored_u32(self.total_favorites, "Auto Find favorite count")?,
+            completed_favorites: stored_u32(
+                self.completed_favorites,
+                "Auto Find completed favorite count",
+            )?,
+            candidates_found: stored_u32(self.candidates_found, "Auto Find candidate count")?,
+            started_at: self.started_at,
+            updated_at: self.updated_at,
+            finished_at: self.finished_at,
+            error_code: self.error_code,
+            error_message: self.error_message,
+        })
+    }
+}
+
+fn stored_auto_find_run(row: &Row<'_>) -> rusqlite::Result<StoredAutoFindRun> {
+    Ok(StoredAutoFindRun {
+        run_id: row.get(0)?,
+        revision: row.get(1)?,
+        state: row.get(2)?,
+        total_favorites: row.get(3)?,
+        completed_favorites: row.get(4)?,
+        candidates_found: row.get(5)?,
+        started_at: row.get(6)?,
+        updated_at: row.get(7)?,
+        finished_at: row.get(8)?,
+        error_code: row.get(9)?,
+        error_message: row.get(10)?,
+    })
+}
+
+fn read_auto_find_snapshot(connection: &Connection) -> Result<AutoFindSnapshot, RepositoryError> {
+    let run = connection
+        .query_row(
+            r#"
+                SELECT run_id, revision, state, total_favorites,
+                       completed_favorites, candidates_found,
+                       started_at, updated_at, finished_at,
+                       error_code, error_message
+                FROM auto_find_runs
+                ORDER BY started_at DESC, run_id DESC
+                LIMIT 1
+            "#,
+            [],
+            stored_auto_find_run,
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map(StoredAutoFindRun::try_into_domain)
+        .transpose()?;
+    let Some(run) = run else {
+        return Ok(AutoFindSnapshot {
+            run: None,
+            candidates: Vec::new(),
+        });
+    };
+    let mut statement = connection
+        .prepare(
+            r#"
+                SELECT run_id, gallery_id, title, artist, group_name, pages,
+                       language, tags_json, series_json, characters_json,
+                       published_rank, popularity,
+                       thumbnail_key, thumbnail_width, thumbnail_height,
+                       favorite_namespace, favorite_value, discovered_at
+                FROM auto_find_candidates candidate
+                WHERE run_id = ?1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM auto_find_exclusions exclusion
+                      WHERE exclusion.gallery_id = candidate.gallery_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM download_entries download
+                      WHERE download.gallery_id = candidate.gallery_id
+                  )
+                ORDER BY published_rank DESC, gallery_id DESC
+            "#,
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([run.run_id.as_str()], stored_auto_find_candidate)
+        .map_err(map_sqlite_error)?;
+    let candidates = rows
+        .map(|row| row.map_err(map_sqlite_error)?.try_into_domain())
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AutoFindSnapshot {
+        run: Some(run),
+        candidates,
+    })
+}
+
+struct StoredAutoFindCandidate {
+    run_id: String,
+    gallery_id: i64,
+    title: String,
+    artist: String,
+    group: Option<String>,
+    pages: i64,
+    language: String,
+    tags_json: String,
+    series_json: String,
+    characters_json: String,
+    published_rank: i64,
+    popularity: i64,
+    thumbnail_key: Option<String>,
+    thumbnail_width: i64,
+    thumbnail_height: i64,
+    favorite_namespace: String,
+    favorite_value: String,
+    discovered_at: String,
+}
+
+impl StoredAutoFindCandidate {
+    fn try_into_domain(self) -> Result<AutoFindCandidate, RepositoryError> {
+        Ok(AutoFindCandidate {
+            run_id: self.run_id,
+            gallery: GallerySummary {
+                id: GalleryId::new(self.gallery_id).map_err(domain_corruption)?,
+                title: self.title,
+                artist: self.artist,
+                group: self.group,
+                pages: stored_u32(self.pages, "Auto Find page count")?,
+                language: parse_language(&self.language)?,
+                tags: serde_json::from_str(&self.tags_json).map_err(domain_corruption)?,
+                series: serde_json::from_str(&self.series_json).map_err(domain_corruption)?,
+                characters: serde_json::from_str(&self.characters_json)
+                    .map_err(domain_corruption)?,
+                published_rank: stored_u32(self.published_rank, "Auto Find published rank")?,
+                popularity: stored_u32(self.popularity, "Auto Find popularity")?,
+                thumbnail_key: self.thumbnail_key,
+                thumbnail_width: stored_u32(self.thumbnail_width, "Auto Find thumbnail width")?,
+                thumbnail_height: stored_u32(self.thumbnail_height, "Auto Find thumbnail height")?,
+            },
+            matched_favorite: FavoriteKey {
+                namespace: FavoriteNamespace::from_database(&self.favorite_namespace).ok_or_else(
+                    || {
+                        RepositoryError::Corrupt(format!(
+                            "Auto Find favorite namespace {:?} is unsupported",
+                            self.favorite_namespace
+                        ))
+                    },
+                )?,
+                value: self.favorite_value,
+            },
+            discovered_at: self.discovered_at,
+        })
+    }
+}
+
+fn stored_auto_find_candidate(row: &Row<'_>) -> rusqlite::Result<StoredAutoFindCandidate> {
+    Ok(StoredAutoFindCandidate {
+        run_id: row.get(0)?,
+        gallery_id: row.get(1)?,
+        title: row.get(2)?,
+        artist: row.get(3)?,
+        group: row.get(4)?,
+        pages: row.get(5)?,
+        language: row.get(6)?,
+        tags_json: row.get(7)?,
+        series_json: row.get(8)?,
+        characters_json: row.get(9)?,
+        published_rank: row.get(10)?,
+        popularity: row.get(11)?,
+        thumbnail_key: row.get(12)?,
+        thumbnail_width: row.get(13)?,
+        thumbnail_height: row.get(14)?,
+        favorite_namespace: row.get(15)?,
+        favorite_value: row.get(16)?,
+        discovered_at: row.get(17)?,
     })
 }
 

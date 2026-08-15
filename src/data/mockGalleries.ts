@@ -13,6 +13,8 @@ export const mockGalleries: Gallery[] = [
     coverIndex: 0,
     language: "korean",
     tags: ["female:glasses", "female:long_hair", "male:suit", "mystery", "full_color"],
+    series: ["rain archives"],
+    characters: ["mira lane", "ren kujo"],
     favorite: true,
     download: { entryId: "entry-4051038", state: "review_required" },
   },
@@ -27,6 +29,8 @@ export const mockGalleries: Gallery[] = [
     coverIndex: 1,
     language: "korean",
     tags: ["female:swimsuit", "male:swimsuit", "female:short_hair", "school", "full_color"],
+    series: ["pool notes"],
+    characters: ["aoi mizuno"],
     download: { entryId: "entry-4051027", state: "downloading", progress: 41 },
   },
   {
@@ -41,6 +45,8 @@ export const mockGalleries: Gallery[] = [
     coverIndex: 2,
     language: "korean",
     tags: ["female:schoolgirl_uniform", "female:short_hair", "library", "mystery"],
+    series: ["paper city"],
+    characters: ["hana ito"],
     download: { entryId: "entry-4050974", state: "completed", progress: 100 },
   },
   {
@@ -54,6 +60,8 @@ export const mockGalleries: Gallery[] = [
     coverIndex: 3,
     language: "korean",
     tags: ["male:uniform", "male:short_hair", "science_fiction", "train", "full_color"],
+    series: [],
+    characters: ["conductor 19"],
   },
   {
     id: galleryId(4050891),
@@ -67,6 +75,8 @@ export const mockGalleries: Gallery[] = [
     coverIndex: 4,
     language: "korean",
     tags: ["female:kimono", "female:hair_ornament", "festival", "romance", "full_color"],
+    series: ["festival letters"],
+    characters: ["akane"],
     favorite: true,
   },
   {
@@ -81,6 +91,8 @@ export const mockGalleries: Gallery[] = [
     coverIndex: 5,
     language: "korean",
     tags: ["male:dark_hair", "flowers", "monochrome", "artbook"],
+    series: [],
+    characters: [],
     download: { entryId: "entry-4050806", state: "completed", progress: 100 },
   },
   {
@@ -94,6 +106,8 @@ export const mockGalleries: Gallery[] = [
     coverIndex: 0,
     language: "korean",
     tags: ["female:coat", "male:suit", "rain", "drama", "night"],
+    series: ["rain archives"],
+    characters: ["mira lane"],
     favorite: true,
     download: { entryId: "entry-4050754", state: "failed", errorCode: "SOURCE_TIMEOUT" },
   },
@@ -108,6 +122,8 @@ export const mockGalleries: Gallery[] = [
     coverIndex: 1,
     language: "korean",
     tags: ["female:swimsuit", "male:swimsuit", "sports", "school"],
+    series: ["pool notes"],
+    characters: ["aoi mizuno"],
   },
 ];
 

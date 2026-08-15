@@ -53,6 +53,8 @@ fn parses_galleryinfo_wrapper_into_typed_projections() {
     let summary = metadata.summary();
     assert_eq!(summary.primary_artist.as_deref(), Some("Example Artist"));
     assert_eq!(summary.primary_group.as_deref(), Some("Example Group"));
+    assert_eq!(summary.series, vec!["original"]);
+    assert_eq!(summary.characters, vec!["Example Character"]);
     assert_eq!(summary.page_count, 2);
     assert_eq!(summary.cover.as_ref().map(|page| page.source_page), Some(1));
     assert_eq!(

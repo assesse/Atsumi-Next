@@ -40,7 +40,11 @@ UI components
 ### Application
 
 - SearchGalleries
+- SetFavorite
+- ListSearchHistory
 - RefreshFavoriteArtists
+- CancelAutoFind
+- ExcludeAutoFindCandidates
 - QueueDownloads
 - ResumeInterruptedJobs
 - VerifyDownload
@@ -51,7 +55,9 @@ UI components
 
 ### Domain
 
-- Gallery와 GalleryMetadata
+- Gallery와 GalleryMetadata(`series[]`, `characters[]` 포함)
+- FavoriteKey와 SearchHistoryEntry
+- AutoFindRun과 AutoFindCandidate
 - DownloadJob과 JobStep
 - DownloadArtifact와 PageArtifact
 - DuplicateCandidate와 Evidence
@@ -128,7 +134,7 @@ type JobEvent = {
 
 ## 데이터 소유권
 
-- SQLite: 설정, Gallery snapshot, 다운로드, job, page, 판정, 제외, 즐겨찾기의 canonical source
+- SQLite: 설정, Gallery snapshot, 다운로드, job, page, 판정, 제외, 즐겨찾기, 검색 이력과 Auto Find run/후보의 canonical source
 - 실제 폴더: 다운로드 artifact
 - 폴더 manifest: 이식성과 복구를 위한 파생 metadata
 - thumbnail cache: 언제든 재생성 가능한 cache
@@ -158,6 +164,19 @@ type JobEvent = {
 - retryable failure는 짧은 negative-cache TTL 뒤 한정 재시도하고, permanent failure는 더 긴 negative cache로 반복 원격 호출을 막는다. WebView decode 실패는 해당 key cache를 무효화한 뒤 한 번만 재해석한다.
 - production Tauri는 `HitomiLiveAdapter` 하나를 `SearchRepository`와 `ThumbnailResolver` 양쪽에 공유 주입한다. 브라우저 review mode와 단위 테스트만 fixture resolver를 사용한다.
 - resolver는 HTTPS allowlist·redirect 재검증·응답 크기·MIME/signature·decode dimension/allocation을 검사하고 WebP 후보를 순서대로 시도한다. thumbnail은 재생성 가능한 bounded memory cache이며, 영속 파일은 검증된 download artifact만 소유한다.
+
+## 즐겨찾기·검색 이력·Auto Find
+
+- 작가·그룹·시리즈·캐릭터·태그 즐겨찾기와 성공한 명시적 검색 이력은 SQLite가 소유한다. frontend set과 suggestion 목록은 backend snapshot의 projection이며 localStorage를 canonical source로 사용하지 않는다. 검색·상세·Related의 `GallerySummary`는 `series[]`와 `characters[]`를 항상 전달한다.
+- 검색 입력은 local draft일 뿐이다. `search_submit`이 성공한 뒤 non-empty text/include/exclude가 있는 요청만 이력에 기록하며, 자동 Recent와 key 입력은 원격 요청이나 이력 쓰기를 만들지 않는다.
+- `AutoFindSupervisor`는 프로세스에 하나만 두고 명시적 `auto_find_refresh`에서만 background worker를 시작한다. 동시에 하나의 run만 허용하며 실행 중 재요청은 기존 run을 재사용한다.
+- 갱신 대상은 현재 `artist` 즐겨찾기다. 각 작가의 `artist:{value}` 검색은 production의 같은 `HitomiLiveAdapter`와 공용 HTTP scheduler를 사용한다. 별도 HTTP client나 thumbnail coordinator를 만들지 않는다.
+- favorite 값은 사람이 읽는 정규화 공백으로 저장하고 source token을 만들 때 공백을 underscore로 바꾼다. `artist`, `group`, `series`, `character`, `tag` prefix는 명시적 Nozomi namespace로 직렬화되며 unknown prefix만 residual text filter로 남긴다.
+- run, 진행률, 후보 metadata snapshot과 gallery 제외는 SQLite에 기록한다. schema v11 후보에는 series/characters JSON도 들어가며 이전 v10 후보는 `[]` 기본값으로 보존한다. `auto-find:changed`는 시작·작가별 진행·최종 상태에서 보내는 bounded UI 갱신 신호일 뿐이며, 앱 재시작이나 event 유실 뒤에는 `auto_find_snapshot`으로 최신 run과 후보를 복원한다.
+- cancel token과 DB run state를 함께 확인해 취소 뒤 늦은 page를 저장하지 않는다. 정상 앱 종료는 active run을 `cancelled/AUTO_FIND_APP_EXIT`, 비정상 종료 뒤 startup recovery는 남은 run을 `failed/AUTO_FIND_INTERRUPTED`로 종결하고 부분 후보를 보존한다.
+- 후보 insert와 snapshot은 모든 download entry와 명시적 Auto Find exclusion을 제외한다. Phase 5의 숨김·중복 decision table이 생기기 전에는 해당 판정을 추측하지 않는다.
+- 전체/작가별 묶음, 결과 문자열 검색과 언어 filter는 이미 저장된 후보에 대한 frontend local projection이다. 이 조작은 source request를 만들지 않는다. 후보 일괄 다운로드는 기존 idempotent download queue use case를 재사용한다.
+- 전체 기간 조회는 source가 보고한 page를 순회하되 안전 상한은 작가당 250 page, page size는 200이다. 상한을 넘는 초대형 작가 결과와 Phase 5 decision 연동은 명시된 현재 제한이다.
 
 ## Download artifact pipeline
 

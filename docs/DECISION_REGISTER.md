@@ -47,6 +47,13 @@
 | D-127 | 다운로드 page는 source page 번호를 immutable identity로 두고, `.part`→decode/WebP→SHA-256→atomic rename→manifest 검증 뒤에만 완료한다. | 2026-08-15 Milestone C 구현 |
 | D-128 | quarantine과 undo는 filesystem move 전 pending DB record를 만드는 crash-safe saga로 처리한다. 원본/격리 경로가 모두 있거나 모두 없으면 자동 삭제·덮어쓰지 않는다. | 2026-08-15 Milestone C 구현 |
 | D-129 | 앱 시작 시 유효한 download root에 대해 quarantine saga와 artifact 무결성을 먼저 reconcile하고, 그 뒤 interrupted job을 verified page checkpoint부터 자동 재개한다. | 2026-08-15 Milestone C 구현 |
+| D-130 | 검색 입력은 local draft로 유지하고, 원격 요청은 사용자가 검색을 제출하거나 `즐겨찾기 작가 갱신`을 명시적으로 실행할 때만 만든다. | 2026-08-15 Milestone D 구현 지시 |
+| D-131 | 작가·그룹·시리즈·캐릭터·태그 즐겨찾기를 SQLite에 영속하되 Auto Find 원격 갱신의 대상은 작가 즐겨찾기로 한정한다. | 2026-08-15 Milestone D 구현 |
+| D-132 | 검색 이력과 Auto Find run·진행률·후보·명시적 제외를 SQLite canonical state로 저장한다. event는 갱신 신호이고 앱 재시작은 snapshot으로 복원한다. | 2026-08-15 Milestone D 구현 |
+| D-133 | Auto Find 후보에서 download entry와 명시적 gallery 제외를 먼저 제거한다. 숨김·중복 판정은 존재하지 않는 상태를 추측하지 않고 Phase 5의 versioned decision schema가 추가될 때 결합한다. | 2026-08-15 Milestone D 안전 경계 |
+| D-134 | Auto Find 취소는 run 상태와 cancellation token을 함께 사용하며, 앱 종료 중 run은 cancelled, 비정상 종료 뒤 남은 running run은 failed로 종결하고 부분 후보는 보존한다. | 2026-08-15 Milestone D 구현 |
+| D-135 | `GallerySummary`와 `GalleryDetail`은 시리즈·캐릭터를 항상 배열로 전달하고, 검색·상세·Related·Auto Find 복원과 favorite 표시가 같은 metadata를 사용한다. 기존 v10 후보는 v11 migration에서 빈 배열로 안전 보존한다. | 2026-08-15 Milestone D 구현 |
+| D-136 | 여러 단어 metadata는 favorite 값에는 정규화된 공백으로 저장하고 source 검색 token에는 underscore를 사용한다. `series:`와 `character:`는 각 Hitomi Nozomi namespace endpoint로 직렬화한다. | 2026-08-15 Milestone D source 계약 |
 
 ## 제안
 

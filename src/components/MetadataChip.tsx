@@ -31,6 +31,7 @@ function MetadataIcon({ kind }: MetadataIconProps) {
 
 type MetadataChipProps = {
   value: string;
+  searchValue?: string;
   label?: string;
   favorite?: boolean;
   kind?: "meta-chip" | "tag" | "byline";
@@ -41,6 +42,7 @@ type MetadataChipProps = {
 
 export function MetadataChip({
   value,
+  searchValue,
   label,
   favorite = false,
   kind = "meta-chip",
@@ -67,7 +69,7 @@ export function MetadataChip({
       onClickCapture={onClickCapture}
       onClick={(event) => {
         event.stopPropagation();
-        onSearch(value);
+        onSearch(searchValue ?? value);
       }}
       onContextMenu={handleContextMenu}
     >

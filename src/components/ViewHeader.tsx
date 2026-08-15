@@ -1,23 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import type { SearchRequest } from "../api/contracts";
 import type { Language, SearchUi, ViewId } from "../core/types";
 import { languageOrder, languagePresentation } from "../data/languages";
 import { FluentIcon } from "./FluentIcon";
 
-type Suggestion = {
+export type SearchSuggestion = {
   type: "HISTORY" | "ARTIST" | "TAG";
   value: string;
   extra: string;
   favorite?: boolean;
+  request?: SearchRequest;
 };
-
-const allSuggestions: Suggestion[] = [
-  { type: "HISTORY", value: "artist:serein", extra: "최근 검색어", favorite: true },
-  { type: "HISTORY", value: "language:korean", extra: "최근 검색어" },
-  { type: "ARTIST", value: "artist:akari", extra: "218 galleries", favorite: true },
-  { type: "ARTIST", value: "artist:paperlane", extra: "87 galleries" },
-  { type: "TAG", value: "female:glasses", extra: "12,482 galleries", favorite: true },
-  { type: "TAG", value: "female:swimsuit", extra: "31,028 galleries" },
-];
 
 const languageOptions = languageOrder.map((value) => ({ value, ...languagePresentation[value] }));
 
@@ -30,11 +23,13 @@ const placeholders: Record<ViewId, string> = {
 type ViewHeaderProps = {
   view: ViewId;
   search: SearchUi;
+  suggestions: SearchSuggestion[];
   activityCount: number;
   activityOpen: boolean;
   onDraft: (value: string) => void;
   onSuggestions: (open: boolean, active?: number | null) => void;
   onCommit: (value?: string) => void;
+  onSelectSuggestion: (suggestion: SearchSuggestion) => void;
   onLanguages: (languages: Language[]) => void;
   onRefresh: () => void;
   onActivity: () => void;
@@ -44,11 +39,13 @@ type ViewHeaderProps = {
 export function ViewHeader({
   view,
   search,
+  suggestions,
   activityCount,
   activityOpen,
   onDraft,
   onSuggestions,
   onCommit,
+  onSelectSuggestion,
   onLanguages,
   onRefresh,
   onActivity,
@@ -57,17 +54,17 @@ export function ViewHeader({
   const host = useRef<HTMLElement>(null);
   const languageButton = useRef<HTMLButtonElement>(null);
   const [languageOpen, setLanguageOpen] = useState(false);
-  const suggestions = useMemo(() => {
+  const visibleSuggestions = useMemo(() => {
     const needle = search.draft.trim().toLocaleLowerCase();
-    if (!needle) return allSuggestions.filter((item) => item.type === "HISTORY").slice(0, 7);
-    return allSuggestions
+    if (!needle) return suggestions.slice(0, 7);
+    return suggestions
       .filter((item) => item.value.toLocaleLowerCase().includes(needle))
       .sort((left, right) => {
         const leftPrefix = left.value.toLocaleLowerCase().startsWith(needle) ? 0 : 1;
         const rightPrefix = right.value.toLocaleLowerCase().startsWith(needle) ? 0 : 1;
         return leftPrefix - rightPrefix;
       });
-  }, [search.draft]);
+  }, [search.draft, suggestions]);
 
   useEffect(() => {
     const closeTransient = (event: PointerEvent) => {
@@ -96,10 +93,9 @@ export function ViewHeader({
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (search.activeSuggestion !== null) {
-      const item = suggestions[search.activeSuggestion];
+      const item = visibleSuggestions[search.activeSuggestion];
       if (item) {
-        onDraft(item.value);
-        onSuggestions(false);
+        onSelectSuggestion(item);
         return;
       }
     }
@@ -107,15 +103,15 @@ export function ViewHeader({
   };
 
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "ArrowDown" && suggestions.length) {
+    if (event.key === "ArrowDown" && visibleSuggestions.length) {
       event.preventDefault();
-      const next = search.activeSuggestion === null ? 0 : (search.activeSuggestion + 1) % suggestions.length;
+      const next = search.activeSuggestion === null ? 0 : (search.activeSuggestion + 1) % visibleSuggestions.length;
       onSuggestions(true, next);
-    } else if (event.key === "ArrowUp" && suggestions.length) {
+    } else if (event.key === "ArrowUp" && visibleSuggestions.length) {
       event.preventDefault();
       const next = search.activeSuggestion === null
-        ? suggestions.length - 1
-        : (search.activeSuggestion - 1 + suggestions.length) % suggestions.length;
+        ? visibleSuggestions.length - 1
+        : (search.activeSuggestion - 1 + visibleSuggestions.length) % visibleSuggestions.length;
       onSuggestions(true, next);
     } else if (event.key === "Escape") {
       onSuggestions(false);
@@ -141,7 +137,7 @@ export function ViewHeader({
           placeholder={placeholders[view]}
           aria-label="검색"
           aria-controls="search-suggestions"
-          aria-expanded={search.suggestionsOpen && suggestions.length > 0}
+          aria-expanded={search.suggestionsOpen && visibleSuggestions.length > 0}
           aria-activedescendant={
             search.activeSuggestion === null ? undefined : `search-suggestion-${search.activeSuggestion}`
           }
@@ -152,9 +148,9 @@ export function ViewHeader({
           }}
           onKeyDown={keyDown}
         />
-        {search.suggestionsOpen && suggestions.length ? (
+        {search.suggestionsOpen && visibleSuggestions.length ? (
           <div className="suggestions" id="search-suggestions" role="listbox" aria-label="검색 제안">
-            {suggestions.map((item, index) => (
+            {visibleSuggestions.map((item, index) => (
               <button
                 key={`${item.type}-${item.value}`}
                 id={`search-suggestion-${index}`}
@@ -167,8 +163,7 @@ export function ViewHeader({
                 }`}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => {
-                  onDraft(item.value);
-                  onSuggestions(false);
+                  onSelectSuggestion(item);
                 }}
               >
                 <span className="suggestion-type">{item.type}</span>

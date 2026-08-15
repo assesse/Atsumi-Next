@@ -313,7 +313,7 @@ pub(super) fn tag_nozomi_path(value: &str) -> Option<String> {
     (!normalized.is_empty()).then(|| format!("n/tag/{}-all.nozomi", percent_encode(&normalized)))
 }
 
-fn prefixed_nozomi_path(value: &str) -> Option<String> {
+pub(super) fn prefixed_nozomi_path(value: &str) -> Option<String> {
     let (prefix, name) = value.split_once(':')?;
     let prefix = prefix.trim().to_ascii_lowercase();
     let name = percent_encode(&normalize_text(name));
@@ -325,6 +325,8 @@ fn prefixed_nozomi_path(value: &str) -> Option<String> {
         "tag" => Some(format!("n/tag/{name}-all.nozomi")),
         "artist" => Some(format!("n/artist/{name}-all.nozomi")),
         "group" => Some(format!("n/group/{name}-all.nozomi")),
+        "series" => Some(format!("n/series/{name}-all.nozomi")),
+        "character" => Some(format!("n/character/{name}-all.nozomi")),
         _ => None,
     }
 }
@@ -406,6 +408,8 @@ fn gallery_summary(
             .cloned()
             .unwrap_or_else(|| "Unknown artist".to_owned()),
         group: metadata.groups.first().cloned(),
+        series: metadata.series.clone(),
+        characters: metadata.characters.clone(),
         pages: metadata.pages.len() as u32,
         language: domain_language(metadata.language.as_deref()),
         tags: metadata

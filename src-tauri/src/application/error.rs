@@ -47,6 +47,8 @@ pub enum ApplicationError {
         state: JobState,
         operation: &'static str,
     },
+    #[error("no Auto Find refresh is currently running")]
+    AutoFindNotRunning,
     #[error(transparent)]
     DownloadPipeline(#[from] DownloadPipelineError),
     #[error(transparent)]

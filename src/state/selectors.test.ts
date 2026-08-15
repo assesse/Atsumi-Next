@@ -38,4 +38,16 @@ describe("gallery selectors", () => {
       "The Green Window",
     ]);
   });
+
+  it.each([
+    ["series:rain_archives", ["Archive of Rain", "The Last Tram"]],
+    ["character:aoi_mizuno", ["Summer Pool Notes", "Blue Lane"]],
+  ])("filters local results by %s metadata", (value, titles) => {
+    const searched = uiReducer(initialUiState, {
+      type: "search.commit",
+      view: "explore",
+      value,
+    });
+    expect(visibleGalleries(searched, mockGalleries).map((gallery) => gallery.title)).toEqual(titles);
+  });
 });

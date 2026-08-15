@@ -1,4 +1,5 @@
 mod artifact;
+mod auto_find;
 mod download;
 mod gallery;
 mod job;
@@ -11,6 +12,11 @@ pub use artifact::{
     ArtifactManifestPage, ArtifactRelativePath, ArtifactSha256, ArtifactStorageFormat,
     DownloadArtifact, DownloadArtifactState, DownloadEntryId, PageArtifact, PageArtifactState,
     ARTIFACT_MANIFEST_SCHEMA_VERSION, HASH_PROFILE_VERSION,
+};
+pub use auto_find::{
+    AutoFindCandidate, AutoFindCandidateRecord, AutoFindExclusionResult, AutoFindRun,
+    AutoFindRunState, AutoFindSnapshot, FavoriteKey, FavoriteMutationResult, FavoriteNamespace,
+    FavoriteRecord, SearchHistoryEntry,
 };
 pub use download::{DownloadEntry, DownloadListRequest, DownloadPage, DownloadReviewKind};
 pub use gallery::{Gallery, GalleryId, GalleryMetadata, GalleryPageId, SourcePageNumber};

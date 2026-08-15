@@ -1,6 +1,6 @@
 # API Contract V2
 
-Phase 3 완료 시점에 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다. 아직 구현되지 않은 후속 command는 표에서 별도로 구분한다.
+Phase 4의 즐겨찾기·검색 이력·Auto Find까지 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다. 아직 구현되지 않은 중복 판정·Classic import command는 후속 계약으로 구분한다.
 
 ## 공통 규칙
 
@@ -27,7 +27,7 @@ type ApiError = {
 };
 ```
 
-## Phase 3 필수 command
+## 현재 구현 command
 
 | Command | Payload | Result | 멱등성 |
 |---|---|---|---|
@@ -36,6 +36,13 @@ type ApiError = {
 | `search_submit` | `SearchRequest` | `{ queryId, firstPage }` | query key 기반 |
 | `search_page_get` | `{ queryId, page }` | `GalleryPage` | 예 |
 | `gallery_detail_get` | `{ galleryId }` | `GalleryDetail` | 예 |
+| `favorites_list` | 없음 | `FavoriteRecord[]` | 예 |
+| `favorite_set` | `{ key, enabled }` | `FavoriteMutationResult` | 상태 기준; enabled 반복 시 revision 증가 |
+| `search_history_list` | `{ limit }` | `SearchHistoryEntry[]` | 예 |
+| `auto_find_snapshot` | 없음 | `AutoFindSnapshot` | 예 |
+| `auto_find_refresh` | 없음 | `AutoFindRun` | 실행 중인 run은 재사용, 완료 뒤에는 새 run |
+| `auto_find_cancel` | 없음 | `AutoFindRun` | 실행 중 run에 한 번 적용 |
+| `auto_find_exclude` | `{ galleryIds, reason }` | `AutoFindExclusionResult` | gallery ID 기준 upsert |
 | `download_queue_add` | `{ galleries: GalleryId[], requestId }` | `DownloadEntry[]` | requestId + active gallery 기반 |
 | `download_entries_list` | `DownloadListRequest` | `DownloadPage` | 예 |
 | `download_retry` | `{ entryIds }` | `JobRef[]` | 현재 active job 재사용 |
@@ -58,6 +65,7 @@ type ApiError = {
 | `download:changed` | download entry projection의 부분 변경 |
 | `thumbnail:ready` | requestId, gallery/page key, delivery 또는 typed failure |
 | `settings:changed` | 다른 window에서 바뀐 설정 snapshot |
+| `auto-find:changed` | Auto Find run state, progress, candidate count와 revision |
 
 이벤트가 유실돼도 `list/get` command로 현재 상태를 다시 구성할 수 있어야 한다.
 
@@ -75,6 +83,107 @@ type SearchRequest = {
 ```
 
 backend는 최종 serialized query와 각 clause가 server/client 중 어디에 적용됐는지 diagnostic에 남긴다.
+
+## Gallery summary·detail metadata
+
+```ts
+type GallerySummary = {
+  id: GalleryId;
+  title: string;
+  artist: string;
+  group?: string;
+  series: string[];
+  characters: string[];
+  pages: number;
+  language: "korean" | "japanese" | "chinese" | "english";
+  tags: string[];
+  publishedRank: number;
+  popularity: number;
+  thumbnailKey?: string;
+  thumbnailWidth: number;
+  thumbnailHeight: number;
+};
+
+type GalleryDetail = GallerySummary & {
+  related: GallerySummary[];
+};
+```
+
+`series`와 `characters`는 검색·상세·Related·Auto Find restore에서 항상 존재하는 배열이며 값이 없으면 `[]`다. metadata 검색은 공백을 underscore로 바꾼 `series:rain_archives`, `character:mira_lane` 같은 token을 사용한다. production serializer는 이를 각각 Hitomi `n/series/*-all.nozomi`, `n/character/*-all.nozomi` namespace endpoint로 변환하고 값은 정규화·percent-encode한다.
+
+## 즐겨찾기·검색 이력·Auto Find 계약
+
+```ts
+type FavoriteNamespace = "artist" | "group" | "series" | "character" | "tag";
+
+type FavoriteKey = {
+  namespace: FavoriteNamespace;
+  value: string;
+};
+
+type FavoriteRecord = FavoriteKey & {
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type FavoriteMutationResult = {
+  enabled: boolean;
+  favorite?: FavoriteRecord;
+};
+
+type SearchHistoryEntry = {
+  historyId: number;
+  text: string;
+  includeTags: string[];
+  excludeTags: string[];
+  languages: Array<"korean" | "japanese" | "chinese" | "english">;
+  sort: SearchRequest["sort"];
+  pageSize: number;
+  useCount: number;
+  lastUsedAt: string;
+};
+
+type AutoFindRunState = "running" | "completed" | "failed" | "cancelled";
+
+type AutoFindRun = {
+  runId: string;
+  revision: number;
+  state: AutoFindRunState;
+  totalFavorites: number;
+  completedFavorites: number;
+  candidatesFound: number;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+type AutoFindCandidate = GallerySummary & {
+  runId: string;
+  matchedFavorite: FavoriteKey;
+  discoveredAt: string;
+};
+
+type AutoFindSnapshot = {
+  run?: AutoFindRun;
+  candidates: AutoFindCandidate[];
+};
+
+type AutoFindExclusionResult = {
+  excludedGalleryIds: GalleryId[];
+  snapshot: AutoFindSnapshot;
+};
+```
+
+- `FavoriteKey.value`는 trim, 소문자화와 연속 공백 정규화 뒤 1~200 bytes로 저장한다. 원격 검색 token을 만들 때 값의 공백은 underscore로 바꾼다. 모든 namespace는 카드·상세·Related와 검색 suggestion에 영속 반영하지만 현재 Auto Find 자동 갱신 source는 `artist` 즐겨찾기만 사용한다.
+- `search_submit`이 성공하고 text/include/exclude 중 하나 이상이 있을 때만 정규화된 전체 `SearchRequest` fingerprint를 이력에 upsert한다. 앱 시작의 빈 Recent와 입력 중 draft는 기록하거나 원격 제출하지 않는다. 같은 요청은 `useCount`와 `lastUsedAt`을 갱신하며 `search_history_list.limit`은 1~100이다.
+- `auto_find_refresh`는 사용자 명령으로만 시작한다. 각 작가를 `artist:{value}`, 전체 4개 언어, `recent`, page size 200으로 조회하고 source의 마지막 page까지 진행하되 한 작가당 최대 250 page로 제한한다. 실행 중 다시 호출하면 같은 run snapshot을 반환한다.
+- 후보는 SQLite에 run별로 저장한다. 어떤 상태든 `download_entries`에 존재하는 gallery와 `auto_find_exclusions`에 존재하는 gallery는 추가·조회에서 제외한다. 명시적 제외는 최대 200개 양의 ID와 1~500 bytes 이유를 받는다.
+- 진행 중 앱이 닫히면 run은 `cancelled/AUTO_FIND_APP_EXIT`, startup에서 남은 `running` run은 `failed/AUTO_FIND_INTERRUPTED`로 바꾼다. source 실패는 `failed/AUTO_FIND_SOURCE_FAILED`로 저장하며 사용자는 명시적 갱신을 다시 실행해 retry한다.
+- `auto-find:changed`는 run projection 갱신 신호다. 후보마다 event를 만들지 않고 시작, 작가별 진행, 최종 상태에서만 보내며 UI는 event 뒤 snapshot을 다시 읽는다. 이벤트가 유실되거나 앱이 재시작되면 `auto_find_snapshot`으로 최신 run과 후보를 복원한다. 화면의 전체/작가 그룹, 결과 문자열 검색과 언어 filter는 영속 후보에 대한 local projection이며 키 입력마다 원격 요청하지 않는다.
+- 현재 구현은 다운로드 이력과 Auto Find 명시적 제외를 반영한다. Phase 5에서 생성되는 작품 숨김·중복 판정·pair 제외 기록은 해당 decision schema가 추가될 때 후보 조건에 결합한다.
 
 ## DownloadEntry 상태
 

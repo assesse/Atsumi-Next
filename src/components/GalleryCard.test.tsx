@@ -623,4 +623,36 @@ describe("GalleryCard event projection", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  it("renders searchable series and character chips with independent favorite state", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery = mockGalleries[0]!;
+
+    await act(async () => root.render(
+      <GalleryCard
+        gallery={gallery}
+        view="explore"
+        selected={false}
+        selectionContext={false}
+        favoriteMetadata={new Set(["series:rain archives"])}
+        {...callbacks}
+      />,
+    ));
+    const series = container.querySelector<HTMLButtonElement>('[title^="시리즈 · rain archives"]');
+    const character = container.querySelector<HTMLButtonElement>('[title^="캐릭터 · mira lane"]');
+
+    expect(series).toHaveClass("favorite");
+    expect(character).not.toHaveClass("favorite");
+    await act(async () => {
+      series?.click();
+      character?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    });
+    expect(callbacks.onMetadataSearch).toHaveBeenCalledWith("series:rain_archives");
+    expect(callbacks.onMetadataFavorite).toHaveBeenCalledWith("character:mira lane");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
 });

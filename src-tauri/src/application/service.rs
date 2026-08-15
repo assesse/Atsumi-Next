@@ -1,15 +1,16 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::domain::{
-    DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
-    DownloadListRequest, DownloadPage, FixtureDownloadJobStep, GalleryDetail, GalleryId,
-    GalleryPage, JobRef, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot,
-    ValidationError, WindowPlacement, WindowPlacementSnapshot,
+    AutoFindExclusionResult, AutoFindSnapshot, DownloadEntry, DownloadEntryId,
+    DownloadJobDescriptor, DownloadJobProjection, DownloadListRequest, DownloadPage, FavoriteKey,
+    FavoriteMutationResult, FavoriteRecord, FixtureDownloadJobStep, GalleryDetail, GalleryId,
+    GalleryPage, JobRef, SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsPatch,
+    SettingsSnapshot, ValidationError, WindowPlacement, WindowPlacementSnapshot,
 };
 
 use super::{
-    ApplicationError, DownloadMutationOutcome, DownloadQueueAddOutcome, DownloadRepository,
-    SearchRepository, StateRepository,
+    ApplicationError, AutomationRepository, DownloadMutationOutcome, DownloadQueueAddOutcome,
+    DownloadRepository, SearchRepository, StateRepository,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +23,7 @@ pub struct ApplicationService {
     repository: Arc<dyn StateRepository>,
     search_repository: Option<Arc<dyn SearchRepository>>,
     download_repository: Option<Arc<dyn DownloadRepository>>,
+    automation_repository: Option<Arc<dyn AutomationRepository>>,
 }
 
 impl Clone for ApplicationService {
@@ -30,6 +32,7 @@ impl Clone for ApplicationService {
             repository: Arc::clone(&self.repository),
             search_repository: self.search_repository.as_ref().map(Arc::clone),
             download_repository: self.download_repository.as_ref().map(Arc::clone),
+            automation_repository: self.automation_repository.as_ref().map(Arc::clone),
         }
     }
 }
@@ -40,6 +43,7 @@ impl ApplicationService {
             repository,
             search_repository: None,
             download_repository: None,
+            automation_repository: None,
         }
     }
 
@@ -53,6 +57,14 @@ impl ApplicationService {
         download_repository: Arc<dyn DownloadRepository>,
     ) -> Self {
         self.download_repository = Some(download_repository);
+        self
+    }
+
+    pub fn with_automation_repository(
+        mut self,
+        automation_repository: Arc<dyn AutomationRepository>,
+    ) -> Self {
+        self.automation_repository = Some(automation_repository);
         self
     }
 
@@ -234,9 +246,19 @@ impl ApplicationService {
             page_size = request.page_size,
             "submitting source search query"
         );
-        self.search_repository()?
+        let submission = self
+            .search_repository()?
             .search_submit(&request)
-            .map_err(Into::into)
+            .map_err(ApplicationError::from)?;
+        if !request.text.is_empty()
+            || !request.include_tags.is_empty()
+            || !request.exclude_tags.is_empty()
+        {
+            if let Some(repository) = self.automation_repository.as_deref() {
+                repository.search_history_record(&request)?;
+            }
+        }
+        Ok(submission)
     }
 
     pub fn search_page_get(
@@ -281,6 +303,69 @@ impl ApplicationService {
             .ok_or(ApplicationError::GalleryNotFound(gallery_id))
     }
 
+    pub fn favorites_list(&self) -> Result<Vec<FavoriteRecord>, ApplicationError> {
+        self.automation_repository()?
+            .favorites_list()
+            .map_err(Into::into)
+    }
+
+    pub fn favorite_set(
+        &self,
+        key: FavoriteKey,
+        enabled: bool,
+    ) -> Result<FavoriteMutationResult, ApplicationError> {
+        let key = key.normalized()?;
+        self.automation_repository()?
+            .favorite_set(&key, enabled)
+            .map_err(Into::into)
+    }
+
+    pub fn search_history_list(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<SearchHistoryEntry>, ApplicationError> {
+        if !(1..=100).contains(&limit) {
+            return Err(ValidationError::new("limit", "must be between 1 and 100").into());
+        }
+        self.automation_repository()?
+            .search_history_list(limit)
+            .map_err(Into::into)
+    }
+
+    pub fn auto_find_snapshot(&self) -> Result<AutoFindSnapshot, ApplicationError> {
+        self.automation_repository()?
+            .auto_find_snapshot()
+            .map_err(Into::into)
+    }
+
+    pub fn auto_find_exclude(
+        &self,
+        gallery_ids: Vec<i64>,
+        reason: String,
+    ) -> Result<AutoFindExclusionResult, ApplicationError> {
+        if gallery_ids.is_empty() {
+            return Err(ValidationError::new("galleryIds", "must not be empty").into());
+        }
+        if gallery_ids.len() > 200 {
+            return Err(ValidationError::new("galleryIds", "must contain at most 200 IDs").into());
+        }
+        let reason = reason.trim();
+        if reason.is_empty() || reason.len() > 500 {
+            return Err(
+                ValidationError::new("reason", "must contain between 1 and 500 bytes").into(),
+            );
+        }
+        let mut gallery_ids = gallery_ids
+            .into_iter()
+            .map(GalleryId::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        gallery_ids.sort_unstable();
+        gallery_ids.dedup();
+        self.automation_repository()?
+            .auto_find_exclude(&gallery_ids, reason)
+            .map_err(Into::into)
+    }
+
     fn search_repository(&self) -> Result<&dyn SearchRepository, ApplicationError> {
         self.search_repository.as_deref().ok_or_else(|| {
             super::RepositoryError::Other("search repository is not configured".into()).into()
@@ -290,6 +375,12 @@ impl ApplicationService {
     fn download_repository(&self) -> Result<&dyn DownloadRepository, ApplicationError> {
         self.download_repository.as_deref().ok_or_else(|| {
             super::RepositoryError::Other("download repository is not configured".into()).into()
+        })
+    }
+
+    fn automation_repository(&self) -> Result<&dyn AutomationRepository, ApplicationError> {
+        self.automation_repository.as_deref().ok_or_else(|| {
+            super::RepositoryError::Other("automation repository is not configured".into()).into()
         })
     }
 }

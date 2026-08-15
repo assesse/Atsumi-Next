@@ -627,6 +627,15 @@ h2 {
   font-size: 13px;
 }
 
+.auto-find-status.is-running {
+  color: var(--primary-strong);
+  font-weight: 650;
+}
+
+.auto-find-status.is-failed {
+  color: var(--danger);
+}
+
 .selection-slot {
   position: relative;
   display: flex;
@@ -676,6 +685,35 @@ h2 {
   display: grid;
   grid-template-columns: 1fr;
   gap: 12px;
+}
+
+.gallery-groups {
+  display: grid;
+  gap: 24px;
+}
+
+.gallery-group {
+  display: grid;
+  gap: 10px;
+}
+
+.gallery-group > h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.gallery-group > h2 > span {
+  color: var(--favorite);
+}
+
+.gallery-group > h2 > small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .gallery-card {

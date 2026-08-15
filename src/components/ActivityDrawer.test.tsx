@@ -15,6 +15,8 @@ const failedGallery: Gallery = {
   coverIndex: 0,
   language: "korean",
   tags: [],
+  series: [],
+  characters: [],
   download: {
     entryId: "entry-42",
     revision: 7,

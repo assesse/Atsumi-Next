@@ -158,6 +158,13 @@ impl From<ApplicationError> for ApiError {
                     ("operation".into(), json!(operation)),
                 ])),
             },
+            ApplicationError::AutoFindNotRunning => Self {
+                code: "AUTO_FIND_NOT_RUNNING".into(),
+                message: "There is no active Auto Find refresh to cancel".into(),
+                retryable: false,
+                action: Some(ApiAction::None),
+                details: None,
+            },
             ApplicationError::DownloadPipeline(error) => Self {
                 code: error.code.as_str().into(),
                 message: error.message,

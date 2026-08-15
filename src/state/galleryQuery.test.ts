@@ -13,6 +13,8 @@ const firstPage: GalleryPage = {
     pages: 10,
     language: "korean",
     tags: [],
+    series: [],
+    characters: [],
     publishedRank: 20260814,
     popularity: 0,
     thumbnailWidth: 512,

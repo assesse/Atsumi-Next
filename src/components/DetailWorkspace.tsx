@@ -33,6 +33,7 @@ type MetadataBoxProps = {
   values: string[];
   type: string;
   favorite?: boolean;
+  favoriteMetadata?: ReadonlySet<string>;
   onSearch: (value: string) => void;
   onFavorite: (value: string) => void;
 };
@@ -40,7 +41,10 @@ type MetadataBoxProps = {
 const boundedPageCount = (pages: number, maximum: number): number =>
   Number.isFinite(pages) ? Math.min(maximum, Math.max(0, Math.floor(pages))) : 0;
 
-function MetadataBox({ label, values, type, favorite, onSearch, onFavorite }: MetadataBoxProps) {
+const metadataSearchToken = (namespace: string, value: string): string =>
+  `${namespace}:${value.trim().replace(/\s+/g, "_")}`;
+
+function MetadataBox({ label, values, type, favorite, favoriteMetadata, onSearch, onFavorite }: MetadataBoxProps) {
   return (
     <div className="metadata-box">
       <span>{label}</span>
@@ -49,8 +53,9 @@ function MetadataBox({ label, values, type, favorite, onSearch, onFavorite }: Me
           <MetadataChip
             key={`${type}:${value}`}
             value={`${type}:${value}`}
-            label={value}
-            favorite={favorite}
+            searchValue={["series", "character"].includes(type) ? metadataSearchToken(type, value) : undefined}
+            label={["series", "character"].includes(type) ? value.replaceAll("_", " ") : value}
+            favorite={favorite ?? favoriteMetadata?.has(`${type}:${value}`)}
             onSearch={onSearch}
             onToggleFavorite={onFavorite}
           />
@@ -110,7 +115,7 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
   }, [minimized, tabs.length]);
 
   useEffect(() => {
-    detailBody.current?.scrollTo({ top: 0, left: 0 });
+    detailBody.current?.scrollTo?.({ top: 0, left: 0 });
     if (!minimized && activeId !== null) {
       window.requestAnimationFrame(() => {
         workspace.current?.querySelector<HTMLElement>("[role='tab'][aria-selected='true']")?.focus();
@@ -261,10 +266,10 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                 </div>
                 <div className="metadata-grid">
                   <MetadataBox label="작가" values={[gallery.artist]} type="artist" favorite={gallery.favorite} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
-                  <MetadataBox label="그룹" values={gallery.group ? [gallery.group] : []} type="group" onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
+                  <MetadataBox label="그룹" values={gallery.group ? [gallery.group] : []} type="group" favoriteMetadata={favoriteMetadata} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
                   <MetadataBox label="언어" values={[gallery.language]} type="language" onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
-                  <MetadataBox label="시리즈" values={[]} type="series" onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
-                  <MetadataBox label="캐릭터" values={[]} type="character" onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
+                  <MetadataBox label="시리즈" values={gallery.series ?? []} type="series" favoriteMetadata={favoriteMetadata} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
+                  <MetadataBox label="캐릭터" values={gallery.characters ?? []} type="character" favoriteMetadata={favoriteMetadata} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
                   <div className="metadata-box tags-box">
                     <span>태그</span>
                     <div className="metadata-value">
@@ -312,6 +317,12 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                               {item.group ? <MetadataChip value={`group:${item.group}`} label={item.group} kind="byline" favorite={favoriteMetadata.has(`group:${item.group}`)} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} /> : null}
                             </div>
                             <div className="tag-list">
+                              {(item.series ?? []).slice(0, 1).map((series) => (
+                                <MetadataChip key={`series:${series}`} value={`series:${series}`} searchValue={metadataSearchToken("series", series)} label={`시리즈 · ${series.replaceAll("_", " ")}`} kind="tag" favorite={favoriteMetadata.has(`series:${series}`)} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
+                              ))}
+                              {(item.characters ?? []).slice(0, 1).map((character) => (
+                                <MetadataChip key={`character:${character}`} value={`character:${character}`} searchValue={metadataSearchToken("character", character)} label={`캐릭터 · ${character.replaceAll("_", " ")}`} kind="tag" favorite={favoriteMetadata.has(`character:${character}`)} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
+                              ))}
                               {item.tags.slice(0, 4).map((tag) => (
                                 <MetadataChip key={tag} value={tag} kind="tag" favorite={favoriteMetadata.has(tag)} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
                               ))}

@@ -627,6 +627,113 @@ pub const MIGRATIONS: &[Migration] = &[
                 );
         "#,
     },
+    Migration {
+        version: 10,
+        name: "favorites_search_history_and_auto_find",
+        sql: r#"
+            CREATE TABLE favorites (
+                namespace TEXT NOT NULL CHECK (namespace IN (
+                    'artist', 'group', 'series', 'character', 'tag'
+                )),
+                value TEXT NOT NULL COLLATE NOCASE
+                    CHECK (length(trim(value)) BETWEEN 1 AND 200),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                PRIMARY KEY (namespace, value)
+            ) STRICT;
+
+            CREATE TABLE search_history (
+                history_id INTEGER PRIMARY KEY,
+                fingerprint TEXT NOT NULL UNIQUE CHECK (length(fingerprint) = 64),
+                text TEXT NOT NULL CHECK (length(text) <= 500),
+                include_tags_json TEXT NOT NULL CHECK (json_valid(include_tags_json)),
+                exclude_tags_json TEXT NOT NULL CHECK (json_valid(exclude_tags_json)),
+                languages_json TEXT NOT NULL CHECK (json_valid(languages_json)),
+                sort TEXT NOT NULL CHECK (sort IN (
+                    'recent', 'popular_today', 'popular_week',
+                    'popular_month', 'popular_year', 'random'
+                )),
+                page_size INTEGER NOT NULL CHECK (page_size BETWEEN 1 AND 200),
+                use_count INTEGER NOT NULL CHECK (use_count > 0),
+                last_used_at TEXT NOT NULL CHECK (length(last_used_at) > 0)
+            ) STRICT;
+
+            CREATE INDEX search_history_recent_idx
+                ON search_history(last_used_at DESC, history_id DESC);
+
+            CREATE TABLE auto_find_runs (
+                run_id TEXT PRIMARY KEY CHECK (length(trim(run_id)) > 0),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                state TEXT NOT NULL CHECK (state IN (
+                    'running', 'completed', 'failed', 'cancelled'
+                )),
+                total_favorites INTEGER NOT NULL CHECK (total_favorites >= 0),
+                completed_favorites INTEGER NOT NULL
+                    CHECK (completed_favorites BETWEEN 0 AND total_favorites),
+                candidates_found INTEGER NOT NULL CHECK (candidates_found >= 0),
+                started_at TEXT NOT NULL CHECK (length(started_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                finished_at TEXT,
+                error_code TEXT,
+                error_message TEXT
+            ) STRICT;
+
+            CREATE UNIQUE INDEX auto_find_one_running_idx
+                ON auto_find_runs(state)
+                WHERE state = 'running';
+            CREATE INDEX auto_find_runs_recent_idx
+                ON auto_find_runs(started_at DESC, run_id DESC);
+
+            CREATE TABLE auto_find_candidates (
+                run_id TEXT NOT NULL
+                    REFERENCES auto_find_runs(run_id) ON DELETE CASCADE,
+                gallery_id INTEGER NOT NULL CHECK (gallery_id > 0),
+                title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+                artist TEXT NOT NULL CHECK (length(trim(artist)) > 0),
+                group_name TEXT,
+                pages INTEGER NOT NULL CHECK (pages > 0),
+                language TEXT NOT NULL CHECK (language IN (
+                    'korean', 'japanese', 'chinese', 'english'
+                )),
+                tags_json TEXT NOT NULL CHECK (json_valid(tags_json)),
+                published_rank INTEGER NOT NULL CHECK (published_rank >= 0),
+                popularity INTEGER NOT NULL CHECK (popularity >= 0),
+                thumbnail_key TEXT,
+                thumbnail_width INTEGER NOT NULL CHECK (thumbnail_width > 0),
+                thumbnail_height INTEGER NOT NULL CHECK (thumbnail_height > 0),
+                favorite_namespace TEXT NOT NULL CHECK (favorite_namespace IN (
+                    'artist', 'group', 'series', 'character', 'tag'
+                )),
+                favorite_value TEXT NOT NULL CHECK (length(trim(favorite_value)) > 0),
+                discovered_at TEXT NOT NULL CHECK (length(discovered_at) > 0),
+                PRIMARY KEY (run_id, gallery_id)
+            ) STRICT;
+
+            CREATE INDEX auto_find_candidates_gallery_idx
+                ON auto_find_candidates(gallery_id);
+            CREATE INDEX auto_find_candidates_group_idx
+                ON auto_find_candidates(run_id, favorite_namespace, favorite_value);
+
+            CREATE TABLE auto_find_exclusions (
+                gallery_id INTEGER PRIMARY KEY CHECK (gallery_id > 0),
+                reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0)
+            ) STRICT;
+        "#,
+    },
+    Migration {
+        version: 11,
+        name: "auto_find_visible_metadata",
+        sql: r#"
+            ALTER TABLE auto_find_candidates
+                ADD COLUMN series_json TEXT NOT NULL DEFAULT '[]'
+                    CHECK (json_valid(series_json));
+            ALTER TABLE auto_find_candidates
+                ADD COLUMN characters_json TEXT NOT NULL DEFAULT '[]'
+                    CHECK (json_valid(characters_json));
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

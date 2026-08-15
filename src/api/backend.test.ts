@@ -92,8 +92,132 @@ describe("browser backend search contract", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.tags).toContain("female:glasses");
+    expect(result.data.series).toEqual(["rain archives"]);
+    expect(result.data.characters).toEqual(["mira lane", "ren kujo"]);
     expect(result.data.related).toHaveLength(2);
     expect(result.data.related.every((item) => item.id !== result.data.id)).toBe(true);
+  });
+
+  it.each([
+    ["series:rain_archives", [galleryId(4051038), galleryId(4050754)]],
+    ["character:mira_lane", [galleryId(4051038), galleryId(4050754)]],
+  ])("routes atomic %s metadata tokens in the browser fixture", async (text, expectedIds) => {
+    const result = await backend.searchSubmit(searchRequest({ text, pageSize: 20 }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.firstPage.items.map((item) => item.id)).toEqual(expectedIds);
+  });
+});
+
+describe("browser backend favorites and automation contract", () => {
+  it("persists normalized favorites and only records submitted non-empty searches", async () => {
+    const enabled = await backend.favoriteSet({ namespace: "artist", value: "  History Artist  " }, true);
+    await backend.favoriteSet({ namespace: "series", value: " Rain Archives " }, true);
+    await backend.favoriteSet({ namespace: "character", value: " Mira Lane " }, true);
+    expect(enabled).toMatchObject({
+      ok: true,
+      data: { enabled: true, favorite: { namespace: "artist", value: "history artist", revision: 0 } },
+    });
+    const favorites = await backend.favoritesList();
+    expect(favorites).toMatchObject({ ok: true, data: expect.arrayContaining([
+      expect.objectContaining({ namespace: "artist", value: "history artist" }),
+      expect.objectContaining({ namespace: "series", value: "rain archives" }),
+      expect.objectContaining({ namespace: "character", value: "mira lane" }),
+    ]) });
+
+    await backend.searchSubmit(searchRequest());
+    await backend.searchSubmit(searchRequest({
+      text: "history-contract",
+      includeTags: ["female:glasses"],
+      excludeTags: ["male:suit"],
+      languages: ["english", "korean"],
+      sort: "popular_week",
+      pageSize: 17,
+    }));
+    await backend.searchSubmit(searchRequest({
+      text: " HISTORY-CONTRACT ",
+      includeTags: ["FEMALE:GLASSES"],
+      excludeTags: ["MALE:SUIT"],
+      languages: ["korean", "english"],
+      sort: "popular_week",
+      pageSize: 17,
+    }));
+    const history = await backend.searchHistoryList(100);
+    expect(history.ok).toBe(true);
+    if (!history.ok) return;
+    const entry = history.data.find((item) => item.text === "history-contract");
+    expect(entry).toMatchObject({
+      includeTags: ["female:glasses"],
+      excludeTags: ["male:suit"],
+      languages: ["korean", "english"],
+      sort: "popular_week",
+      pageSize: 17,
+      useCount: 2,
+    });
+    expect(history.data.some((item) => !item.text && !item.includeTags.length && !item.excludeTags.length)).toBe(false);
+
+    await backend.favoriteSet({ namespace: "artist", value: "history artist" }, false);
+    await backend.favoriteSet({ namespace: "series", value: "rain archives" }, false);
+    await backend.favoriteSet({ namespace: "character", value: "mira lane" }, false);
+    const removed = await backend.favoritesList();
+    expect(removed.ok && removed.data.some((item) => item.value === "history artist")).toBe(false);
+  });
+
+  it("preserves partial candidates on cancel and excludes them from later explicit refreshes", async () => {
+    vi.useFakeTimers();
+    const events: string[] = [];
+    const unsubscribe = await backend.on("auto-find:changed", (run) => events.push(run.state));
+    let seededDownloadEntryId: string | undefined;
+    try {
+      await backend.favoriteSet({ namespace: "artist", value: "serein" }, true);
+      await backend.favoriteSet({ namespace: "artist", value: "mizuno" }, true);
+      const seededDownload = await backend.downloadQueueAdd([galleryId(4051038)], "auto-find-downloaded-gallery");
+      if (seededDownload.ok) seededDownloadEntryId = seededDownload.data[0]?.entryId;
+
+      const started = await backend.autoFindRefresh();
+      expect(started).toMatchObject({ ok: true, data: { state: "running", totalFavorites: 2 } });
+      await vi.advanceTimersByTimeAsync(60);
+      const partial = await backend.autoFindSnapshot();
+      expect(partial).toMatchObject({
+        ok: true,
+        data: {
+          run: { state: "running", completedFavorites: 1 },
+          candidates: [expect.objectContaining({ id: galleryId(4050754), artist: "serein" })],
+        },
+      });
+
+      const cancelled = await backend.autoFindCancel();
+      expect(cancelled).toMatchObject({ ok: true, data: { state: "cancelled" } });
+      await vi.advanceTimersByTimeAsync(500);
+      const preserved = await backend.autoFindSnapshot();
+      expect(preserved).toMatchObject({
+        ok: true,
+        data: { run: { state: "cancelled" }, candidates: [{ id: galleryId(4050754) }] },
+      });
+
+      await backend.autoFindRefresh();
+      await vi.advanceTimersByTimeAsync(120);
+      const completed = await backend.autoFindSnapshot();
+      expect(completed).toMatchObject({ ok: true, data: { run: { state: "completed", completedFavorites: 2 } } });
+      if (!completed.ok) return;
+      expect(completed.data.candidates.map((candidate) => candidate.id)).not.toContain(galleryId(4051038));
+
+      const excludedId = completed.data.candidates[0]!.id;
+      const excluded = await backend.autoFindExclude([excludedId], "focused browser contract test");
+      expect(excluded).toMatchObject({ ok: true, data: { excludedGalleryIds: [excludedId] } });
+      await backend.autoFindRefresh();
+      await vi.advanceTimersByTimeAsync(120);
+      const refreshed = await backend.autoFindSnapshot();
+      expect(refreshed.ok && refreshed.data.candidates.some((candidate) => candidate.id === excludedId)).toBe(false);
+      expect(events).toContain("cancelled");
+      expect(events).toContain("completed");
+    } finally {
+      unsubscribe();
+      if (seededDownloadEntryId) await backend.downloadCancel([seededDownloadEntryId]);
+      await backend.favoriteSet({ namespace: "artist", value: "serein" }, false);
+      await backend.favoriteSet({ namespace: "artist", value: "mizuno" }, false);
+      vi.useRealTimers();
+    }
   });
 });
 

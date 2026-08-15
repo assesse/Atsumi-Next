@@ -160,6 +160,8 @@ export type GallerySummary = {
   pages: number;
   language: Language;
   tags: string[];
+  series: string[];
+  characters: string[];
   publishedRank: number;
   popularity: number;
   thumbnailKey?: string;
@@ -176,6 +178,68 @@ export type GalleryPage = {
 export type SearchSubmission = {
   queryId: string;
   firstPage: GalleryPage;
+};
+
+export type FavoriteNamespace = "artist" | "group" | "series" | "character" | "tag";
+
+export type FavoriteKey = {
+  namespace: FavoriteNamespace;
+  value: string;
+};
+
+export type FavoriteRecord = FavoriteKey & {
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type FavoriteMutationResult = {
+  enabled: boolean;
+  favorite?: FavoriteRecord;
+};
+
+export type SearchHistoryEntry = {
+  historyId: number;
+  text: string;
+  includeTags: string[];
+  excludeTags: string[];
+  languages: Language[];
+  sort: SearchSort;
+  pageSize: number;
+  useCount: number;
+  lastUsedAt: string;
+};
+
+export type AutoFindRunState = "running" | "completed" | "failed" | "cancelled";
+
+export type AutoFindRun = {
+  runId: string;
+  revision: number;
+  state: AutoFindRunState;
+  totalFavorites: number;
+  completedFavorites: number;
+  candidatesFound: number;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+export type AutoFindCandidate = GallerySummary & {
+  runId: string;
+  matchedFavorite: FavoriteKey;
+  discoveredAt: string;
+};
+
+export type AutoFindSnapshot = {
+  run?: AutoFindRun;
+  candidates: AutoFindCandidate[];
+};
+
+export type AutoFindExclusionResult = {
+  excludedGalleryIds: GalleryId[];
+  snapshot: AutoFindSnapshot;
 };
 
 export type GalleryDetail = GallerySummary & {

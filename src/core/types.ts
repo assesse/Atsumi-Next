@@ -37,6 +37,8 @@ export type Gallery = {
   coverIndex: number;
   language: Language;
   tags: string[];
+  series: string[];
+  characters: string[];
   thumbnailKey?: string;
   thumbnailWidth?: number;
   thumbnailHeight?: number;
