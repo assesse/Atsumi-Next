@@ -2,6 +2,7 @@ pub mod application;
 pub mod domain;
 pub mod infrastructure;
 pub mod interface;
+pub mod source;
 pub mod thumbnail;
 
 #[cfg(test)]
@@ -14,15 +15,15 @@ use std::{
 };
 
 use application::ApplicationService;
-use infrastructure::{FixtureSearchRepository, SqliteRepository};
+use infrastructure::{HitomiLiveAdapter, HitomiLiveConfig, SqliteRepository};
 use interface::AppState;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
     Emitter, Manager,
 };
 use thumbnail::{
-    FixtureThumbnailResolver, ThumbnailCompletionEventDto, ThumbnailCoordinator,
-    ThumbnailCoordinatorConfig,
+    ThumbnailCompletionEventDto, ThumbnailCoordinator, ThumbnailCoordinatorConfig,
+    ThumbnailResolver,
 };
 
 pub fn run() -> tauri::Result<()> {
@@ -80,22 +81,26 @@ pub fn run() -> tauri::Result<()> {
             let data_dir = app.path().app_data_dir()?;
             let database_path = data_dir.join("atsumi-next.sqlite3");
             let repository = SqliteRepository::open(&database_path)?;
-            let search_repository = FixtureSearchRepository::new()?;
             let repository = Arc::new(repository);
+            let settings = ApplicationService::new(repository.clone()).settings_get()?;
+            let live_source = Arc::new(HitomiLiveAdapter::new(HitomiLiveConfig {
+                max_concurrent_requests: settings.concurrent_image_requests as usize,
+                request_start_interval: Duration::from_millis(
+                    settings.request_start_interval_ms,
+                ),
+                ..HitomiLiveConfig::default()
+            })?);
             let service = ApplicationService::new(repository.clone())
                 .with_download_repository(repository)
-                .with_search_repository(Arc::new(search_repository));
-            let settings = service.settings_get()?;
+                .with_search_repository(live_source.clone());
             let recovered_entries = service.download_recover_interrupted()?;
             let thumbnail_config = ThumbnailCoordinatorConfig {
                 max_concurrency: settings.concurrent_image_requests as usize,
                 request_start_interval: Duration::from_millis(settings.request_start_interval_ms),
                 ..ThumbnailCoordinatorConfig::default()
             };
-            let thumbnails = ThumbnailCoordinator::with_resolver(
-                FixtureThumbnailResolver::new(),
-                thumbnail_config,
-            )?;
+            let thumbnail_resolver: Arc<dyn ThumbnailResolver> = live_source;
+            let thumbnails = ThumbnailCoordinator::new(thumbnail_resolver, thumbnail_config)?;
             let (thumbnail_completion_tx, thumbnail_completion_rx) =
                 mpsc::channel::<ThumbnailCompletionEventDto>();
             let thumbnail_app = app.handle().clone();

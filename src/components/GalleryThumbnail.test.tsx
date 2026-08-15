@@ -125,7 +125,9 @@ describe("GalleryThumbnail", () => {
     await act(async () => image?.dispatchEvent(new Event("error")));
 
     expect(container.querySelector(".gallery-thumbnail")).toHaveAttribute("data-thumbnail-state", "error");
-    expect(container.querySelector(".thumbnail-fallback--error")).toHaveAccessibleName("깨진 표지 불러오기 실패");
+    expect(container.querySelector(".thumbnail-fallback--error")).toHaveAccessibleName(
+      "깨진 표지 이미지를 안전하게 처리할 수 없음",
+    );
     expect(displayFailed).toHaveBeenCalledWith(
       expect.objectContaining({ key: coverKey, consumer: "detail", priority: "critical" }),
       "Resolved thumbnail could not be decoded",

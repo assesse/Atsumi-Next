@@ -54,9 +54,12 @@ const priorityRank: Record<ThumbnailRequest["priority"], number> = {
   critical: 2,
 };
 
-const errorFrom = (message: string, code?: string): Error => {
+type RetryableError = Error & { retryable?: boolean };
+
+const errorFrom = (message: string, code?: string, retryable?: boolean): RetryableError => {
   const error = new Error(message);
   if (code) error.name = code;
+  if (retryable !== undefined) (error as RetryableError).retryable = retryable;
   return error;
 };
 
@@ -239,7 +242,11 @@ export class BackendThumbnailAdapter implements ThumbnailCoordinatorAdapter {
       return;
     }
     if (event.outcome.status === "failed") {
-      pending.reject(errorFrom(event.outcome.failure.message, `THUMBNAIL_${event.outcome.failure.code}`));
+      pending.reject(errorFrom(
+        event.outcome.failure.message,
+        `THUMBNAIL_${event.outcome.failure.code}`,
+        event.outcome.failure.retryable,
+      ));
       return;
     }
 

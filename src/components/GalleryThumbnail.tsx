@@ -47,6 +47,27 @@ const nearViewportMargin = "600px 0px";
 const loadingForPriority = (priority: ThumbnailPriority): "eager" | "lazy" =>
   priority === "prefetch" ? "lazy" : "eager";
 
+const thumbnailFailureLabel = (code: string | undefined): string => {
+  switch (code) {
+    case "THUMBNAIL_notFound":
+    case "THUMBNAIL_candidatesExhausted":
+      return "원본 이미지를 찾을 수 없음";
+    case "THUMBNAIL_responseInvalid":
+      return "이미지가 아닌 응답을 받음";
+    case "THUMBNAIL_decodeFailed":
+      return "이미지를 안전하게 처리할 수 없음";
+    case "THUMBNAIL_unauthorized":
+      return "원본 사이트에서 접근을 거부함";
+    case "THUMBNAIL_temporarilyUnavailable":
+    case "THUMBNAIL_resolver":
+    case "THUMBNAIL_COMPLETION_TIMEOUT":
+    case "THUMBNAIL_WORKER_UNAVAILABLE":
+      return "미리보기를 일시적으로 불러올 수 없음";
+    default:
+      return "미리보기 불러오기 실패";
+  }
+};
+
 const greatestCommonDivisor = (left: number, right: number): number => {
   let a = Math.abs(Math.round(left));
   let b = Math.abs(Math.round(right));
@@ -264,7 +285,7 @@ export function GalleryThumbnail({
         <i
           className="thumbnail-fallback thumbnail-fallback--error"
           role="img"
-          aria-label={`${alt} 불러오기 실패`}
+          aria-label={`${alt} ${thumbnailFailureLabel(snapshot.code)}`}
           title={snapshot.message}
           style={{ ...fullBleedStyle, display: "grid", placeItems: "center", color: "#64767d", fontStyle: "normal" }}
         >

@@ -173,6 +173,9 @@ pub struct ThumbnailDeliveryDto {
 pub enum ThumbnailFailureCode {
     Cancelled,
     NotFound,
+    CandidatesExhausted,
+    ResponseInvalid,
+    DecodeFailed,
     TemporarilyUnavailable,
     Unauthorized,
     InvalidData,

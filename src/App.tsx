@@ -555,6 +555,10 @@ export default function App() {
   );
 
   const config = viewConfig[ui.view];
+  const resultSourceLabel = backend.runtime === "tauri" ? "Hitomi 실데이터" : "브라우저 fixture";
+  const autoFindRefreshLabel = backend.runtime === "tauri"
+    ? "자동 갱신 · 미연결"
+    : "마지막 갱신 · 브라우저 fixture";
 
   return (
     <>
@@ -611,7 +615,7 @@ export default function App() {
               {ui.view === "explore" ? (
                 <div className="select-control"><label htmlFor="sort-select">정렬</label><select id="sort-select" value={ui.exploreSort} onChange={(event) => dispatch({ type: "sort.set", sort: event.target.value as SearchSort })}>{sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
               ) : ui.view === "auto-find" ? (
-                <span className="context-summary">마지막 갱신 · mock fixture</span>
+                <span className="context-summary">{autoFindRefreshLabel}</span>
               ) : (
                 <div className="segmented status-filter" role="group" aria-label="다운로드 상태 필터">
                   {(["all", "active", "review", "failed", "complete"] as const).map((filter) => (
@@ -622,7 +626,7 @@ export default function App() {
                 </div>
               )}
             </div>
-            <div className="context-summary">{visible.length}개 결과 · {backend.runtime === "tauri" ? "backend fixture" : "browser fixture"}</div>
+            <div className="context-summary">{visible.length}개 결과 · {resultSourceLabel}</div>
           </section>
           <SelectionToolbar
             count={ui.selection.ids.size}

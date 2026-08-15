@@ -13,8 +13,12 @@
 | `SOURCE_TIMEOUT` | 원본 사이트 응답이 늦습니다 | 예 | backoff 재시도 |
 | `SOURCE_RATE_LIMITED` | 잠시 후 다시 시도합니다 | 예 | host cooldown |
 | `SOURCE_NOT_FOUND` | 갤러리 정보를 찾을 수 없습니다 | 아니오 | 상세 확인 |
+| `SOURCE_TEMPORARILY_UNAVAILABLE` | 원본 사이트를 일시적으로 사용할 수 없습니다 | 예 | backoff 재시도 |
+| `SOURCE_UNAUTHORIZED` | 원본 사이트가 연결을 거부했습니다 | 아니오 | 연결 정책 확인 |
+| `SOURCE_PROTOCOL` | 원본 응답 형식이 지원 계약과 다릅니다 | 아니오 | parser/fixture 검토 |
+| `SOURCE_INVALID_DATA` | 원본 응답을 안전하게 읽을 수 없습니다 | 아니오 | payload/fixture 검토 |
 | `IMAGE_CANDIDATES_EXHAUSTED` | 이미지 서버에서 파일을 찾지 못했습니다 | 조건부 | URL 진단 또는 재조회 |
-| `IMAGE_RESPONSE_INVALID` | 이미지가 아닌 응답을 받았습니다 | 예 | 후보 변경 |
+| `IMAGE_RESPONSE_INVALID` | 이미지가 아닌 응답을 받았습니다 | 아니오 | 다른 후보를 모두 시도한 뒤 상세 확인 |
 | `IMAGE_DECODE_FAILED` | 이미지 처리에 실패했습니다 | 조건부 | 원본 보존, 상세 확인 |
 | `FILESYSTEM_PERMISSION` | 폴더에 파일을 쓸 수 없습니다 | 아니오 | 설정/경로 열기 |
 | `FILESYSTEM_MISSING` | 다운로드 폴더를 찾을 수 없습니다 | 아니오 | 재연결 또는 재다운로드 |
@@ -47,3 +51,5 @@ elapsed_ms, app_version, schema_version
 ```
 
 URL query, cookie, session token, 로컬 사용자 이름은 기본 로그에서 제거한다.
+
+Thumbnail event는 같은 원인을 camelCase code(`candidatesExhausted`, `responseInvalid`, `decodeFailed`)와 명시적 `retryable`로 전달한다. WebView는 이 값을 보존해 사용자 문구와 재시도를 결정하며 raw source 오류 문자열을 분기 조건으로 사용하지 않는다.

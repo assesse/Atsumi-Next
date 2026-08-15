@@ -143,7 +143,9 @@ type ThumbnailRequest = {
 - 동일 key의 동시 요청은 프로세스 전역에서 하나로 합친다. 마지막 구독자가 사라지면 queued/running resolver에 cancellation을 전달한다.
 - 완료는 `thumbnail:ready` event로 전달한다. 메모리 cache hit에서는 event가 command 응답보다 먼저 올 수 있으므로 frontend transport는 requestId별 미매칭 event를 잠시 보관한다.
 - WebView decode 실패는 `thumbnail_invalidate`로 해당 key의 success/negative cache를 비운 뒤 다시 해석할 수 있다.
-- frontend는 원본 URL, retry, cache eviction을 직접 결정하지 않는다. 현재는 결정론적 fixture resolver이며 실제 HTTP·disk resolver는 같은 port를 교체해 연결한다.
+- frontend는 원본 URL, retry, cache eviction을 직접 결정하지 않는다. Tauri는 실제 HTTP resolver를, 브라우저 검토 모드는 결정론적 fixture resolver를 같은 port 뒤에서 사용한다. disk cache는 artifact pipeline 단계에서 추가한다.
+- production resolver는 검색과 같은 pooled transport를 공유한다. HTTP dispatch는 `critical > visible > download > prefetch`, 전역·host별 동시성, 최소 시작 간격, cancellation, bounded retry, `Retry-After`, 429/503 cooldown을 적용한다.
+- thumbnail failure code는 `cancelled`, `notFound`, `candidatesExhausted`, `responseInvalid`, `decodeFailed`, `temporarilyUnavailable`, `unauthorized`, `invalidData`, `resolver`, `coordinatorClosed` 중 하나다. frontend는 backend가 전달한 `retryable`을 보존하고 문자열 prefix로 retry를 추측하지 않는다.
 
 ## 후속 계약
 

@@ -31,6 +31,8 @@ describe("App Phase 3A backend flow", () => {
     expect(downloadList).toHaveBeenCalledWith({ page: 1, pageSize: 200 });
     expect(detail).toHaveBeenCalledWith(galleryId(4051038));
     expect(container.textContent).toContain("Archive of Rain");
+    expect(container.textContent).toContain("브라우저 fixture");
+    expect(container.textContent).not.toContain("backend fixture");
 
     const firstCard = container.querySelector<HTMLElement>('[data-gallery-id="4051027"]');
     await act(async () => {

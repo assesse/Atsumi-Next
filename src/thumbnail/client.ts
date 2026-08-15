@@ -49,7 +49,7 @@ export type ThumbnailSnapshot =
   | { readonly status: "idle" }
   | { readonly status: "loading" }
   | { readonly status: "resolved"; readonly asset: ThumbnailAsset }
-  | { readonly status: "error"; readonly message: string };
+  | { readonly status: "error"; readonly message: string; readonly code?: string };
 
 type Entry = {
   identity: string;
@@ -115,7 +115,12 @@ const errorMessage = (error: unknown): string =>
   error instanceof Error && error.message.trim() ? error.message : "Thumbnail resolution failed";
 
 const isRetryableThumbnailError = (error: unknown): boolean =>
-  error instanceof Error && retryableThumbnailErrorNames.has(error.name);
+  error instanceof Error
+  && (("retryable" in error && error.retryable === true)
+    || retryableThumbnailErrorNames.has(error.name));
+
+const thumbnailErrorCode = (error: unknown): string | undefined =>
+  error instanceof Error && error.name.startsWith("THUMBNAIL_") ? error.name : undefined;
 
 /**
  * A deliberately thin in-memory subscription registry. It coalesces simultaneous
@@ -193,7 +198,11 @@ export class ThumbnailClient {
     const shouldRetry = entry.displayFailureRetries === 0;
     entry.displayFailureRetries += 1;
     entry.retryableError = shouldRetry;
-    this.publish(entry, { status: "error", message: reason });
+    this.publish(entry, {
+      status: "error",
+      message: reason,
+      code: "THUMBNAIL_decodeFailed",
+    });
     try {
       const report = this.adapter.displayFailed?.(request, reason);
       if (report instanceof Promise) void report.catch(() => undefined);
@@ -296,7 +305,11 @@ export class ThumbnailClient {
       || this.entries.get(entry.identity) !== entry
     ) return;
     entry.retryableError = isRetryableThumbnailError(error);
-    this.publish(entry, { status: "error", message: errorMessage(error) });
+    this.publish(entry, {
+      status: "error",
+      message: errorMessage(error),
+      code: thumbnailErrorCode(error),
+    });
     if (entry.retryableError) this.scheduleRetry(entry);
   }
 

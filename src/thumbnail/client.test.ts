@@ -147,7 +147,11 @@ describe("ThumbnailClient", () => {
       const unsubscribe = client.subscribe(request, vi.fn());
 
       await Promise.resolve();
-      expect(client.getSnapshot(coverKey)).toEqual({ status: "error", message: "fixture outage" });
+      expect(client.getSnapshot(coverKey)).toEqual({
+        status: "error",
+        message: "fixture outage",
+        code: "THUMBNAIL_temporarilyUnavailable",
+      });
       expect(resolve).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(2_999);
@@ -290,6 +294,7 @@ describe("ThumbnailClient", () => {
       expect(client.getSnapshot(coverKey)).toEqual({
         status: "error",
         message: "source thumbnail does not exist",
+        code: "THUMBNAIL_notFound",
       });
       unsubscribeCritical();
       unsubscribePrefetch();
@@ -315,7 +320,11 @@ describe("ThumbnailClient", () => {
 
       client.reportDisplayFailure(request, "first decode failed");
       expect(displayFailed).toHaveBeenCalledWith(request, "first decode failed");
-      expect(client.getSnapshot(coverKey)).toEqual({ status: "error", message: "first decode failed" });
+      expect(client.getSnapshot(coverKey)).toEqual({
+        status: "error",
+        message: "first decode failed",
+        code: "THUMBNAIL_decodeFailed",
+      });
 
       await vi.advanceTimersByTimeAsync(3_000);
       expect(resolve).toHaveBeenCalledTimes(2);
@@ -327,7 +336,11 @@ describe("ThumbnailClient", () => {
       client.reportDisplayFailure(request, "second decode failed");
       await vi.advanceTimersByTimeAsync(3_000);
       expect(resolve).toHaveBeenCalledTimes(2);
-      expect(client.getSnapshot(coverKey)).toEqual({ status: "error", message: "second decode failed" });
+      expect(client.getSnapshot(coverKey)).toEqual({
+        status: "error",
+        message: "second decode failed",
+        code: "THUMBNAIL_decodeFailed",
+      });
 
       unsubscribe();
       await Promise.resolve();

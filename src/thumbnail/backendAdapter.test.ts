@@ -196,4 +196,46 @@ describe("BackendThumbnailAdapter", () => {
     });
     adapter.dispose();
   });
+
+  it("preserves the backend retryability contract on typed failures", async () => {
+    let completionHandler: ((event: ThumbnailCompletionEvent) => void) | undefined;
+    const transport = {
+      on: vi.fn(async (_event, handler) => {
+        completionHandler = handler;
+        return () => undefined;
+      }),
+      thumbnailRequest: vi.fn(async () => ({
+        ok: true,
+        data: {
+          requestId: "thumbnail-retryable",
+          key: { kind: "galleryCover", galleryId: 4_051_038 },
+        },
+      } as const)),
+      thumbnailCancel: vi.fn(async () => ({ ok: true, data: true } as const)),
+    } as unknown as BackendClient;
+    const adapter = new BackendThumbnailAdapter(transport);
+
+    const resolution = adapter.resolve(request);
+    await vi.waitFor(() => expect(transport.thumbnailRequest).toHaveBeenCalledOnce());
+    completionHandler?.({
+      requestId: "thumbnail-retryable",
+      key: { kind: "galleryCover", galleryId: 4_051_038 },
+      outcome: {
+        status: "failed",
+        failure: {
+          key: { kind: "galleryCover", galleryId: 4_051_038 },
+          code: "responseInvalid",
+          message: "thumbnail source returned a non-image response",
+          retryable: true,
+          negativeCacheHit: false,
+        },
+      },
+    });
+
+    await expect(resolution).rejects.toMatchObject({
+      name: "THUMBNAIL_responseInvalid",
+      retryable: true,
+    });
+    adapter.dispose();
+  });
 });

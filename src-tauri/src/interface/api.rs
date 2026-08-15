@@ -4,6 +4,7 @@ use serde::{ser::SerializeMap, Serialize, Serializer};
 use serde_json::{json, Value};
 
 use crate::application::{ApplicationError, RepositoryError};
+use crate::source::{SourceContractError, SourceErrorCode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -206,6 +207,171 @@ impl From<RepositoryError> for ApiError {
                 action: Some(ApiAction::None),
                 details: None,
             },
+            RepositoryError::Source(error) => source_error(error),
+        }
+    }
+}
+
+fn source_error(error: SourceContractError) -> ApiError {
+    let (code, message, action) = match error.code {
+        SourceErrorCode::Cancelled => (
+            "REQUEST_CANCELLED",
+            "The source request was cancelled",
+            ApiAction::None,
+        ),
+        SourceErrorCode::Validation => (
+            "SOURCE_VALIDATION",
+            "The source rejected the request",
+            ApiAction::None,
+        ),
+        SourceErrorCode::NotFound => (
+            "SOURCE_NOT_FOUND",
+            "The requested item was not found in the current source",
+            ApiAction::None,
+        ),
+        SourceErrorCode::Protocol => (
+            "SOURCE_PROTOCOL",
+            "The source response did not match the supported protocol",
+            ApiAction::None,
+        ),
+        SourceErrorCode::InvalidData => (
+            "SOURCE_INVALID_DATA",
+            "The source returned data that could not be read safely",
+            ApiAction::None,
+        ),
+        SourceErrorCode::RateLimited => (
+            "SOURCE_RATE_LIMITED",
+            "The source is rate-limiting requests; try again later",
+            ApiAction::Retry,
+        ),
+        SourceErrorCode::TemporarilyUnavailable => (
+            "SOURCE_TEMPORARILY_UNAVAILABLE",
+            "The source is temporarily unavailable",
+            ApiAction::Retry,
+        ),
+        SourceErrorCode::Timeout => (
+            "SOURCE_TIMEOUT",
+            "The source did not respond in time",
+            ApiAction::Retry,
+        ),
+        SourceErrorCode::Unauthorized => (
+            "SOURCE_UNAUTHORIZED",
+            "The source rejected the connection",
+            ApiAction::Reconnect,
+        ),
+        SourceErrorCode::Transport => (
+            "NETWORK_OFFLINE",
+            "A connection to the source could not be established",
+            ApiAction::Reconnect,
+        ),
+        SourceErrorCode::ImageCandidatesExhausted => (
+            "IMAGE_CANDIDATES_EXHAUSTED",
+            "No supported image candidate could be loaded",
+            ApiAction::None,
+        ),
+        SourceErrorCode::ImageResponseInvalid => (
+            "IMAGE_RESPONSE_INVALID",
+            "The source returned a response that is not a supported image",
+            ApiAction::Retry,
+        ),
+        SourceErrorCode::ImageDecodeFailed => (
+            "IMAGE_DECODE_FAILED",
+            "The image could not be decoded safely",
+            ApiAction::Review,
+        ),
+    };
+
+    let mut details = BTreeMap::from([
+        ("category".into(), json!(error.category.as_str())),
+        ("sourceCode".into(), json!(error.code.as_str())),
+    ]);
+    if let Some(http_status) = error.http_status {
+        details.insert("httpStatus".into(), json!(http_status));
+    }
+    if let Some(retry_after_seconds) = error.retry_after_seconds {
+        details.insert("retryAfterSeconds".into(), json!(retry_after_seconds));
+    }
+
+    ApiError {
+        code: code.into(),
+        message: message.into(),
+        retryable: error.retryable,
+        action: Some(action),
+        details: Some(details),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::{
+        map_http_status, map_transport_failure, SourceContractError, TransportFailureKind,
+    };
+
+    #[test]
+    fn rate_limit_errors_keep_stable_retry_metadata() {
+        let source = map_http_status(429, Some(17)).expect_err("429 must be an error");
+        let api = ApiError::from(RepositoryError::from(source));
+
+        assert_eq!(api.code, "SOURCE_RATE_LIMITED");
+        assert!(api.retryable);
+        assert_eq!(api.action, Some(ApiAction::Retry));
+        assert_eq!(
+            api.details,
+            Some(BTreeMap::from([
+                ("category".into(), json!("remote")),
+                ("httpStatus".into(), json!(429)),
+                ("retryAfterSeconds".into(), json!(17)),
+                ("sourceCode".into(), json!("rate_limited")),
+            ]))
+        );
+    }
+
+    #[test]
+    fn transport_error_message_does_not_expose_internal_detail() {
+        let source = map_transport_failure(
+            TransportFailureKind::Connection,
+            "request containing private search terms failed",
+        );
+        let api = ApiError::from(RepositoryError::from(source));
+
+        assert_eq!(api.code, "NETWORK_OFFLINE");
+        assert!(api.retryable);
+        assert_eq!(api.action, Some(ApiAction::Reconnect));
+        assert_eq!(
+            api.message,
+            "A connection to the source could not be established"
+        );
+        assert!(!api.message.contains("private search terms"));
+    }
+
+    #[test]
+    fn image_failures_use_stable_codes_without_exposing_source_details() {
+        let failures = [
+            (
+                SourceContractError::image_candidates_exhausted(),
+                "IMAGE_CANDIDATES_EXHAUSTED",
+            ),
+            (
+                SourceContractError::image_response_invalid(
+                    "https://private.example/image?token=secret returned HTML",
+                ),
+                "IMAGE_RESPONSE_INVALID",
+            ),
+            (
+                SourceContractError::image_decode_failed(
+                    "decoder failed for C:\\Users\\private\\download.webp",
+                ),
+                "IMAGE_DECODE_FAILED",
+            ),
+        ];
+
+        for (source, expected_code) in failures {
+            let api = ApiError::from(RepositoryError::from(source));
+            assert_eq!(api.code, expected_code);
+            assert!(!api.message.contains("private"));
+            assert!(!api.message.contains("secret"));
+            assert!(!api.message.contains("C:\\Users"));
         }
     }
 }

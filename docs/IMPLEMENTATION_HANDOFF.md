@@ -18,9 +18,9 @@
 |---|---|---|
 | startup·single-instance | 완료 | 두 번째 실행은 기존 창을 복원하며, fatal startup은 non-zero exit·사용자 안내·로컬 오류 로그를 남긴다 |
 | DB·migration | 완료 | schema v7, future-schema 무변경 거부, timestamp/version backup, WAL·explicit startup recovery 검증 완료 |
-| Hitomi search | 부분 완료 | production live adapter 후보 구현, 전체 계약 검증 전 |
-| detail·Related | 부분 완료 | typed detail projection은 있으나 Related·page 전체 흐름 검증 전 |
-| thumbnail | 부분 완료 | 전역 coordinator와 live resolver 후보 구현, disk cache 없음 |
+| Hitomi search | 완료 | production live adapter, query serialization, paging/filter/popular fixture contract 검증 완료; live smoke만 미검증 |
+| detail·Related | 완료 | typed galleryinfo detail·Related 5개와 source-page identity를 저장 fixture 통합 테스트로 검증 |
+| thumbnail | 부분 완료 | 전역 coordinator와 live WebP resolver·우선순위·취소·cache 검증 완료; persistent disk cache는 artifact 단계에서 추가 |
 | download | blocker | queue는 실제 artifact pipeline 없이 `interrupted`에서 정직하게 중단 |
 | resume·reconcile | blocker | 파일 checkpoint·manifest·reconcile 미구현 |
 | file open | blocker | `artifact_open_first` 미구현 |
@@ -41,6 +41,14 @@
 - `.github/workflows/windows-ci.yml`과 `tools/verify.ps1`: 로컬/CI가 같은 frozen frontend, Rust fmt/check/test/clippy, Tauri release, whitespace gate를 실행한다.
 - 데이터 호환성: schema version은 7로 유지된다. repository open은 더 이상 volatile job을 바꾸지 않으며, single-instance를 획득한 app setup이 startup recovery를 명시적으로 수행한다.
 
+### Milestone B — Hitomi read path
+
+- `source/hitomi`: galleryinfo·gg.js·Nozomi range와 WebP 후보를 명시적 type으로 parsing하며 parser/resolver contract version을 각각 1로 고정했다. 저장 fixture는 필드 누락, AVIF/WebP flag, 404/429/503/timeout과 잘못된 payload 경계를 포함한다.
+- `infrastructure/hitomi_live`: production 검색·상세·Related·썸네일이 같은 `HitomiLiveAdapter`와 pooled HTTP scheduler를 공유한다. 전역/host별 concurrency, 최소 시작 간격, `critical > visible > download > prefetch`, cancellation, bounded backoff+jitter, Retry-After와 cooldown을 적용한다.
+- 원격 응답은 HTTPS allowlist와 redirect host를 다시 확인하고 size·MIME·signature·decode dimension/allocation을 제한한다. query·cookie·raw URL은 사용자 오류나 기본 로그에 노출하지 않는다.
+- `ThumbnailResolver`와 frontend adapter는 새 worker를 만들지 않고 기존 전역 coordinator를 사용한다. backend의 typed failure와 retryability를 WebView까지 보존하고 접근 가능한 한국어 fallback 상태를 표시한다.
+- production Tauri는 live adapter를 기본 주입하며 브라우저 review mode와 테스트만 fixture를 사용한다. 데이터 schema 변경은 없다.
+
 ## 4. Contracts and versions
 
 - 앱/package/Tauri version: `0.1.0`
@@ -49,7 +57,8 @@
 - migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`
 - manifest schema version: 미구현
 - HashProfile version: 미구현
-- Hitomi parser/resolver: working tree에서 typed contract를 도입 중이며 milestone 완료 시 version을 고정한다.
+- Hitomi parser version: 1
+- Hitomi resolver version: 1
 - 주요 command/event: `docs/API_CONTRACT_V2.md`를 기준으로 하며 실제 handler와 함께 갱신한다.
 
 ## 5. Reliability and security invariants
@@ -74,9 +83,9 @@
 
 - 상세 검증 로그: `.runtime/verification/` (Git ignored)
 - Milestone A 독립 snapshot: Rust lib 51/51, startup 1/1, clippy `-D warnings`, fmt와 whitespace 통과. 프런트 소스는 기준 commit과 동일하다.
-- A/B 통합 working tree: `tools/verify.ps1` 성공 — frontend 89/89, Rust lib 77/77(외부 live smoke 1개 opt-in 제외), startup 1/1, typecheck/build/clippy/Tauri release/whitespace 통과.
+- A/B 통합 working tree: `tools/verify.ps1` 성공 — frontend 89/89, Rust lib 77/77(외부 live smoke 1개 opt-in 제외), startup 1/1, typecheck/build/clippy/Tauri release/whitespace 통과. 이후 parser/resolver version 회귀 1개를 추가해 source suite 12/12를 재검증했다.
 - 검증 로그: `.runtime/verification/verify-20260815-165051.log`.
-- 외부 Hitomi live smoke는 일반 fixture CI와 분리해 기록한다.
+- 외부 Hitomi live smoke는 일반 fixture CI와 분리했다. 2026-08-15 실행은 sandbox network/승인 사용량 제한 때문에 완료하지 못했으며 production 구현 완료와 live 검증 상태를 분리한다.
 - E2E는 실제 파일을 생성·검증한 결과가 있을 때만 통과로 기록한다.
 
 ## 7. Known limitations and blockers
@@ -107,5 +116,6 @@
 
 - 최종 branch: `agent/phase-3-foundation`
 - 기준 원격: `origin` → `assesse/Atsumi-Next`
-- 생성 commit, push 결과, PR 상태는 각 milestone 완료 시 SHA와 함께 누적한다.
+- `6a2c96a` — `chore: harden startup database safety and windows ci`
+- 이후 milestone commit, push 결과와 PR 상태는 완료 시 SHA와 함께 누적한다.
 - PR merge, `main` 직접 push, force push, release/tag 생성은 수행하지 않는다.

@@ -80,6 +80,9 @@ export type ThumbnailFailure = {
   code:
     | "cancelled"
     | "notFound"
+    | "candidatesExhausted"
+    | "responseInvalid"
+    | "decodeFailed"
     | "temporarilyUnavailable"
     | "unauthorized"
     | "invalidData"

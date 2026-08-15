@@ -6,7 +6,7 @@
 - Core: Rust
 - Frontend: TypeScript + React
 - Persistence: SQLite
-- HTTP: 비동기 client와 전역 scheduler
+- HTTP: pooled blocking client와 전역 scheduler (`spawn_blocking` application boundary)
 - Image processing: worker task와 versioned hash profile
 
 이 스택은 D-101~D-103과 ADR-0002로 승인됐다. SQLite가 canonical source이며 frontend memory state는 snapshot과 event의 projection만 가진다.
@@ -135,14 +135,16 @@ type JobEvent = {
 - 프론트 store: backend snapshot의 projection과 임시 UI 상태
 - localStorage: 사용하지 않음
 
-## 다운로드 scheduler
+## 공용 HTTP scheduler
 
 - 전역 이미지 요청 예산과 갤러리 worker 수를 분리한다.
 - host별 동시성, 전역 요청 시작 간격, cooldown을 독립 설정한다.
 - 2026-08-04 Classic 실측의 `동시 5, 최소 25ms`를 초기 profile로 가져온다.
 - connection pool 구조로 바뀌면 별도 probe로 다시 측정한다.
-- 검색, thumbnail, 다운로드는 priority queue에서 서로 다른 budget을 사용한다.
-- retry는 오류 분류, attempt, host 상태에 따라 계산한다.
+- 검색, thumbnail, 다운로드는 하나의 pooled transport와 전역/host별 permit을 공유하고 `critical > visible > download > prefetch` 순서로 dispatch한다.
+- 429는 `Retry-After` 또는 기본 cooldown, 503·timeout은 bounded exponential backoff와 stable jitter를 적용한다. 404와 계약 오류는 반복 재시도하지 않는다.
+- 대기·backoff·body read는 cancellation token을 확인하며, 취소 뒤 도착한 결과는 cache에 넣지 않는다.
+- telemetry는 host, attempt, elapsed와 분류 code만 기록하고 URL query·cookie·검색어는 기록하지 않는다.
 
 ## Thumbnail coordinator
 
@@ -154,7 +156,8 @@ type JobEvent = {
 - WebView는 전달된 byte payload를 짧게 유지되는 Blob URL로 표시하고 마지막 frontend 구독에서 해제한다. 실제 원본 URL과 cache path는 backend 경계 밖으로 노출하지 않는다.
 - 카드 preview는 `IntersectionObserver`의 near-viewport 경계 안에서만 구독하고, 경계를 벗어나면 frontend 구독과 Blob URL을 해제한다. Detail/Review의 현재 작업은 `critical`, 화면 안 카드는 `visible`, 나머지는 `prefetch`로 분류한다.
 - retryable failure는 짧은 negative-cache TTL 뒤 한정 재시도하고, permanent failure는 더 긴 negative cache로 반복 원격 호출을 막는다. WebView decode 실패는 해당 key cache를 무효화한 뒤 한 번만 재해석한다.
-- 현재 resolver는 로컬 fixture다. 실제 HTTP 후보 선택, decode 검증과 disk cache는 `ThumbnailResolver` 구현으로 교체한다.
+- production Tauri는 `HitomiLiveAdapter` 하나를 `SearchRepository`와 `ThumbnailResolver` 양쪽에 공유 주입한다. 브라우저 review mode와 단위 테스트만 fixture resolver를 사용한다.
+- resolver는 HTTPS allowlist·redirect 재검증·응답 크기·MIME/signature·decode dimension/allocation을 검사하고 WebP 후보를 순서대로 시도한다. disk cache는 artifact pipeline에서 versioned cache로 추가한다.
 
 ## 해시와 중복
 
@@ -168,9 +171,9 @@ type JobEvent = {
 ## 삭제와 복구
 
 - 삭제는 먼저 quarantine으로 이동한다.
-- DB에는 원래 경로, 격리 경로, 이유, 만료 시각을 기록한다.
-- UI는 만료 전 undo를 제공한다.
-- 영구 삭제는 별도 maintenance job이다.
+- DB에는 원래 경로, 격리 경로, 이유와 시각을 기록한다.
+- UI는 undo와 사용자가 직접 실행하는 quarantine 비우기를 제공한다.
+- 자동 만료·자동 영구 삭제는 하지 않는다.
 - 다운로드 root 밖으로 해석되는 경로는 거부한다.
 
 ## 테스트 경계

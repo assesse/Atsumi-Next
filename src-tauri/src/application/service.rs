@@ -226,14 +226,13 @@ impl ApplicationService {
         let request = request.normalized()?;
         tracing::info!(
             operation_id = "search_submit",
-            query = %request.text,
-            include_tags = ?request.include_tags,
-            exclude_tags = ?request.exclude_tags,
-            languages = ?request.languages,
+            has_text = !request.text.is_empty(),
+            include_tag_count = request.include_tags.len(),
+            exclude_tag_count = request.exclude_tags.len(),
+            language_count = request.languages.len(),
             sort = ?request.sort,
             page_size = request.page_size,
-            fixture_clauses = "text,includeTags,excludeTags,languages,sort",
-            "submitting fixture search query"
+            "submitting source search query"
         );
         self.search_repository()?
             .search_submit(&request)

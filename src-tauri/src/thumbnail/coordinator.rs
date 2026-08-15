@@ -814,7 +814,8 @@ fn worker_loop(core: Arc<CoordinatorCore>) {
             return;
         };
         let resolution = catch_unwind(AssertUnwindSafe(|| {
-            core.resolver.resolve(&item.key, &cancellation)
+            core.resolver
+                .resolve_with_priority(&item.key, &cancellation, item.priority)
         }))
         .unwrap_or_else(|_| {
             Err(ThumbnailResolveError::new(

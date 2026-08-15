@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::domain::{DownloadEntryId, GalleryId, JobState, ValidationError};
+use crate::source::SourceContractError;
 
 #[derive(Debug, Error)]
 pub enum RepositoryError {
@@ -16,6 +17,8 @@ pub enum RepositoryError {
     MigrationBackup(String),
     #[error("database operation failed: {0}")]
     Other(String),
+    #[error(transparent)]
+    Source(#[from] SourceContractError),
 }
 
 #[derive(Debug, Error)]

@@ -94,7 +94,8 @@ pub async fn search_submit(
     state: State<'_, AppState>,
     request: SearchRequest,
 ) -> Result<ApiResult<SearchSubmission>, ApiError> {
-    Ok(state.service.search_submit(request).into())
+    let service = state.service.clone();
+    Ok(run_application_blocking("search_submit", move || service.search_submit(request)).await)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -278,7 +279,11 @@ pub async fn search_page_get(
     query_id: String,
     page: u32,
 ) -> Result<ApiResult<GalleryPage>, ApiError> {
-    Ok(state.service.search_page_get(query_id, page).into())
+    let service = state.service.clone();
+    Ok(run_application_blocking("search_page_get", move || {
+        service.search_page_get(query_id, page)
+    })
+    .await)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -286,7 +291,42 @@ pub async fn gallery_detail_get(
     state: State<'_, AppState>,
     gallery_id: i64,
 ) -> Result<ApiResult<GalleryDetail>, ApiError> {
-    Ok(state.service.gallery_detail_get(gallery_id).into())
+    let service = state.service.clone();
+    Ok(run_application_blocking("gallery_detail_get", move || {
+        service.gallery_detail_get(gallery_id)
+    })
+    .await)
+}
+
+async fn run_application_blocking<T, F>(operation_id: &'static str, operation: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ApplicationError> + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(operation).await {
+        Ok(result) => result.into(),
+        Err(error) => {
+            let (cancelled, panicked) = match &error {
+                tauri::Error::JoinError(join_error) => {
+                    (join_error.is_cancelled(), join_error.is_panic())
+                }
+                _ => (false, false),
+            };
+            tracing::error!(
+                operation_id,
+                cancelled,
+                panicked,
+                "blocking application task did not complete"
+            );
+            ApiResult::failure(ApiError {
+                code: "BACKEND_TASK_FAILED".into(),
+                message: "The backend could not complete the request".into(),
+                retryable: true,
+                action: Some(super::ApiAction::Retry),
+                details: None,
+            })
+        }
+    }
 }
 
 async fn run_fixture_download_job(
@@ -353,5 +393,45 @@ fn thumbnail_coordinator_error(error: ThumbnailCoordinatorError) -> ApiError {
             super::ApiAction::None
         }),
         details: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use super::*;
+    use crate::domain::ValidationError;
+
+    #[test]
+    fn application_blocking_helper_runs_off_the_calling_thread() {
+        let caller = thread::current().id();
+        let result = tauri::async_runtime::block_on(run_application_blocking(
+            "test_blocking_boundary",
+            || Ok(thread::current().id()),
+        ));
+
+        match result {
+            ApiResult::Success(worker) => assert_ne!(worker, caller),
+            ApiResult::Failure(error) => panic!("blocking call unexpectedly failed: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn application_blocking_helper_preserves_api_errors() {
+        let result =
+            tauri::async_runtime::block_on(run_application_blocking("test_error_boundary", || {
+                Err::<(), _>(
+                    ValidationError::new("query", "must not contain unsupported syntax").into(),
+                )
+            }));
+
+        match result {
+            ApiResult::Failure(error) => {
+                assert_eq!(error.code, "VALIDATION_ERROR");
+                assert!(!error.retryable);
+            }
+            ApiResult::Success(()) => panic!("validation error unexpectedly succeeded"),
+        }
     }
 }

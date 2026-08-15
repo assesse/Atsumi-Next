@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{ResolvedThumbnail, ThumbnailFailureCode, ThumbnailKey};
+use super::{ResolvedThumbnail, ThumbnailFailureCode, ThumbnailKey, ThumbnailPriority};
 
 #[derive(Debug, Clone, Default)]
 pub struct CancellationToken {
@@ -70,6 +70,15 @@ pub trait ThumbnailResolver: Send + Sync + 'static {
         key: &ThumbnailKey,
         cancellation: &CancellationToken,
     ) -> Result<ResolvedThumbnail, ThumbnailResolveError>;
+
+    fn resolve_with_priority(
+        &self,
+        key: &ThumbnailKey,
+        cancellation: &CancellationToken,
+        _priority: ThumbnailPriority,
+    ) -> Result<ResolvedThumbnail, ThumbnailResolveError> {
+        self.resolve(key, cancellation)
+    }
 }
 
 /// Deterministic, dependency-free resolver for local development and tests.
