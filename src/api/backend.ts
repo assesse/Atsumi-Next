@@ -6,6 +6,11 @@ import type {
   AutoFindExclusionResult,
   AutoFindRun,
   AutoFindSnapshot,
+  ClassicImportApplyRequest,
+  ClassicImportApplyResult,
+  ClassicImportDryRunRequest,
+  ClassicImportReport,
+  ClassicImportRollbackRequest,
   DownloadChangedEvent,
   DownloadEntry,
   DownloadListRequest,
@@ -99,6 +104,11 @@ export interface BackendClient {
   internalRemovalPlan(request: InternalRemovalPlanRequest): Promise<ApiResult<InternalRemovalPlan>>;
   internalRemovalApply(request: InternalRemovalApplyRequest): Promise<ApiResult<InternalRemovalResult>>;
   internalRemovalUndo(request: InternalRemovalUndoRequest): Promise<ApiResult<InternalRemovalResult>>;
+  classicImportPickFolder(): Promise<ApiResult<string | null>>;
+  classicImportDryRun(request: ClassicImportDryRunRequest): Promise<ApiResult<ClassicImportReport>>;
+  classicImportGet(importId: string): Promise<ApiResult<ClassicImportReport>>;
+  classicImportApply(request: ClassicImportApplyRequest): Promise<ApiResult<ClassicImportApplyResult>>;
+  classicImportRollback(request: ClassicImportRollbackRequest): Promise<ApiResult<ClassicImportReport>>;
   downloadQueueAdd(galleries: GalleryId[], requestId: string): Promise<ApiResult<DownloadEntry[]>>;
   downloadEntriesList(request: DownloadListRequest): Promise<ApiResult<DownloadPage>>;
   downloadRetry(entryIds: string[]): Promise<ApiResult<JobRef[]>>;
@@ -371,6 +381,17 @@ const cloneInternalSnapshot = (snapshot: InternalDuplicateSnapshot): InternalDup
   quarantineRecords: snapshot.quarantineRecords.map((record) => ({ ...record })),
 });
 
+const cloneClassicImportReport = (report: ClassicImportReport): ClassicImportReport => ({
+  ...report,
+  counts: { ...report.counts },
+  conflicts: report.conflicts.map((conflict) => ({ ...conflict })),
+  galleries: report.galleries.map((gallery) => ({
+    ...gallery,
+    pages: gallery.pages.map((page) => ({ ...page })),
+    conflictIds: [...gallery.conflictIds],
+  })),
+});
+
 type Handler<K extends keyof BackendEventMap> = (payload: BackendEventMap[K]) => void;
 
 class BrowserMockBackend implements BackendClient {
@@ -393,6 +414,8 @@ class BrowserMockBackend implements BackendClient {
   private downloadQueueRequests = new Map<string, { gallerySetKey: string; entries: DownloadEntry[] }>();
   private nextDownloadEntryId = 1;
   private nextThumbnailRequestId = 1;
+  private classicFolderSelection = 0;
+  private classicImportReport: ClassicImportReport | null = null;
   private pendingThumbnailRequests = new Map<string, ThumbnailRequestDto>();
   private thumbnailRequestsTotal = 0;
   private favorites = new Map<string, FavoriteRecord>();
@@ -1326,6 +1349,110 @@ class BrowserMockBackend implements BackendClient {
     });
   }
 
+  async classicImportPickFolder(): Promise<ApiResult<string | null>> {
+    this.classicFolderSelection += 1;
+    return ok(this.classicFolderSelection % 2 === 1
+      ? "C:\\BrowserFixture\\AtsumiData"
+      : "C:\\BrowserFixture\\Downloads");
+  }
+
+  async classicImportDryRun(request: ClassicImportDryRunRequest): Promise<ApiResult<ClassicImportReport>> {
+    if (!request.dataRoot.trim()) return validationError("dataRoot", "must not be empty");
+    const now = new Date().toISOString();
+    this.classicImportReport = {
+      importId: "classic-import-browser-1",
+      revision: 0,
+      state: "dry_run",
+      dataRootLabel: "AtsumiData",
+      ...(request.downloadRoot ? { downloadRootLabel: "Downloads" } : {}),
+      sourceFingerprint: "browser-classic-fixture-v1",
+      counts: {
+        favorites: 3,
+        searchHistory: 2,
+        exclusions: 1,
+        hiddenGalleries: 1,
+        pairExclusions: 1,
+        seriesGroups: 1,
+        galleriesDiscovered: request.downloadRoot ? 2 : 0,
+        galleriesEligible: request.downloadRoot ? 1 : 0,
+        pageFiles: request.downloadRoot ? 12 : 0,
+        legacyHashRows: 18,
+        plannedCopyBytes: request.downloadRoot ? 4_194_304 : 0,
+        conflicts: 1,
+      },
+      conflicts: [{
+        conflictId: "folder-without-state:4051038",
+        code: "folder_without_state",
+        severity: "warning",
+        galleryId: galleryId(4_051_038),
+        message: "manifest-backed 폴더가 Classic UI 목록에는 없습니다.",
+        requiresAcknowledgement: true,
+      }],
+      galleries: request.downloadRoot ? [{
+        galleryId: galleryId(4_051_038),
+        title: "Archive of Rain",
+        artist: "serein",
+        sourceFolder: "Archive of Rain",
+        expectedPages: 12,
+        pages: [],
+        plannedBytes: 4_194_304,
+        eligible: true,
+        conflictIds: ["folder-without-state:4051038"],
+      }] : [],
+      canApply: true,
+      createdAt: now,
+    };
+    return ok(cloneClassicImportReport(this.classicImportReport));
+  }
+
+  async classicImportGet(importId: string): Promise<ApiResult<ClassicImportReport>> {
+    if (!this.classicImportReport || this.classicImportReport.importId !== importId) {
+      return notFoundError("CLASSIC_IMPORT_NOT_FOUND", "Classic 가져오기 보고서를 찾지 못했습니다.");
+    }
+    return ok(cloneClassicImportReport(this.classicImportReport));
+  }
+
+  async classicImportApply(request: ClassicImportApplyRequest): Promise<ApiResult<ClassicImportApplyResult>> {
+    if (!this.classicImportReport || this.classicImportReport.importId !== request.importId) {
+      return notFoundError("CLASSIC_IMPORT_NOT_FOUND", "Classic 가져오기 보고서를 찾지 못했습니다.");
+    }
+    if (this.classicImportReport.revision !== request.expectedRevision) return conflict("Classic 가져오기");
+    const missing = this.classicImportReport.conflicts.find((item) =>
+      item.requiresAcknowledgement && !request.acceptedConflictIds.includes(item.conflictId));
+    if (missing) {
+      return notFoundError("CLASSIC_IMPORT_CONFLICT", "확인하지 않은 충돌이 있습니다.", {
+        conflictId: missing.conflictId,
+      });
+    }
+    const report: ClassicImportReport = {
+      ...cloneClassicImportReport(this.classicImportReport),
+      revision: this.classicImportReport.revision + 1,
+      state: "applied",
+      appliedAt: new Date().toISOString(),
+    };
+    this.classicImportReport = report;
+    return ok({
+      report: cloneClassicImportReport(report),
+      importedGalleryIds: report.galleries.filter((gallery) => gallery.eligible).map((gallery) => gallery.galleryId),
+      copiedFiles: report.counts.pageFiles,
+      copiedBytes: report.counts.plannedCopyBytes,
+    });
+  }
+
+  async classicImportRollback(request: ClassicImportRollbackRequest): Promise<ApiResult<ClassicImportReport>> {
+    if (!this.classicImportReport || this.classicImportReport.importId !== request.importId) {
+      return notFoundError("CLASSIC_IMPORT_NOT_FOUND", "Classic 가져오기 보고서를 찾지 못했습니다.");
+    }
+    if (this.classicImportReport.revision !== request.expectedRevision) return conflict("Classic 가져오기");
+    this.classicImportReport = {
+      ...cloneClassicImportReport(this.classicImportReport),
+      revision: this.classicImportReport.revision + 1,
+      state: "rolled_back",
+      rolledBackAt: new Date().toISOString(),
+    };
+    return ok(cloneClassicImportReport(this.classicImportReport));
+  }
+
   async appQuit(): Promise<ApiResult<null>> {
     return ok(null);
   }
@@ -1610,6 +1737,26 @@ class TauriBackend implements BackendClient {
 
   internalRemovalUndo(request: InternalRemovalUndoRequest): Promise<ApiResult<InternalRemovalResult>> {
     return invoke("internal_removal_undo", { request });
+  }
+
+  classicImportPickFolder(): Promise<ApiResult<string | null>> {
+    return invoke("classic_import_pick_folder");
+  }
+
+  classicImportDryRun(request: ClassicImportDryRunRequest): Promise<ApiResult<ClassicImportReport>> {
+    return invoke("classic_import_dry_run", { request });
+  }
+
+  classicImportGet(importId: string): Promise<ApiResult<ClassicImportReport>> {
+    return invoke("classic_import_get", { importId });
+  }
+
+  classicImportApply(request: ClassicImportApplyRequest): Promise<ApiResult<ClassicImportApplyResult>> {
+    return invoke("classic_import_apply", { request });
+  }
+
+  classicImportRollback(request: ClassicImportRollbackRequest): Promise<ApiResult<ClassicImportReport>> {
+    return invoke("classic_import_rollback", { request });
   }
 
   downloadQueueAdd(

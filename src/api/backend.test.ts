@@ -42,6 +42,46 @@ describe("browser backend settings contract", () => {
   });
 });
 
+describe("browser backend Classic import contract", () => {
+  it("requires warning acknowledgement and preserves a revisioned rollback report", async () => {
+    const dryRun = await backend.classicImportDryRun({
+      dataRoot: "C:\\BrowserFixture\\AtsumiData",
+      downloadRoot: "C:\\BrowserFixture\\Downloads",
+    });
+    expect(dryRun.ok).toBe(true);
+    if (!dryRun.ok) return;
+    expect(dryRun.data).toMatchObject({
+      state: "dry_run",
+      canApply: true,
+      counts: { galleriesEligible: 1 },
+    });
+    const warning = dryRun.data.conflicts.find((item) => item.requiresAcknowledgement);
+    expect(warning).toBeDefined();
+
+    const rejected = await backend.classicImportApply({
+      importId: dryRun.data.importId,
+      expectedRevision: dryRun.data.revision,
+      acceptedConflictIds: [],
+    });
+    expect(rejected).toMatchObject({ ok: false, error: { code: "CLASSIC_IMPORT_CONFLICT" } });
+
+    const applied = await backend.classicImportApply({
+      importId: dryRun.data.importId,
+      expectedRevision: dryRun.data.revision,
+      acceptedConflictIds: [warning!.conflictId],
+    });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(applied.data.report.state).toBe("applied");
+
+    const rolledBack = await backend.classicImportRollback({
+      importId: applied.data.report.importId,
+      expectedRevision: applied.data.report.revision,
+    });
+    expect(rolledBack).toMatchObject({ ok: true, data: { state: "rolled_back" } });
+  });
+});
+
 describe("browser backend search contract", () => {
   it("reuses a canonical query key and returns deterministic Recent pages", async () => {
     const first = await backend.searchSubmit(searchRequest({

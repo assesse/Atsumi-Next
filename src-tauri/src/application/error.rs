@@ -59,6 +59,14 @@ pub enum ApplicationError {
     InternalDuplicateEntryNotFound(String),
     #[error("internal removal plan is invalid: {0}")]
     InternalRemovalPlanInvalid(String),
+    #[error("Classic import {0:?} was not found")]
+    ClassicImportNotFound(String),
+    #[error("Classic import is invalid: {0}")]
+    ClassicImportInvalid(String),
+    #[error("Classic source changed after the dry run")]
+    ClassicImportSourceChanged,
+    #[error("Classic import conflicts must be reviewed: {0}")]
+    ClassicImportConflict(String),
     #[error(transparent)]
     DownloadPipeline(#[from] DownloadPipelineError),
     #[error(transparent)]

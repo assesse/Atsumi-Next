@@ -1,5 +1,6 @@
 mod artifact;
 mod auto_find;
+mod classic_import;
 mod download;
 mod duplicate;
 mod gallery;
@@ -19,6 +20,14 @@ pub use auto_find::{
     AutoFindCandidate, AutoFindCandidateRecord, AutoFindExclusionResult, AutoFindRun,
     AutoFindRunState, AutoFindSnapshot, FavoriteKey, FavoriteMutationResult, FavoriteNamespace,
     FavoriteRecord, SearchHistoryEntry,
+};
+pub use classic_import::{
+    ClassicConflictCode, ClassicConflictSeverity, ClassicImportApplyRequest,
+    ClassicImportApplyResult, ClassicImportConflict, ClassicImportCounts,
+    ClassicImportDryRunRequest, ClassicImportGalleryPlan, ClassicImportPagePlan, ClassicImportPlan,
+    ClassicImportReport, ClassicImportRollbackRequest, ClassicImportState,
+    ClassicLegacyHashSummary, ClassicPairPlan, ClassicSeriesPlan, ClassicSourceRootKind,
+    StoredClassicImport, CLASSIC_IMPORT_SCHEMA_VERSION,
 };
 pub use download::{DownloadEntry, DownloadListRequest, DownloadPage, DownloadReviewKind};
 pub use duplicate::{

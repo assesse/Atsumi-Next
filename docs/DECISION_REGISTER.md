@@ -61,6 +61,10 @@
 | D-141 | 내부 visual page 중복은 단일 유사 page로 만들지 않고 최소 2행의 단조 scene block만 Review에 올린다. exact SHA 반복은 별도 근거로 한 행을 허용한다. | 2026-08-16 Milestone F 오탐 안전 경계 |
 | D-142 | 내부 page 제거는 group revision·파일 수·byte 합계를 고정한 plan preview 후에만 artifact 내부 quarantine으로 적용한다. source page number와 검증 metadata를 유지하고 자동 영구 삭제하지 않는다. | 2026-08-16 Milestone F 구현 |
 | D-143 | page quarantine·undo는 DB intent, atomic file move, manifest atomic replace, SQLite completion으로 구성된 crash-safe saga다. 시작 시 pending saga를 재개하고 모호한 두 경로는 overwrite/delete하지 않는다. | 2026-08-16 Milestone F 안전 경계 |
+| D-144 | Classic import는 사용자가 고른 경로만 읽기 전용으로 inventory하고 원본 state·DB·파일을 이동·수정·삭제하지 않는다. | 2026-08-16 Milestone G 안전 경계 |
+| D-145 | Classic artifact는 dry-run·경고 확인·최종 승인 뒤 Next 관리 폴더에 검증된 WebP 복사본으로 만들며 실제 파일·manifest 확인 뒤에만 completed로 등록한다. | 2026-08-16 Milestone G 구현 |
+| D-146 | Classic legacy hash는 provenance로만 보존하고 현재 HashProfile의 중복 차단 근거로 신뢰하지 않는다. manifestless·ID mismatch·중복 폴더를 자동 추측하거나 병합하지 않는다. | 2026-08-16 Milestone G 안전 경계 |
+| D-147 | Classic rollback은 해당 import가 새로 만든 Next DB row와 복사본만 대상으로 하며 파일은 영구 삭제하지 않고 import 전용 quarantine으로 이동한다. 적용/rollback 중단도 시작 시 같은 상태로 수렴한다. | 2026-08-16 Milestone G 구현 |
 
 ## 제안
 
@@ -80,4 +84,3 @@
 
 1. clickable prototype의 정보 위치와 화면 밀도
 2. quarantine 수동 영구 삭제 화면에서 보여 줄 evidence 범위
-3. Classic import dry-run 보고서 형식

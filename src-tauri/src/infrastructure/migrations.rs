@@ -1036,6 +1036,81 @@ pub const MIGRATIONS: &[Migration] = &[
                 ON page_quarantine_records(state, created_at);
         "#,
     },
+    Migration {
+        version: 14,
+        name: "classic_read_only_import_and_rollback",
+        sql: r#"
+            CREATE TABLE classic_import_runs (
+                import_id TEXT PRIMARY KEY CHECK (length(trim(import_id)) > 0),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                state TEXT NOT NULL CHECK (state IN (
+                    'dry_run', 'applying', 'applied', 'rolling_back',
+                    'rolled_back', 'failed'
+                )),
+                source_schema_version INTEGER NOT NULL CHECK (source_schema_version > 0),
+                data_root TEXT NOT NULL CHECK (length(trim(data_root)) > 0),
+                download_root TEXT,
+                data_root_label TEXT NOT NULL CHECK (length(trim(data_root_label)) > 0),
+                download_root_label TEXT,
+                source_fingerprint TEXT NOT NULL CHECK (length(source_fingerprint) = 64),
+                plan_json TEXT NOT NULL CHECK (json_valid(plan_json)),
+                report_json TEXT NOT NULL CHECK (json_valid(report_json)),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                applied_at TEXT,
+                rolled_back_at TEXT,
+                error_code TEXT,
+                error_message TEXT
+            ) STRICT;
+            CREATE INDEX classic_import_runs_recent_idx
+                ON classic_import_runs(created_at DESC, import_id DESC);
+            CREATE INDEX classic_import_runs_state_idx
+                ON classic_import_runs(state, updated_at);
+
+            CREATE TABLE classic_import_artifact_copies (
+                import_id TEXT NOT NULL
+                    REFERENCES classic_import_runs(import_id) ON DELETE CASCADE,
+                gallery_id INTEGER NOT NULL CHECK (gallery_id > 0),
+                entry_id TEXT NOT NULL UNIQUE CHECK (length(trim(entry_id)) > 0),
+                relative_directory TEXT NOT NULL UNIQUE
+                    CHECK (length(trim(relative_directory)) > 0),
+                copied_files INTEGER NOT NULL CHECK (copied_files >= 0),
+                copied_bytes INTEGER NOT NULL CHECK (copied_bytes >= 0),
+                state TEXT NOT NULL CHECK (state IN (
+                    'copied', 'registered', 'quarantined'
+                )),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                PRIMARY KEY (import_id, gallery_id)
+            ) STRICT;
+
+            CREATE TABLE classic_import_changes (
+                import_id TEXT NOT NULL
+                    REFERENCES classic_import_runs(import_id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL CHECK (sequence >= 0),
+                entity_kind TEXT NOT NULL CHECK (entity_kind IN (
+                    'favorite', 'search_history', 'auto_find_exclusion',
+                    'hidden_gallery', 'pair_exclusion', 'series_group',
+                    'download_artifact'
+                )),
+                entity_key TEXT NOT NULL CHECK (length(trim(entity_key)) > 0),
+                after_revision INTEGER,
+                PRIMARY KEY (import_id, sequence),
+                UNIQUE (import_id, entity_kind, entity_key)
+            ) STRICT;
+
+            CREATE TABLE classic_import_legacy_hashes (
+                import_id TEXT NOT NULL
+                    REFERENCES classic_import_runs(import_id) ON DELETE CASCADE,
+                gallery_id INTEGER NOT NULL CHECK (gallery_id > 0),
+                page_hashes INTEGER NOT NULL CHECK (page_hashes >= 0),
+                file_hashes INTEGER NOT NULL CHECK (file_hashes >= 0),
+                trusted_for_duplicate_blocking INTEGER NOT NULL DEFAULT 0
+                    CHECK (trusted_for_duplicate_blocking = 0),
+                PRIMARY KEY (import_id, gallery_id)
+            ) STRICT;
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1308,8 +1383,8 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
-        assert_eq!(report.applied_versions, vec![12, 13]);
-        assert_eq!(report.current_version, 13);
+        assert_eq!(report.applied_versions, vec![12, 13, 14]);
+        assert_eq!(report.current_version, 14);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",

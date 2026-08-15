@@ -8,18 +8,20 @@ use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use crate::{
     application::{
         ApplicationError, ApplicationService, ArtifactStore, AutoFindSupervisor,
-        DownloadPipelineError, DownloadPipelineErrorCode, DownloadRootPicker, DownloadSupervisor,
-        DuplicateSupervisor, InternalDuplicateSupervisor, ReconcileReport,
+        ClassicImportService, DownloadPipelineError, DownloadPipelineErrorCode, DownloadRootPicker,
+        DownloadSupervisor, DuplicateSupervisor, InternalDuplicateSupervisor, ReconcileReport,
     },
     domain::{
-        AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot, DownloadChangedEvent,
-        DownloadEntry, DownloadListRequest, DownloadPage, DuplicateDecisionRequest,
-        DuplicateReview, DuplicateScanRun, DuplicateSnapshot, FavoriteKey, FavoriteMutationResult,
-        FavoriteRecord, GalleryDetail, GalleryPage, InternalDuplicateReview,
-        InternalDuplicateSnapshot, InternalRemovalApplyRequest, InternalRemovalPlan,
-        InternalRemovalPlanRequest, InternalRemovalResult, InternalRemovalUndoRequest,
-        InternalScanRun, JobRef, SearchHistoryEntry, SearchRequest, SearchSubmission,
-        SettingsPatch, SettingsSnapshot, WindowPlacement, WindowPlacementSnapshot,
+        AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot, ClassicImportApplyRequest,
+        ClassicImportApplyResult, ClassicImportDryRunRequest, ClassicImportReport,
+        ClassicImportRollbackRequest, DownloadChangedEvent, DownloadEntry, DownloadListRequest,
+        DownloadPage, DuplicateDecisionRequest, DuplicateReview, DuplicateScanRun,
+        DuplicateSnapshot, FavoriteKey, FavoriteMutationResult, FavoriteRecord, GalleryDetail,
+        GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot,
+        InternalRemovalApplyRequest, InternalRemovalPlan, InternalRemovalPlanRequest,
+        InternalRemovalResult, InternalRemovalUndoRequest, InternalScanRun, JobRef,
+        SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot,
+        WindowPlacement, WindowPlacementSnapshot,
     },
     thumbnail::{
         ThumbnailCompletionEventDto, ThumbnailCoordinator, ThumbnailCoordinatorError,
@@ -38,6 +40,7 @@ pub struct AppState {
     auto_find: AutoFindSupervisor,
     duplicates: DuplicateSupervisor,
     internal_duplicates: InternalDuplicateSupervisor,
+    classic_import: ClassicImportService,
     download_root_picker: Arc<dyn DownloadRootPicker>,
     artifact_store: Arc<dyn ArtifactStore>,
 }
@@ -54,6 +57,7 @@ impl AppState {
         auto_find: AutoFindSupervisor,
         duplicates: DuplicateSupervisor,
         internal_duplicates: InternalDuplicateSupervisor,
+        classic_import: ClassicImportService,
         download_root_picker: Arc<dyn DownloadRootPicker>,
         artifact_store: Arc<dyn ArtifactStore>,
     ) -> Self {
@@ -65,10 +69,73 @@ impl AppState {
             auto_find,
             duplicates,
             internal_duplicates,
+            classic_import,
             download_root_picker,
             artifact_store,
         }
     }
+}
+
+#[tauri::command]
+pub async fn classic_import_pick_folder(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<Option<String>>, ApiError> {
+    let picker = Arc::clone(&state.download_root_picker);
+    match tauri::async_runtime::spawn_blocking(move || picker.pick_download_root()).await {
+        Ok(Ok(selected)) => {
+            let selected = selected
+                .map(|path| {
+                    path.into_os_string().into_string().map_err(|_| {
+                        ApplicationError::ClassicImportInvalid(
+                            "The selected folder path cannot be represented safely".into(),
+                        )
+                    })
+                })
+                .transpose();
+            Ok(selected.into())
+        }
+        Ok(Err(error)) => Ok(ApiResult::failure(ApplicationError::from(error).into())),
+        Err(error) => Err(blocking_task_error("classic_import_pick_folder", &error)),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn classic_import_dry_run(
+    state: State<'_, AppState>,
+    request: ClassicImportDryRunRequest,
+) -> Result<ApiResult<ClassicImportReport>, ApiError> {
+    let service = state.classic_import.clone();
+    Ok(run_application_blocking("classic_import_dry_run", move || service.dry_run(request)).await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn classic_import_get(
+    state: State<'_, AppState>,
+    import_id: String,
+) -> Result<ApiResult<ClassicImportReport>, ApiError> {
+    let service = state.classic_import.clone();
+    Ok(run_application_blocking("classic_import_get", move || service.get(&import_id)).await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn classic_import_apply(
+    state: State<'_, AppState>,
+    request: ClassicImportApplyRequest,
+) -> Result<ApiResult<ClassicImportApplyResult>, ApiError> {
+    let service = state.classic_import.clone();
+    Ok(run_application_blocking("classic_import_apply", move || service.apply(request)).await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn classic_import_rollback(
+    state: State<'_, AppState>,
+    request: ClassicImportRollbackRequest,
+) -> Result<ApiResult<ClassicImportReport>, ApiError> {
+    let service = state.classic_import.clone();
+    Ok(
+        run_application_blocking("classic_import_rollback", move || service.rollback(request))
+            .await,
+    )
 }
 
 #[tauri::command]

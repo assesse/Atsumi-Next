@@ -216,6 +216,14 @@ type JobEvent = {
 - 자동 만료·자동 영구 삭제는 하지 않는다.
 - 다운로드 root 밖으로 해석되는 경로는 거부한다.
 
+## Classic read-only import
+
+- `FilesystemClassicSource`는 사용자가 고른 root를 canonicalize하고 symlink를 따라 inventory하지 않는다. bounded JSON/image read와 image dimension/allocation 제한을 적용하며 Classic hash DB는 SQLite read-only/query-only로 연다.
+- dry-run은 source fingerprint와 typed plan을 Next SQLite에 저장한다. UI는 절대 source path가 없는 revisioned report만 받고 warning acknowledgement와 최종 승인을 별도로 수집한다.
+- Classic page는 apply 때 SHA/length/decode를 다시 확인하고 기존 `ArtifactStore`를 통해 WebP·SHA·atomic manifest 규칙을 그대로 사용한다. Classic 폴더를 Next managed root로 간주하지 않는다.
+- filesystem write 전에 import copy destination을 기록한다. DB apply는 모든 copy 검증 뒤 transaction으로 완료하며, rollback journal에는 이 import가 새로 삽입한 row만 기록한다.
+- startup recovery는 중단된 apply를 failed→rolling_back으로 전환하고 추적된 부분 Next 폴더를 import 전용 quarantine으로 옮긴다. 원본과 격리 목적지가 동시에 존재하면 overwrite/delete하지 않고 중단한다.
+
 ## 테스트 경계
 
 - Domain unit test: 네트워크와 파일 없이 상태 전이와 판정 검증

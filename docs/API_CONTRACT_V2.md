@@ -1,6 +1,6 @@
 # API Contract V2
 
-Phase 6의 실제 artifact 기반 작품·내부 페이지 중복 판정과 page quarantine Review까지 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다. Classic import command는 후속 계약으로 구분한다.
+Phase 7의 Classic read-only import와 rollback까지 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다.
 
 ## 공통 규칙
 
@@ -297,6 +297,12 @@ type ThumbnailRequest = {
 - 원본과 목적지가 모두 있거나 모두 없으면 overwrite/delete하지 않고 Review 오류로 중단한다. 영구 삭제 command는 없다.
 - Review preview는 작품 중복과 같은 `{ kind: "artifactPage", entryId, sourcePage }` key와 전역 thumbnail coordinator를 사용하며 live source image를 판정 증거로 대체하지 않는다.
 
-## 후속 계약
+## Classic read-only import 계약
 
-Phase 7에서 Classic import dry-run/apply/rollback command를 추가한다.
+- `classic_import_pick_folder() -> string | null`은 Windows 폴더 선택기만 연다. 선택한 경로를 저장하거나 쓰기 가능성으로 판단하지 않는다.
+- `classic_import_dry_run({dataRoot, downloadRoot?}) -> ClassicImportReport`는 Classic `state.json(.bak)`, 명시적 localStorage export, hash DB, manifest, numbered page와 quarantine을 읽기 전용으로 조사한다. 보고서는 label·fingerprint·counts·gallery eligibility와 typed conflict만 전달하고 source 절대 경로는 포함하지 않는다.
+- `classic_import_get(importId)`는 SQLite에 저장된 revisioned 보고서를 복원한다.
+- `classic_import_apply({importId, expectedRevision, acceptedConflictIds})`는 dry-run fingerprint를 재검사하고 모든 acknowledgement 경고의 명시적 승인을 요구한다. Classic 파일은 이동·수정하지 않는다. eligible page를 다시 SHA/length/decode 검증하고 Next download root의 결정론적 `gallery-{id}`에 WebP 복사, SHA-256과 manifest 검증을 마친 뒤 한 SQLite transaction으로 완료 artifact와 metadata를 등록한다.
+- `classic_import_rollback({importId, expectedRevision})`은 이 import가 새로 만든 DB row만 revision guard로 제거하고, 기록된 Next artifact 폴더만 `.atsumi-quarantine/classic-import/<importId>/gallery-<id>`로 이동한다. Classic source와 기존 Next row는 변경하지 않으며 영구 삭제 command는 없다.
+- apply 전 source fingerprint가 바뀌면 `CLASSIC_SOURCE_CHANGED`, acknowledgement가 빠지면 `CLASSIC_IMPORT_CONFLICT`, state/revision이 낡으면 stable validation/revision 오류로 중단한다.
+- copy destination은 첫 filesystem write 전에 SQLite에 기록한다. 시작 시 남은 `applying`은 failed→rolling_back으로 전환해 부분 Next 폴더를 격리하고, 남은 `rolling_back`도 idempotent하게 마무리한다.

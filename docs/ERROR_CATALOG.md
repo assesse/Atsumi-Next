@@ -107,3 +107,15 @@ worker 시작 실패 command는 현재 공통 `DATABASE_ERROR` envelope도 함�
 | `INTERNAL_SCAN_APP_EXIT` | 앱 종료가 진행 중 검사를 취소함 | 다음 실행에서 다시 검사 |
 
 page quarantine에서 원본·격리 경로가 모두 있거나 모두 없으면 `INTERNAL_REMOVAL_PLAN_INVALID`와 Review action으로 중단한다. 경로·파일명을 WebView 오류나 기본 로그에 노출하지 않으며 자동 overwrite/delete하지 않는다.
+
+## Classic import 오류
+
+| Code | 발생 조건 | 재시도 | 사용자 행동 |
+|---|---|---:|---|
+| `CLASSIC_IMPORT_NOT_FOUND` | 저장된 import ID가 없음 | 아니오 | 새 dry-run 실행 |
+| `CLASSIC_IMPORT_INVALID` | 경로·보고서 state·page/manifest가 안전 조건을 충족하지 않음 | 아니오 | conflict 보고서와 폴더 선택 검토 |
+| `CLASSIC_SOURCE_CHANGED` | dry-run 뒤 Classic state/manifest/page fingerprint 또는 page SHA가 변경됨 | 아니오 | dry-run 다시 실행 |
+| `CLASSIC_IMPORT_CONFLICT` | acknowledgement가 필요한 경고를 승인하지 않음 | 아니오 | 해당 conflict를 확인·체크 |
+| `REVISION_CONFLICT` | 보고서가 다른 작업에서 변경됨 | 아니오 | `classic_import_get`으로 최신 보고서 로드 |
+
+apply/rollback 내부 오류는 source 절대 경로와 파일명을 WebView·기본 로그에 노출하지 않는다. 실패한 apply는 `failed` 보고서로 남고, 추적된 Next copy만 명시적 rollback 또는 startup recovery에서 격리한다.

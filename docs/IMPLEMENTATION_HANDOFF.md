@@ -17,7 +17,7 @@
 | 영역 | 상태 | 현재 근거 |
 |---|---|---|
 | startup·single-instance | 완료 | 두 번째 실행은 기존 창을 복원하며, fatal startup은 non-zero exit·사용자 안내·로컬 오류 로그를 남긴다 |
-| DB·migration | 완료 | schema v13, v12→v13 additive internal scene/page quarantine schema, future-schema 무변경 거부, version backup, WAL·explicit startup recovery 검증 완료 |
+| DB·migration | 완료 | schema v14, v13→v14 additive Classic import journal schema, future-schema 무변경 거부, version backup, WAL·explicit startup recovery 검증 완료 |
 | Hitomi search | 완료 | production live adapter, query serialization, paging/filter/popular fixture contract 검증 완료; live smoke만 미검증 |
 | detail·Related | 완료 | typed galleryinfo detail·Related 5개와 source-page identity를 저장 fixture 통합 테스트로 검증 |
 | thumbnail | 완료 | 전역 coordinator와 live resolver·viewport 구독·우선순위·취소·memory/negative cache 검증 완료 |
@@ -28,7 +28,7 @@
 | gallery duplicate | 완료 | verified artifact HashProfile evidence, full scan/cancel/recovery, 실제 source-page Review와 CAS decision history 검증 완료 |
 | internal duplicate | 완료 | verified artifact 내부 exact/2행 이상 visual scene scan, synchronized source-page Review, CAS plan, page quarantine·undo·startup recovery 검증 완료 |
 | quarantine | 완료 | root 내부 atomic move, pending saga, startup 복구, undo와 무자동삭제 검증 |
-| Classic import | blocker | read-only dry-run·conflict·rollback 미구현 |
+| Classic import | 완료 | 사용자 선택 root의 read-only inventory, typed conflict·승인, verified Next copy, journaled apply·Next-only rollback·startup recovery 검증 완료 |
 | Windows build·CI | 완료 | 최소 CSP·capability, 공용 `tools/verify.ps1`, Windows CI와 Tauri no-bundle release 검증 완료 |
 
 ## 3. Changes by subsystem
@@ -92,12 +92,22 @@
 - 브라우저 검토 adapter는 동일한 run/plan/revision/quarantine/undo 계약을 결정론적으로 재현한다. production과 browser 모두 자동 영구 삭제 command가 없다.
 - 데이터 호환성: DB schema는 13으로 상승한다. v13은 additive하고 v1~v12 의미, manifest schema 1과 HashProfile 1을 재해석하지 않는다.
 
+### Milestone G — Classic read-only import·rollback
+
+- `domain/classic_import.rs`, `application/classic_import.rs`: revisioned dry-run/apply/rollback과 typed conflict를 추가했다. apply는 dry-run fingerprint 재검사, 모든 acknowledgement와 명시적 최종 승인을 요구하며 Classic source를 수정하지 않는다.
+- `infrastructure/classic_source.rs`: 사용자가 고른 data/download root만 canonical read-only inventory한다. state와 backup, 선택적 localStorage export, manifest, numbered page, Classic quarantine과 legacy hash DB를 bounded read/decode하고 gallery ID로 연결한다. hash DB는 read-only/query-only이며 현재 HashProfile 판정에는 쓰지 않는다.
+- `FilesystemArtifactStore` 재사용: eligible Classic page는 apply 직전에 byte length·SHA-256·decode를 다시 검사하고 Next `gallery-{id}`에 lossless WebP로 복사한다. manifest round-trip 검증 뒤에만 complete artifact bundle을 SQLite에 등록한다.
+- migration 14와 `classic_import_repository.rs`: run/report/plan, copy destination, change journal과 legacy hash provenance를 additive하게 저장한다. 기존 favorite/history/visibility/series/download row는 덮어쓰지 않으며 rollback은 journal에 기록된 신규 row만 제거한다.
+- filesystem 첫 write 전에 copy destination을 기록한다. 중단된 applying은 startup에서 failed→rolling_back으로 수렴하고 부분 Next 폴더를 `.atsumi-quarantine/classic-import/<import-id>/`로 이동한다. Classic 원본과 격리 copy를 영구 삭제하지 않는다.
+- `ClassicImportDialog.tsx`와 설정 저장 공간: native Windows folder picker, read-only 보증, copy/count 요약, typed 충돌별 acknowledgement, 최종 승인, latest-report reload와 Next-only rollback을 연결했다. browser review adapter도 같은 revision/acknowledgement lifecycle을 재현한다.
+- 데이터 호환성: DB schema는 14로 상승한다. v14는 additive하고 v1~v13 의미, manifest schema 1과 HashProfile 1을 재해석하지 않는다.
+
 ## 4. Contracts and versions
 
 - 앱/package/Tauri version: `0.1.0`
 - Rust MSRV: `1.88.0` (working tree)
-- DB schema version: 13
-- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`, `favorites_search_history_and_auto_find`, `auto_find_visible_metadata`, `artifact_duplicate_evidence_and_decisions`, `internal_scene_review_and_page_quarantine`
+- DB schema version: 14
+- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`, `favorites_search_history_and_auto_find`, `auto_find_visible_metadata`, `artifact_duplicate_evidence_and_decisions`, `internal_scene_review_and_page_quarantine`, `classic_read_only_import_and_rollback`
 - manifest schema version: 1
 - HashProfile version: 1 / algorithm version 1 (artifact SHA-256 + 작품 중복 64-bit coarse dHash·pHash, 1024-bit detail dHash와 content gate)
 - Hitomi parser version: 1
@@ -140,6 +150,7 @@
 - Milestone D 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend 100/100, Rust lib 90/90(외부 live smoke 1개 opt-in 제외), startup 1/1, typecheck·production build·Clippy `-D warnings`·Tauri release·whitespace 검사를 통과했다. 로그는 `.runtime/verification/verify-20260815-184914.log`에 있다.
 - Milestone E 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend typecheck·Vite production build와 17 files 109/109 tests, Rust lib 105/105(외부 live smoke 1개 opt-in 제외), main 1/1, fmt/check/Clippy `-D warnings`, Tauri release no-bundle, whitespace를 통과했다. blank/저정보, 서로 다른 고대비 흑백, 작은 실제 장면 변화와 2/10 공통 panel negative, 재압축·해상도/번역 visual positive, containment 양방향, metadata 우선순위+전수 fallback, page 비재사용 alignment, cancel→join→restart, recovery, CAS/series/Auto Find filter를 포함한다. 로그는 `.runtime/verification/verify-20260816-025506.log`에 있다.
 - Milestone F 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend typecheck·Vite production build와 18 files 112/112 tests, Rust lib 109/109(외부 live smoke 1개 opt-in 제외), main 1/1, fmt/check/Clippy `-D warnings`, Tauri release no-bundle, whitespace를 통과했다. exact source page 2·8 탐지, page 8 단독 격리·manifest/DB 상태, 원본 번호·위치 undo, DB intent와 file move 뒤 강제 중단을 모사한 startup convergence를 실제 임시 SQLite/WebP/파일 시스템 통합 테스트로 검증했다. 로그는 `.runtime/verification/verify-20260816-033555.log`에 있다.
+- Milestone G 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend typecheck·Vite production build와 19 files 114/114 tests, Rust lib 112/112(외부 live smoke 1개 opt-in 제외), main 1/1, fmt/check/Clippy `-D warnings`, Tauri release no-bundle, whitespace를 통과했다. 실제 임시 Classic state/manifest/PNG와 별도 Next SQLite/root를 사용해 read-only inventory, conflict 비추측, verified WebP copy·manifest·completed 등록, favorite/download rollback, Classic 원본 byte 불변, applying 중 부분 폴더의 startup quarantine 수렴을 검증했다. 로그는 `.runtime/verification/verify-20260816-041453.log`에 있다.
 
 ## 7. Known limitations and blockers
 
@@ -147,7 +158,7 @@
 
 - Auto Find의 현재 안전 상한은 작가당 250 page다. 그 이상을 가진 작가에서는 source가 보고한 전체 page 중 후반 후보가 이번 run에 포함되지 않는다. 범위를 임의로 무제한화하지 말고 scheduler 부하·중단 복구와 함께 정책을 조정해야 한다.
 - E-Hentai relation evidence는 사용자가 명시적인 적법 session을 제공하지 않아 production에서 비활성이다. 작품 중복 검사는 session 없이 local artifact evidence만으로 정상 동작한다. 향후 활성화할 때 cookie/session은 process memory의 redacted provider 입력으로만 취급하고 DB·manifest·로그에는 쓰지 않아야 한다.
-- Classic favorite/search history import는 Milestone G의 read-only dry-run·conflict·rollback 경계 전에는 수행하지 않는다.
+- Classic localStorage는 Classic 코드를 수정하거나 WebView profile을 직접 읽지 않는다. 사용자가 별도로 둔 세 가지 명시적 export filename만 선택적으로 병합하므로 export 파일이 없으면 state.json에 없는 localStorage-only 값은 가져오지 못한다.
 - page quarantine은 undo를 제공하지만 영구 purge는 의도적으로 제공하지 않는다. 공간 회수 UI는 자동 삭제 없이 별도 사용자 승인 정책으로만 추가해야 한다.
 - artifact decode는 현재 검증된 WebP와 JPEG/PNG 입력을 지원한다. source의 AVIF 가능 flag와 후보는 parse하지만 raw AVIF만 남은 page를 실제 WebP로 decode하는 기능은 아직 없다. downloader는 WebP와 원본 JPEG/PNG fallback을 우선하며 지원 후보가 없으면 typed failure로 종료한다.
 
@@ -168,6 +179,7 @@
 - `duplicate:changed` event로 후보나 판정 이력을 구성하지 않는다. 서로 다른 run의 늦은 snapshot이 최신 run을 덮지 않도록 startedAt/revision/token 경계를 유지한다.
 - Review에 live `galleryPage`를 사용하지 않는다. 판정 evidence는 반드시 root-bound verified `artifactPage(entryId, sourcePage)`와 immutable source page 번호를 사용한다.
 - 내부 visual duplicate를 한 page match만으로 생성하지 않는다. 최소 2행 monotonic scene block, plan revision/byte snapshot과 page quarantine saga를 함께 유지한다.
+- Classic 경로를 Next managed root로 취급하거나 Classic 파일을 move/write/delete하지 않는다. 새 입력 형식은 dry-run conflict와 source fingerprint test를 함께 추가한다.
 
 ## 9. Recovery and rollback
 
@@ -176,6 +188,7 @@
 - interrupted download는 page checkpoint와 `.part`를 reconcile한 뒤 명시적 resume한다.
 - 손상되거나 모호한 manifest·파일은 자동 삭제하지 않고 review 대상으로 분류한다.
 - Next는 Classic을 변경하지 않으므로 Next 전용 profile을 사용하지 않으면 Classic으로 돌아갈 수 있다.
+- Classic import rollback은 해당 import의 Next copy를 quarantine하고 change journal의 신규 row만 제거한다. 기존 Next row와 Classic source는 rollback 대상이 아니다.
 - Git rollback 범위는 milestone별 독립 commit으로 유지한다.
 
 ## 10. Git delivery
@@ -187,5 +200,6 @@
 - `80919bd` — `feat: implement resilient artifact downloads and recovery`
 - `a8f0ca1` — `feat: complete favorites and auto find workflows`
 - `9d7f738` — `feat: add evidence based gallery duplicate review`
-- Milestone F 이후 commit, push 결과와 PR 상태는 완료 시 SHA와 함께 누적한다.
+- `c6bee7b` — `feat: implement internal duplicate scene review`
+- Milestone G 이후 commit, push 결과와 PR 상태는 완료 시 SHA와 함께 누적한다.
 - PR merge, `main` 직접 push, force push, release/tag 생성은 수행하지 않는다.

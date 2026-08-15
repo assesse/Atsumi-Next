@@ -4,7 +4,7 @@
 
 Atsumi Next는 기존 Atsumi를 보존하면서 새 구조로 재작성하는 독립 프로젝트다.
 
-승인된 UX prototype과 V2 계약을 기준으로 Phase 3의 실제 다운로드 흐름, Phase 4의 영속 즐겨찾기·검색 이력·Auto Find, Phase 5의 작품 중복 Review, Phase 6의 앨범 내부 중복 페이지 검토·격리·undo를 구현했다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
+승인된 UX prototype과 V2 계약을 기준으로 Phase 3의 실제 다운로드 흐름, Phase 4의 영속 즐겨찾기·검색 이력·Auto Find, Phase 5의 작품 중복 Review, Phase 6의 앨범 내부 중복 페이지 검토·격리·undo, Phase 7의 Classic read-only 가져오기·rollback을 구현했다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
 
 다운로드는 SQLite queue에서 자동 시작해 source page 번호별 `.part` 기록, decode, WebP 저장, SHA-256, atomic rename, versioned manifest 검증을 마친 뒤에만 `completed`가 된다. 강제 종료된 작업은 검증된 page checkpoint부터 재개하며, 시작 시와 Downloads의 수동 명령에서 DB·manifest·실제 파일을 재조정한다. 완료 파일은 Windows 기본 뷰어로 열 수 있고, 삭제 대신 download root 내부의 crash-safe quarantine으로 옮긴 뒤 복원할 수 있다. 자동 영구 삭제는 하지 않는다.
 
@@ -13,6 +13,8 @@ Atsumi Next는 기존 Atsumi를 보존하면서 새 구조로 재작성하는 �
 작품 중복 검사는 검증 완료된 로컬 artifact만 읽어 exact SHA-256, 64-bit perceptual hash, 1024-bit detail hash, 밝기 분산·edge gate와 단조 1:1 gap-tolerant 정렬을 versioned evidence로 저장한다. 제목·작가·그룹 metadata는 전수 비교 작업의 우선순위를 정하되 후보를 누락시키지 않는다. Review는 실제 source page 번호의 로컬 artifact preview, confidence와 판정 이력을 보여 주며 숨김·연작 연결/해제·pair 제외를 revision CAS transaction으로 적용한다. 자동 판정만으로 파일을 삭제하지 않는다. E-Hentai relation port는 명시적 적법 세션이 없는 기본 production 설정에서 비활성화된다.
 
 앨범 내부 중복 검사는 같은 verified artifact 안에서 정확한 SHA 반복과 최소 2행의 단조 시각 장면 블록만 Review에 올린다. 사용자는 각 동기화 행에서 유지할 원본 페이지를 고르고 파일 수·용량이 고정된 revision-CAS 계획을 먼저 확인한다. 적용은 앨범 폴더의 `.atsumi-page-quarantine/<plan-id>/`로만 이동하며 manifest와 SQLite가 crash-safe saga로 조정된다. 원본 페이지 번호는 바꾸지 않고 격리 이력에서 복원할 수 있으며 자동 영구 삭제는 없다.
+
+설정의 저장 공간에서 Classic 데이터·다운로드 폴더를 직접 고르면 먼저 읽기 전용 inventory와 충돌 보고서를 만든다. state, manifest, 실제 페이지, legacy hash provenance, 즐겨찾기·검색 이력·제외·연작·오탐 pair를 검토하고 명시적으로 승인한 안전 항목만 Next에 등록한다. Classic 페이지는 이동하지 않고 검증·WebP 변환한 복사본만 `gallery-{id}`에 만들며, rollback은 Next 복사본만 관리 quarantine으로 옮긴다. 중단된 적용도 다음 시작에서 Next 부분 복사본을 격리한다.
 
 ## 실행과 검증
 

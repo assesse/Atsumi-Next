@@ -116,12 +116,7 @@ Milestone D의 즐겨찾기·검색 이력·Auto Find workflow를 실제 SQLite�
 
 ## Phase 7: Classic import와 전환
 
-- dry-run inventory
-- state, folder, hash import
-- conflict report
-- 사용자 승인 후 Next profile 활성화
-- Classic과 병행 사용 기간
-- rollback 검증
+완료했다. 사용자가 고른 Classic data/download root에서 state, 선택적 localStorage export, manifest, numbered page, quarantine과 legacy hash DB를 읽기 전용으로 조사한다. gallery ID 연결과 typed conflict, eligible copy byte를 revisioned dry-run으로 저장하고 모든 경고와 최종 적용을 명시적으로 승인받는다. eligible page는 apply 직전에 source fingerprint·SHA·length·decode를 다시 검사한 뒤 Next `gallery-{id}`에 WebP 복사·manifest 검증하고 metadata와 함께 transaction으로 등록한다. rollback은 이 import의 Next copy만 관리 quarantine으로 옮기고 journal에 기록된 새 DB row만 제거한다. 중단된 apply/rollback은 시작 시 안전하게 수렴한다. Classic 원본은 이동·수정·삭제하지 않는다.
 
 ## 작업 규칙
 
@@ -143,4 +138,5 @@ Milestone D의 즐겨찾기·검색 이력·Auto Find workflow를 실제 SQLite�
 8. 완료: 영속 즐겨찾기·검색 이력, 명시적 작가 갱신, Auto Find 진행·취소·복원과 local grouping/filter/batch queue 연결.
 9. 완료: 실제 artifact evidence를 사용하는 작품 단위 중복 후보·판정·Review와 Auto Find decision 제외 연동.
 10. 완료: 완료 artifact 내부의 반복 장면 block, synchronized source-page Review, removal plan, page quarantine·undo와 manifest/DB 일관성.
-11. 다음: Classic read-only inventory, dry-run conflict report, 승인형 import·rollback과 최종 운영 polish.
+11. 완료: Classic read-only inventory, typed dry-run conflict report, 승인형 verified copy/import, crash recovery와 Next-only rollback.
+12. 다음: 최종 운영 polish, 접근성·오류·진단·보안 audit와 실제 Tauri 사용자 검토.

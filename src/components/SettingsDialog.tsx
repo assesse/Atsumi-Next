@@ -10,12 +10,13 @@ type SettingsDialogProps = {
   onClose: () => void;
   onSave: (patch: SettingsPatch) => Promise<boolean>;
   onNotice: (message: string) => void;
+  onClassicImport: () => void;
   onPreviewLayout: (layout: { maxColumns: number; previewWidth: number } | null) => void;
 };
 
 const sections = ["일반", "탐색", "다운로드", "네트워크", "중복 검사", "저장 공간"];
 
-export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onNotice, onPreviewLayout }: SettingsDialogProps) {
+export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onNotice, onClassicImport, onPreviewLayout }: SettingsDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const wasOpen = useRef(false);
   const [activeSection, setActiveSection] = useState("일반");
@@ -96,7 +97,14 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
             ))}
           </nav>
           <section className="settings-content">
-            {activeSection !== "일반" ? (
+            {activeSection === "저장 공간" ? (
+              <div className="settings-storage">
+                <span className="eyebrow">MIGRATION</span>
+                <h3>Classic 데이터</h3>
+                <p>Classic 원본은 읽기 전용으로 조사하고, dry-run 보고서를 승인한 뒤에만 Next 저장소로 복사합니다.</p>
+                <button type="button" className="text-button primary" onClick={() => { close(); onClassicImport(); }}>Classic 가져오기 열기</button>
+              </div>
+            ) : activeSection !== "일반" ? (
               <div className="settings-placeholder">
                 <span className="eyebrow">FOUNDATION</span>
                 <h3>{activeSection}</h3>

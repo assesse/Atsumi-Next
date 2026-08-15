@@ -21,6 +21,7 @@ import type {
   SettingsPatch,
 } from "./api/contracts";
 import { ActivityDrawer } from "./components/ActivityDrawer";
+import { ClassicImportDialog } from "./components/ClassicImportDialog";
 import { DetailWorkspace } from "./components/DetailWorkspace";
 import { DuplicateReviewDialog } from "./components/DuplicateReviewDialog";
 import { InternalDuplicateDialog } from "./components/InternalDuplicateDialog";
@@ -173,6 +174,7 @@ export default function App() {
   const [toast, setToast] = useState<Toast>(null);
   const [reconcilingArtifacts, setReconcilingArtifacts] = useState(false);
   const [settingsPreview, setSettingsPreview] = useState<{ maxColumns: number; previewWidth: number } | null>(null);
+  const [classicImportOpen, setClassicImportOpen] = useState(false);
   const [exitActiveDownloads, setExitActiveDownloads] = useState<number | null>(null);
   const [exitStatusError, setExitStatusError] = useState(false);
   const [exitActionPending, setExitActionPending] = useState(false);
@@ -1598,7 +1600,21 @@ export default function App() {
         onClose={() => dispatch({ type: "overlay.settings", open: false })}
         onSave={saveSettingsPatch}
         onNotice={showToast}
+        onClassicImport={() => setClassicImportOpen(true)}
         onPreviewLayout={setSettingsPreview}
+      />
+
+      <ClassicImportDialog
+        open={classicImportOpen}
+        onClose={() => setClassicImportOpen(false)}
+        onChanged={() => {
+          setDownloadsRefresh((value) => value + 1);
+          void hydrateFavorites();
+          void hydrateSearchHistory();
+          void hydrateAutoFind();
+          void hydrateDuplicateSnapshot();
+          void hydrateInternalSnapshot();
+        }}
       />
 
       <DuplicateReviewDialog

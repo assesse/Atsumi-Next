@@ -4,7 +4,7 @@
 
 새 버전의 영속 데이터 기준은 SQLite 하나로 통합한다. 파일 시스템은 artifact의 실제 존재를 증명하며, DB와 불일치하면 reconciliation job이 해결한다.
 
-## 현재 구현 schema (v13)
+## 현재 구현 schema (v14)
 
 | 테이블 | 책임 |
 |---|---|
@@ -36,6 +36,10 @@
 | `internal_duplicate_groups`·`internal_duplicate_group_pages` | immutable source page 기반 synchronized scene row와 근거 |
 | `internal_removal_plans` | group revision과 파일 수·byte 합계를 고정한 만료형 격리 계획 |
 | `page_quarantine_records` | page별 원본·격리 상대 경로와 crash-safe move/restore saga |
+| `classic_import_runs` | Classic read-only inventory, fingerprint, revisioned report와 apply/rollback 상태 |
+| `classic_import_artifact_copies` | 첫 write 전 기록하는 Next 복사 목적지와 copy/격리 상태 |
+| `classic_import_changes` | 이 import가 새로 만든 DB 변경의 역순 rollback journal |
+| `classic_import_legacy_hashes` | 신뢰 판정에 사용하지 않는 Classic hash row 수 provenance |
 | `schema_migrations` | migration 적용 이력 |
 
 아래 테이블은 Phase 7 이후 검토할 계획 schema다.
@@ -82,6 +86,15 @@
 - 격리 page는 `download_pages.state='quarantined'`, `excluded=1`이지만 source page number와 SHA/byte/format 검증 metadata는 유지한다. undo는 원래 relative path와 `present/excluded=0`을 복원한다.
 - v1~v12 table/column 의미, manifest schema 1과 HashProfile 1을 바꾸지 않는 additive migration이다. v12 DB에는 migration 전 일관 backup을 만든다.
 
+### v14 추가 규칙
+
+- migration 이름은 `classic_read_only_import_and_rollback`이다.
+- dry-run 원본 절대 경로와 전체 plan은 local Next SQLite에만 저장한다. frontend 보고서는 folder label과 source fingerprint만 받으며 기본 로그에는 경로가 없다.
+- artifact copy 목적지는 첫 파일 write 전에 기록한다. apply/rollback이 중단되면 startup recovery가 Next 부분 폴더를 import 전용 quarantine으로 이동하고 상태를 수렴시킨다.
+- DB apply는 실제 WebP·SHA·manifest 검증 뒤 한 transaction이며, rollback journal은 이 import가 새로 삽입한 favorite/history/exclusion/hidden/pair/series/artifact만 역순 제거한다. 기존 row는 `INSERT OR IGNORE`와 change journal로 보존한다.
+- Classic hash DB는 `READ_ONLY + query_only`로 열고 row 수만 provenance로 저장한다. Next HashProfile duplicate blocking에는 사용하지 않는다.
+- v1~v13 의미와 manifest/HashProfile version을 바꾸지 않는 additive migration이며 기존 DB는 migration 전 일관 backup을 만든다.
+
 ## Classic 입력원
 
 - `AtsumiData/state.json`
@@ -93,26 +106,26 @@
 - 실제 `NNN.webp` 파일
 - quarantine 폴더
 
-localStorage는 Tauri WebView 내부 저장소이므로 import 전용 export command 또는 Classic 내보내기 도구가 필요하다.
+localStorage 값은 Classic 원본을 수정하지 않고 사용자가 별도로 둔 `classic-local-storage-export.json`, `atsumi-localstorage-export.json`, `localStorage-export.json`만 선택적으로 병합한다. 파일이 없으면 state/manifest 기반 안전 항목만 보고한다.
 
 ## 이전 순서
 
-1. Classic 데이터의 읽기 전용 snapshot을 만든다.
-2. manifest와 실제 파일을 먼저 inventory한다.
-3. state의 Gallery 목록과 폴더를 gallery ID로 연결한다.
-4. favorites, 제외, 연작, 오탐 pair를 decision record로 변환한다.
-5. Classic 해시 DB를 새 HashProfile version과 함께 import한다.
-6. 실제 파일과 DB를 reconcile한다.
-7. 변환 보고서를 사용자에게 보여준다.
-8. 사용자가 승인하면 Next profile을 활성화한다.
+1. 사용자가 Classic data root와 선택적 download root를 명시적으로 고른다.
+2. state, manifest, 실제 numbered file, quarantine과 hash DB를 읽기 전용으로 inventory하고 source fingerprint를 만든다.
+3. gallery ID로 state와 폴더를 연결하고 충돌·eligible 항목·copy byte 수를 보고한다.
+4. 사용자가 모든 acknowledgement 경고와 최종 적용 문구를 승인한다.
+5. apply 직전에 source fingerprint를 다시 확인한다.
+6. eligible page만 다시 SHA/length/decode하고 Next에 WebP로 복사·manifest 검증한다.
+7. favorites, 검색 이력, 제외, 숨김, 오탐 pair, resolvable 연작과 완료 artifact를 한 SQLite transaction으로 등록한다.
+8. rollback은 Next copy를 격리하고 이 import가 새로 만든 DB row만 제거한다.
 
-## 충돌 정책 초안
+## 구현된 충돌 정책
 
 | 충돌 | 기본 처리 |
 |---|---|
 | UI는 완료, 폴더 없음 | `missing_artifacts`, 사용자에게 재연결/재다운로드 제안 |
 | 폴더는 있음, UI 목록 없음 | manifest가 유효하면 import 후보 |
-| manifest ID와 폴더명 불일치 | ID를 우선하고 폴더명은 표시 정보로 취급 |
+| manifest ID와 Classic state folder mapping 불일치 | blocking, 자동 추측·등록 금지 |
 | 파일 수와 expected pages 불일치 | `incomplete`, 자동 완료 금지 |
 | hash DB만 존재 | artifact 확인 전 duplicate blocking에 사용하지 않음 |
 | 숨김 ID의 파일 존재 | 숨김은 유지하되 파일 처리 여부를 보고 |
@@ -138,8 +151,8 @@ D:\Atsumi\.atsumi-quarantine\<record-id>\gallery-4051027\
 
 - Next는 Classic 원본 DB와 state를 수정하지 않는다.
 - import 시 모든 파일 작업은 dry-run report를 먼저 만든다.
-- 실제 다운로드 파일은 import를 위해 이동하지 않는다.
-- Classic으로 돌아갈 때는 Next 전용 profile을 사용하지 않는다. Next DB와 새 `gallery-{id}` artifact를 자동 삭제하지 않으며, 제거가 필요하면 별도 백업·사용자 확인을 거친다.
+- 실제 Classic 다운로드 파일은 import를 위해 이동하지 않는다. 검증된 Next 복사본만 만든다.
+- rollback은 해당 import의 Next `gallery-{id}`만 import 전용 quarantine으로 이동하고, journal에 기록된 새 DB row만 제거한다. 격리본과 Classic 원본을 자동 삭제하지 않는다.
 - Next가 생성한 새 manifest는 schema와 writer version을 가진다.
 
 ## 승인 필요
