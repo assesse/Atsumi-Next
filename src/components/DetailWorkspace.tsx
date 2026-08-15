@@ -1,4 +1,4 @@
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Gallery, GalleryId } from "../core/types";
 import {
   galleryCoverThumbnailKey,
@@ -25,7 +25,6 @@ type DetailWorkspaceProps = {
   onQueue: (id: GalleryId) => void;
   onMetadataSearch: (value: string) => void;
   onMetadataFavorite: (value: string) => void;
-  onPreview: (page: number) => void;
 };
 
 type MetadataBoxProps = {
@@ -82,7 +81,6 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
     onQueue,
     onMetadataSearch,
     onMetadataFavorite,
-    onPreview,
   } = props;
   const detailBody = useRef<HTMLDivElement>(null);
   const workspace = useRef<HTMLElement>(null);
@@ -90,6 +88,11 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
   const previousVisible = useRef(false);
   const previousTabCount = useRef(0);
   const opener = useRef<HTMLElement | null>(null);
+  const previewDialog = useRef<HTMLDialogElement>(null);
+  const previewCloseButton = useRef<HTMLButtonElement>(null);
+  const previewOpener = useRef<HTMLButtonElement | null>(null);
+  const previewClosingInternally = useRef(false);
+  const [previewPage, setPreviewPage] = useState<number | null>(null);
 
   useEffect(() => {
     const visible = tabs.length > 0 && !minimized;
@@ -141,9 +144,32 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
     });
   };
 
-  if (!tabs.length) return null;
   const gallery = activeId === null ? undefined : galleries.get(activeId);
   const previewPageCount = gallery ? boundedPageCount(gallery.pages, 24) : 0;
+
+  useEffect(() => {
+    const node = previewDialog.current;
+    if (!node) return;
+    if (previewPage !== null && (previewPageCount === 0 || previewPage > previewPageCount)) {
+      setPreviewPage(null);
+      return;
+    }
+    if (previewPage !== null && gallery && !node.open) {
+      node.showModal();
+      window.requestAnimationFrame(() => previewCloseButton.current?.focus());
+    } else if ((previewPage === null || !gallery) && node.open) {
+      previewClosingInternally.current = true;
+      node.close();
+      const target = previewOpener.current;
+      previewOpener.current = null;
+      window.requestAnimationFrame(() => {
+        if (target?.isConnected) target.focus();
+        else workspace.current?.querySelector<HTMLElement>("[role='tab'][aria-selected='true']")?.focus();
+      });
+    }
+  }, [gallery, previewPage, previewPageCount]);
+
+  if (!tabs.length) return null;
 
   return (
     <>
@@ -226,7 +252,10 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                       className="preview-thumb"
                       title={`${index + 1}페이지 확대`}
                       style={{ backgroundImage: "none" }}
-                      onClick={() => onPreview(index + 1)}
+                      onClick={(event) => {
+                        previewOpener.current = event.currentTarget;
+                        setPreviewPage(index + 1);
+                      }}
                     >
                       <GalleryThumbnail
                         as="span"
@@ -351,6 +380,47 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
           </div>
         </section>
       ) : null}
+      <dialog
+        ref={previewDialog}
+        className="page-preview-dialog"
+        aria-labelledby="page-preview-title"
+        onCancel={(event) => {
+          event.preventDefault();
+          setPreviewPage(null);
+        }}
+        onClose={() => {
+          if (previewClosingInternally.current) {
+            previewClosingInternally.current = false;
+            return;
+          }
+          setPreviewPage(null);
+          const target = previewOpener.current;
+          previewOpener.current = null;
+          window.requestAnimationFrame(() => target?.isConnected && target.focus());
+        }}
+      >
+        {gallery && previewPage !== null ? (
+          <div className="page-preview-dialog-body">
+            <header className="dialog-header">
+              <div>
+                <span className="eyebrow">PAGE PREVIEW</span>
+                <h2 id="page-preview-title">{gallery.title} · {previewPage}페이지</h2>
+              </div>
+              <button ref={previewCloseButton} type="button" className="icon-button small" title="페이지 미리보기 닫기" aria-label="페이지 미리보기 닫기" onClick={() => setPreviewPage(null)}>
+                <FluentIcon glyph="\uE711" />
+              </button>
+            </header>
+            <GalleryThumbnail
+              className="page-preview-media"
+              thumbnailKey={sourcePageThumbnailKey(gallery, previewPage)}
+              consumer="detail"
+              priority="critical"
+              client={thumbnailClient}
+              alt={`${gallery.title} ${previewPage}페이지 확대 미리보기`}
+            />
+          </div>
+        ) : null}
+      </dialog>
     </>
   );
 }

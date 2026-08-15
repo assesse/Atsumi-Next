@@ -1778,6 +1778,26 @@ dialog::backdrop {
   height: min(670px, calc(100vh - 60px));
 }
 
+.page-preview-dialog {
+  width: min(1080px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+}
+
+.page-preview-dialog-body {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  max-height: calc(100vh - 50px);
+}
+
+.page-preview-media {
+  width: min(100%, 960px);
+  height: min(760px, calc(100vh - 142px));
+  margin: 0 auto 18px;
+  background: #eef3f2;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
 .exit-dialog {
   width: min(620px, calc(100vw - 48px));
 }
@@ -1942,19 +1962,6 @@ dialog::backdrop {
 .settings-content {
   padding: 8px 24px 24px;
   overflow: auto;
-}
-
-.settings-placeholder {
-  display: grid;
-  place-content: center;
-  min-height: 100%;
-  color: var(--muted);
-  text-align: center;
-}
-
-.settings-placeholder h3 {
-  margin: 8px 0 4px;
-  color: var(--text);
 }
 
 .inline-error {

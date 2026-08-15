@@ -1437,6 +1437,7 @@ export default function App() {
           collapsed={ui.railCollapsed}
           autoFindCount={autoFindCount}
           attentionCount={attentionCount}
+          sourceLabel={backend.runtime === "tauri" ? "Hitomi live" : "Browser fixture"}
           onNavigate={(view) => dispatch({ type: "navigate", view })}
           onToggle={() => dispatch({ type: "rail.toggle" })}
         />
@@ -1589,7 +1590,6 @@ export default function App() {
         onQueue={(id) => void queueGalleries([id])}
         onMetadataSearch={searchMetadata}
         onMetadataFavorite={toggleMetadataFavorite}
-        onPreview={(page) => showToast(`${page}페이지 확대는 실제 thumbnail adapter와 연결합니다.`)}
       />
 
       <SettingsDialog
@@ -1599,7 +1599,6 @@ export default function App() {
         error={settingsError}
         onClose={() => dispatch({ type: "overlay.settings", open: false })}
         onSave={saveSettingsPatch}
-        onNotice={showToast}
         onClassicImport={() => setClassicImportOpen(true)}
         onPreviewLayout={setSettingsPreview}
       />

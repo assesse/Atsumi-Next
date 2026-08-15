@@ -91,6 +91,7 @@ GitHub Actions의 `Windows CI`는 push와 pull request마다 `windows-latest`에
 - [DECISION_REGISTER.md](docs/DECISION_REGISTER.md): 확정 사항과 사용자 승인 대기 사항
 - [DELIVERY_PLAN.md](docs/DELIVERY_PLAN.md): 단계별 산출물과 구현 진입 조건
 - [IMPLEMENTATION_HANDOFF.md](docs/IMPLEMENTATION_HANDOFF.md): 실제 구현·검증·복구·Git 전달 상태
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md): 앱에 포함된 외부 자산과 라이선스 고지
 
 ## 기존 명세와의 관계
 

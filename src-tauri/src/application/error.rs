@@ -23,6 +23,19 @@ pub enum RepositoryError {
     Source(#[from] SourceContractError),
 }
 
+impl RepositoryError {
+    pub const fn stable_code(&self) -> &'static str {
+        match self {
+            Self::Busy(_) => "DATABASE_BUSY",
+            Self::Corrupt(_) => "DATABASE_CORRUPT",
+            Self::UnsupportedSchema { .. } => "DATABASE_SCHEMA_NEWER",
+            Self::MigrationBackup(_) => "DATABASE_BACKUP_FAILED",
+            Self::Other(_) => "DATABASE_ERROR",
+            Self::Source(error) => error.code.as_str(),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ApplicationError {
     #[error(transparent)]

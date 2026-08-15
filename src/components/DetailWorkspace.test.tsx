@@ -13,6 +13,20 @@ afterEach(() => {
 describe("DetailWorkspace page previews", () => {
   it("requests at most 24 valid source pages and none for a zero-page gallery", async () => {
     vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
+    const previousShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+    const previousClose = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "close");
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value: vi.fn(function (this: HTMLDialogElement) {
+        this.setAttribute("open", "");
+      }),
+    });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", {
+      configurable: true,
+      value: vi.fn(function (this: HTMLDialogElement) {
+        this.removeAttribute("open");
+      }),
+    });
     const previousScrollTo = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTo");
     Object.defineProperty(HTMLElement.prototype, "scrollTo", {
       configurable: true,
@@ -43,7 +57,6 @@ describe("DetailWorkspace page previews", () => {
         onQueue={vi.fn()}
         onMetadataSearch={vi.fn()}
         onMetadataFavorite={vi.fn()}
-        onPreview={vi.fn()}
       />
     );
 
@@ -52,6 +65,13 @@ describe("DetailWorkspace page previews", () => {
 
       expect(container.querySelectorAll(".preview-thumb")).toHaveLength(24);
       expect(container.querySelectorAll('[data-thumbnail-kind="source-page"]')).toHaveLength(24);
+
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>(".preview-thumb")?.click();
+      });
+      expect(container.querySelector(".page-preview-dialog")).toHaveAttribute("open");
+      expect(container.querySelector("#page-preview-title")).toHaveTextContent("1페이지");
+      expect(container.querySelectorAll('[data-thumbnail-kind="source-page"]')).toHaveLength(25);
 
       await act(async () => render({ ...gallery, pages: 0 }));
 
@@ -65,6 +85,16 @@ describe("DetailWorkspace page previews", () => {
         Object.defineProperty(HTMLElement.prototype, "scrollTo", previousScrollTo);
       } else {
         Reflect.deleteProperty(HTMLElement.prototype, "scrollTo");
+      }
+      if (previousShowModal) {
+        Object.defineProperty(HTMLDialogElement.prototype, "showModal", previousShowModal);
+      } else {
+        Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
+      }
+      if (previousClose) {
+        Object.defineProperty(HTMLDialogElement.prototype, "close", previousClose);
+      } else {
+        Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
       }
     }
   });
@@ -100,7 +130,6 @@ describe("DetailWorkspace page previews", () => {
           onQueue={vi.fn()}
           onMetadataSearch={onMetadataSearch}
           onMetadataFavorite={onMetadataFavorite}
-          onPreview={vi.fn()}
         />,
       ));
 

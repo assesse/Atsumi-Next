@@ -5,10 +5,13 @@ import type { DownloadChangedEvent } from "../api/contracts";
 import type { Gallery, GalleryId } from "../core/types";
 import { mockGalleries } from "../data/mockGalleries";
 import { applyDownloadChanged } from "../state/downloadProjection";
-import { ThumbnailClient } from "../thumbnail";
+import { browserFixtureThumbnailAdapter, ThumbnailClient } from "../thumbnail";
 import { GalleryCard } from "./GalleryCard";
 
+const defaultThumbnailClient = new ThumbnailClient(browserFixtureThumbnailAdapter);
+
 const callbacks = {
+  thumbnailClient: defaultThumbnailClient,
   onSelect: vi.fn(),
   onOpenDetail: vi.fn(),
   onOpenArtifact: vi.fn(),
@@ -364,13 +367,13 @@ describe("GalleryCard event projection", () => {
     await act(async () => root.render(
       <GalleryCard
         gallery={gallery}
-        thumbnailClient={thumbnailClient}
         thumbnailPriority="visible"
         view="explore"
         selected={false}
         selectionContext={false}
         favoriteMetadata={new Set()}
         {...callbacks}
+        thumbnailClient={thumbnailClient}
       />,
     ));
 

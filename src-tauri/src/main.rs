@@ -12,12 +12,40 @@ const STARTUP_FAILURE_EXIT_CODE: i32 = 1;
 
 fn main() {
     if let Err(error) = atsumi_next_lib::run() {
-        eprintln!("Atsumi Next could not be started: {error}");
-        let log_path = persist_startup_failure(&error)
+        let diagnostic = redact_startup_diagnostic(&error.to_string());
+        eprintln!("Atsumi Next could not be started: {diagnostic}");
+        let log_path = persist_startup_failure(&diagnostic)
             .unwrap_or_else(|| PathBuf::from(".runtime").join("app-launch.log"));
         show_startup_failure(&startup_failure_message(&log_path));
         std::process::exit(STARTUP_FAILURE_EXIT_CODE);
     }
+}
+
+fn redact_startup_diagnostic(value: &str) -> String {
+    let profile = std::env::var("USERPROFILE").ok();
+    redact_startup_diagnostic_with_profile(value, profile.as_deref())
+}
+
+fn redact_startup_diagnostic_with_profile(value: &str, profile: Option<&str>) -> String {
+    let mut redacted = profile.filter(|profile| !profile.is_empty()).map_or_else(
+        || value.to_owned(),
+        |profile| value.replace(profile, "%USERPROFILE%"),
+    );
+    for scheme in ["https://", "http://", "file:///"] {
+        while let Some(start) = redacted.find(scheme) {
+            let end = redacted[start..]
+                .char_indices()
+                .find_map(|(offset, character)| {
+                    (offset > 0
+                        && (character.is_whitespace()
+                            || matches!(character, '\'' | '"' | ')' | ']' | '}' | ',' | ';')))
+                    .then_some(start + offset)
+                })
+                .unwrap_or(redacted.len());
+            redacted.replace_range(start..end, "<redacted-url>");
+        }
+    }
+    redacted
 }
 
 fn persist_startup_failure(error: &impl Display) -> Option<PathBuf> {
@@ -96,5 +124,19 @@ mod tests {
         let message = startup_failure_message(Path::new("Logs/startup-error.log"));
         assert!(message.contains("startup-error.log"));
         assert!(message.contains("원본 데이터는 변경하지 않았습니다"));
+    }
+
+    #[test]
+    fn startup_diagnostic_hides_user_profile_and_complete_urls() {
+        let redacted = redact_startup_diagnostic_with_profile(
+            "failed at C:\\Users\\private\\Atsumi and https://example.invalid/path?token=secret",
+            Some("C:\\Users\\private"),
+        );
+        assert_eq!(
+            redacted,
+            "failed at %USERPROFILE%\\Atsumi and <redacted-url>"
+        );
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("private"));
     }
 }

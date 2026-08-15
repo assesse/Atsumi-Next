@@ -123,6 +123,9 @@ describe("DuplicateReviewDialog backend evidence", () => {
 
   it("submits every decision with the current candidate revision and required series targets", async () => {
     const onDecision = vi.fn();
+    const client = new ThumbnailClient({
+      resolve: () => ({ kind: "missing", reason: "test fixture" }),
+    });
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -131,6 +134,7 @@ describe("DuplicateReviewDialog backend evidence", () => {
       <DuplicateReviewDialog
         open={false}
         review={review}
+        thumbnailClient={client}
         onClose={vi.fn()}
         onRetry={vi.fn()}
         onRescan={vi.fn()}
@@ -192,6 +196,7 @@ describe("DuplicateReviewDialog backend evidence", () => {
     }));
 
     await act(async () => root.unmount());
+    client.dispose();
     container.remove();
   });
 });

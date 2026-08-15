@@ -4,6 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { backend } from "./api/backend";
 import { galleryId } from "./core/types";
+import { browserFixtureThumbnailAdapter, ThumbnailClient, ThumbnailProvider } from "./thumbnail";
+
+const testThumbnailClient = new ThumbnailClient(browserFixtureThumbnailAdapter);
+const TestApp = () => <ThumbnailProvider client={testThumbnailClient}><App /></ThumbnailProvider>;
 
 const settle = (delay = 20) => new Promise((resolve) => window.setTimeout(resolve, delay));
 
@@ -31,7 +35,7 @@ describe("App Phase 3A backend flow", () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(<App />);
+      root.render(<TestApp />);
       await settle();
     });
 
@@ -77,7 +81,7 @@ describe("App Phase 3A backend flow", () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(<App />);
+      root.render(<TestApp />);
       await settle();
     });
 
@@ -116,7 +120,7 @@ describe("App Phase 3A backend flow", () => {
     let root = createRoot(container);
 
     await act(async () => {
-      root.render(<App />);
+      root.render(<TestApp />);
       await settle();
     });
     const archiveCard = container.querySelector<HTMLElement>('[data-gallery-id="4051038"]');
@@ -150,7 +154,7 @@ describe("App Phase 3A backend flow", () => {
     container.replaceChildren();
     root = createRoot(container);
     await act(async () => {
-      root.render(<App />);
+      root.render(<TestApp />);
       await settle();
     });
     expect(container.querySelector<HTMLButtonElement>('[title^="시리즈 · rain archives"]')).toHaveClass("favorite");
@@ -174,7 +178,7 @@ describe("App Phase 3A backend flow", () => {
     let root = createRoot(container);
 
     await act(async () => {
-      root.render(<App />);
+      root.render(<TestApp />);
       await settle();
     });
     await act(async () => {
@@ -221,7 +225,7 @@ describe("App Phase 3A backend flow", () => {
     container.replaceChildren();
     root = createRoot(container);
     await act(async () => {
-      root.render(<App />);
+      root.render(<TestApp />);
       await settle();
     });
     await act(async () => {
@@ -278,7 +282,7 @@ describe("App Phase 3A backend flow", () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(<App />);
+      root.render(<TestApp />);
       await settle();
     });
     await act(async () => {

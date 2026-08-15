@@ -32,6 +32,9 @@ const formatBytes = (bytes: number): string => {
 
 export function ClassicImportDialog({ open, onClose, onChanged }: ClassicImportDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const closingInternally = useRef(false);
   const [dataRoot, setDataRoot] = useState("");
   const [downloadRoot, setDownloadRoot] = useState("");
   const [report, setReport] = useState<ClassicImportReport | null>(null);
@@ -41,8 +44,22 @@ export function ClassicImportDialog({ open, onClose, onChanged }: ClassicImportD
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (open && !dialog.current?.open) dialog.current?.showModal();
-    if (!open && dialog.current?.open) dialog.current.close();
+    const node = dialog.current;
+    if (!node) return;
+    if (open && !node.open) {
+      opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      node.showModal();
+      window.requestAnimationFrame(() => closeButton.current?.focus());
+    } else if (!open && node.open) {
+      closingInternally.current = true;
+      node.close();
+      const target = opener.current;
+      opener.current = null;
+      window.requestAnimationFrame(() => {
+        if (target?.isConnected && !target.closest("dialog:not([open])")) target.focus();
+        else document.querySelector<HTMLElement>('[aria-label="설정"]')?.focus();
+      });
+    }
   }, [open]);
 
   useEffect(() => {
@@ -178,7 +195,13 @@ export function ClassicImportDialog({ open, onClose, onChanged }: ClassicImportD
         event.preventDefault();
         close();
       }}
-      onClose={onClose}
+      onClose={() => {
+        if (closingInternally.current) {
+          closingInternally.current = false;
+          return;
+        }
+        onClose();
+      }}
     >
       <div className="classic-import-shell">
         <header className="dialog-header">
@@ -186,7 +209,7 @@ export function ClassicImportDialog({ open, onClose, onChanged }: ClassicImportD
             <span className="eyebrow">CLASSIC IMPORT</span>
             <h2 id="classic-import-title">Classic 데이터 가져오기</h2>
           </div>
-          <button type="button" className="icon-button small" aria-label="닫기" title="닫기" disabled={busy} onClick={close}>
+          <button ref={closeButton} type="button" className="icon-button small" aria-label="닫기" title="닫기" disabled={busy} onClick={close}>
             <FluentIcon glyph="\uE711" />
           </button>
         </header>

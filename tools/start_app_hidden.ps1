@@ -13,6 +13,16 @@ $logPath = Join-Path $runtimeDirectory $logName
 $launcherMutex = $null
 $ownsLauncherMutex = $false
 
+function Protect-LogText {
+  param([AllowEmptyString()][string]$Text)
+
+  $safe = $Text.Replace($projectRoot, "<project-root>")
+  if (-not [string]::IsNullOrEmpty($env:USERPROFILE)) {
+    $safe = $safe.Replace($env:USERPROFILE, "%USERPROFILE%")
+  }
+  return $safe -replace '(?i)(?:https?|file)://\S+', '<redacted-url>'
+}
+
 function Add-ProcessLog {
   param(
     [Parameter(Mandatory = $true)]
@@ -25,7 +35,7 @@ function Add-ProcessLog {
 
   $content = Get-Content -LiteralPath $Path -Raw
   if (-not [string]::IsNullOrEmpty($content)) {
-    $content | Add-Content -LiteralPath $logPath -Encoding UTF8
+    (Protect-LogText -Text $content) | Add-Content -LiteralPath $logPath -Encoding UTF8
   }
 }
 
@@ -106,13 +116,12 @@ $mode = if ($CheckOnly) { "launcher check" } else { "desktop app" }
 $header = @(
   "Atsumi Next - $mode"
   "Started: $([DateTimeOffset]::Now.ToString('O'))"
-  "Project: $projectRoot"
   ""
 )
 $header | Set-Content -LiteralPath $logPath -Encoding UTF8
 
 if (-not (Test-Path -LiteralPath $frontendRunner -PathType Leaf)) {
-  "Missing launcher dependency: $frontendRunner" |
+  "Missing launcher dependency: tools\run_frontend.ps1" |
     Add-Content -LiteralPath $logPath -Encoding UTF8
   exit 1
 }
@@ -191,12 +200,12 @@ try {
   }
 
   if (-not (Test-Path -LiteralPath $releaseExecutable -PathType Leaf)) {
-    "The release executable was not created: $releaseExecutable" |
+    "The release executable was not created: src-tauri\target\release\atsumi-next.exe" |
       Add-Content -LiteralPath $logPath -Encoding UTF8
     exit 1
   }
 
-  "Launching: $releaseExecutable" |
+  "Launching the verified release application." |
     Add-Content -LiteralPath $logPath -Encoding UTF8
 
   $appStandardOutput = Join-Path $runtimeDirectory "app.stdout.log"
@@ -222,7 +231,8 @@ try {
     exit $appProcess.ExitCode
   }
 } catch {
-  ($_ | Out-String) | Add-Content -LiteralPath $logPath -Encoding UTF8
+  (Protect-LogText -Text ($_ | Out-String)) |
+    Add-Content -LiteralPath $logPath -Encoding UTF8
   exit 1
 } finally {
   Pop-Location

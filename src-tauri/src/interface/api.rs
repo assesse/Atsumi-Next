@@ -261,16 +261,16 @@ impl From<ApplicationError> for ApiError {
 impl From<RepositoryError> for ApiError {
     fn from(error: RepositoryError) -> Self {
         match error {
-            RepositoryError::Busy(message) => Self {
+            RepositoryError::Busy(_) => Self {
                 code: "DATABASE_BUSY".into(),
-                message,
+                message: "The local database is busy; try again shortly".into(),
                 retryable: true,
                 action: Some(ApiAction::Retry),
                 details: None,
             },
-            RepositoryError::Corrupt(message) => Self {
+            RepositoryError::Corrupt(_) => Self {
                 code: "DATABASE_CORRUPT".into(),
-                message,
+                message: "The local database could not be read safely; restore a backup or review the logs".into(),
                 retryable: false,
                 action: Some(ApiAction::Review),
                 details: None,
@@ -288,16 +288,16 @@ impl From<RepositoryError> for ApiError {
                     ("supportedSchemaVersion".into(), json!(latest_supported)),
                 ])),
             },
-            RepositoryError::MigrationBackup(message) => Self {
+            RepositoryError::MigrationBackup(_) => Self {
                 code: "DATABASE_BACKUP_FAILED".into(),
                 message: "안전 백업을 만들 수 없어 데이터 업데이트를 중단했습니다.".into(),
                 retryable: false,
                 action: Some(ApiAction::Review),
-                details: Some(BTreeMap::from([("reason".into(), json!(message))])),
+                details: None,
             },
-            RepositoryError::Other(message) => Self {
+            RepositoryError::Other(_) => Self {
                 code: "DATABASE_ERROR".into(),
-                message,
+                message: "The local database operation failed; review the application log".into(),
                 retryable: false,
                 action: Some(ApiAction::None),
                 details: None,
@@ -467,6 +467,24 @@ mod tests {
             assert!(!api.message.contains("private"));
             assert!(!api.message.contains("secret"));
             assert!(!api.message.contains("C:\\Users"));
+        }
+    }
+
+    #[test]
+    fn database_errors_do_not_expose_paths_or_driver_details() {
+        let errors = [
+            RepositoryError::Busy("locked at C:\\Users\\private\\atsumi.sqlite3".into()),
+            RepositoryError::Corrupt("file:///C:/Users/private/atsumi.sqlite3 is malformed".into()),
+            RepositoryError::MigrationBackup("https://private.example/?token=secret".into()),
+            RepositoryError::Other("password=secret at C:\\Users\\private".into()),
+        ];
+
+        for error in errors {
+            let api = ApiError::from(error);
+            assert!(!api.message.contains("private"));
+            assert!(!api.message.contains("secret"));
+            assert!(!api.message.contains("C:\\Users"));
+            assert!(api.details.is_none());
         }
     }
 }

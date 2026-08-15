@@ -103,8 +103,8 @@ Milestone D의 즐겨찾기·검색 이력·Auto Find workflow를 실제 SQLite�
 
 - source pagination은 전체 기간을 순회하되 한 작가당 250 page 안전 상한을 둔다.
 - 작품 숨김·resolved duplicate decision·pair 제외는 schema v12의 canonical record를 Auto Find 후보 조건에 결합한다.
-- Classic 즐겨찾기·검색 기록 import와 충돌 보고는 Phase 7에 속한다.
-- 일반 cache/data cleanup UI와 전체 운영 polish는 Phase 7 import 이후 최종 UI·운영·보안 마무리(Milestone H)에서 검증한다.
+- Classic 즐겨찾기·검색 기록 import와 충돌 보고는 Phase 7 read-only workflow로 완료했다.
+- 최종 운영 polish는 구현된 설정만 노출하고, cache purge·영구 삭제처럼 안전 계약이 없는 작업을 설명 있는 disabled 상태로 고정했다.
 
 ## Phase 5: 작품 중복
 
@@ -139,4 +139,5 @@ Milestone D의 즐겨찾기·검색 이력·Auto Find workflow를 실제 SQLite�
 9. 완료: 실제 artifact evidence를 사용하는 작품 단위 중복 후보·판정·Review와 Auto Find decision 제외 연동.
 10. 완료: 완료 artifact 내부의 반복 장면 block, synchronized source-page Review, removal plan, page quarantine·undo와 manifest/DB 일관성.
 11. 완료: Classic read-only inventory, typed dry-run conflict report, 승인형 verified copy/import, crash recovery와 Next-only rollback.
-12. 다음: 최종 운영 polish, 접근성·오류·진단·보안 audit와 실제 Tauri 사용자 검토.
+12. 완료: 최종 운영 polish, 실제 page 확대, dialog focus 복원, production fixture fallback 제거, 사용자 오류와 내부 detail 분리, launcher/startup log redaction, dependency·third-party 고지와 일치 version 검증.
+13. 최종 전달: 전체 Windows 검증, Git push와 PR 갱신, 실제 Tauri 앱 수동 검토를 수행한다.

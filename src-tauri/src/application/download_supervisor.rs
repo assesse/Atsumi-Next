@@ -1066,7 +1066,7 @@ fn handle_download_error(
         Ok(None) => {}
         Err(repository_error) => tracing::error!(
             job_id = descriptor.job_id,
-            error = %repository_error,
+            error_code = repository_error.stable_code(),
             "download failure state could not be persisted"
         ),
     }

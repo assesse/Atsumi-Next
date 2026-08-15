@@ -55,10 +55,10 @@
 
 - migration 이름은 `favorites_search_history_and_auto_find`다.
 - 즐겨찾기는 `(namespace, value)`가 primary key이며 값은 application 경계에서 trim·소문자·공백 정규화한다. 별도의 frontend memory 목록을 canonical source로 사용하지 않는다.
-- 검색 이력은 성공한 non-empty 제출만 SHA-256 fingerprint로 합치며 text, include/exclude tags, language, sort, page size를 함께 보존한다. Classic 검색 기록 import는 Phase 7의 read-only workflow 전에는 수행하지 않는다.
+- 검색 이력은 성공한 non-empty 제출만 SHA-256 fingerprint로 합치며 text, include/exclude tags, language, sort, page size를 함께 보존한다. Classic 검색 기록은 Phase 7 read-only dry-run에 포함되고 사용자가 승인한 신규 row만 적용·rollback journal로 추적한다.
 - Auto Find는 동시에 하나의 `running` row만 허용한다. run·후보·전역 gallery 제외는 재시작 뒤에도 유지되고, snapshot은 최신 run의 후보 중 현재 download entry 또는 명시적 제외가 없는 항목만 반환한다.
 - startup에서 남은 `running` run은 파일이나 후보를 삭제하지 않고 `failed/AUTO_FIND_INTERRUPTED`로 종결한다. 부분 후보는 증거로 보존된다.
-- `auto_find_candidates`는 원격 source의 당시 metadata snapshot이다. 이후 실제 다운로드 artifact나 Phase 5 duplicate decision의 canonical record를 대신하지 않는다.
+- `auto_find_candidates`는 원격 source의 당시 metadata snapshot이다. 실제 다운로드 artifact나 schema v12 duplicate decision의 canonical record를 대신하지 않으며 snapshot 조회 시 해당 canonical 제외 상태를 결합한다.
 
 ### v11 추가 규칙
 

@@ -9,15 +9,17 @@ type SettingsDialogProps = {
   error: ApiError | null;
   onClose: () => void;
   onSave: (patch: SettingsPatch) => Promise<boolean>;
-  onNotice: (message: string) => void;
   onClassicImport: () => void;
   onPreviewLayout: (layout: { maxColumns: number; previewWidth: number } | null) => void;
 };
 
-const sections = ["일반", "탐색", "다운로드", "네트워크", "중복 검사", "저장 공간"];
+const sections = ["일반", "저장 공간"];
 
-export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onNotice, onClassicImport, onPreviewLayout }: SettingsDialogProps) {
+export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onClassicImport, onPreviewLayout }: SettingsDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const closingInternally = useRef(false);
   const wasOpen = useRef(false);
   const [activeSection, setActiveSection] = useState("일반");
   const [draft, setDraft] = useState<SettingsSnapshot>(settings);
@@ -25,12 +27,21 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
 
   useEffect(() => {
     if (open && !wasOpen.current) {
+      opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       setDraft(settings);
       onPreviewLayout({ maxColumns: settings.maxColumns, previewWidth: settings.previewWidth });
       if (!dialog.current?.open) dialog.current?.showModal();
+      window.requestAnimationFrame(() => closeButton.current?.focus());
     } else if (!open && wasOpen.current && dialog.current?.open) {
+      closingInternally.current = true;
       dialog.current.close();
       onPreviewLayout(null);
+      const target = opener.current;
+      opener.current = null;
+      window.requestAnimationFrame(() => {
+        if (target?.isConnected) target.focus();
+        else document.querySelector<HTMLElement>('[aria-label="설정"]')?.focus();
+      });
     }
     wasOpen.current = open;
   }, [open, onPreviewLayout, settings]);
@@ -71,7 +82,13 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
         event.preventDefault();
         close();
       }}
-      onClose={onClose}
+      onClose={() => {
+        if (closingInternally.current) {
+          closingInternally.current = false;
+          return;
+        }
+        onClose();
+      }}
     >
       <div className="settings-form">
         <header className="dialog-header">
@@ -83,7 +100,7 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
             <button type="button" className="text-button primary" disabled={loading || saving} onClick={() => void save()}>
               {saving ? "저장 중" : "저장"}
             </button>
-            <button type="button" className="icon-button small" title="닫기" aria-label="닫기" onClick={close}>
+            <button ref={closeButton} type="button" className="icon-button small" title="닫기" aria-label="닫기" onClick={close}>
               <FluentIcon glyph="\uE711" />
             </button>
           </div>
@@ -103,12 +120,6 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                 <h3>Classic 데이터</h3>
                 <p>Classic 원본은 읽기 전용으로 조사하고, dry-run 보고서를 승인한 뒤에만 Next 저장소로 복사합니다.</p>
                 <button type="button" className="text-button primary" onClick={() => { close(); onClassicImport(); }}>Classic 가져오기 열기</button>
-              </div>
-            ) : activeSection !== "일반" ? (
-              <div className="settings-placeholder">
-                <span className="eyebrow">FOUNDATION</span>
-                <h3>{activeSection}</h3>
-                <p>이 분류는 실제 기능 계약과 함께 다음 단계에서 연결됩니다.</p>
               </div>
             ) : (
               <>
@@ -139,11 +150,11 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                 </div>
                 <div className="danger-zone">
                   <strong>저장 데이터 관리</strong>
-                  <p>삭제 범위와 undo 계약이 확정되기 전에는 실제 파일을 변경하지 않습니다.</p>
+                  <p id="destructive-settings-unavailable">캐시 정리와 영구 삭제는 안전한 계획·검토·undo 계약이 아직 없으므로 사용할 수 없습니다. 다운로드 격리와 복원은 Downloads에서 이용할 수 있습니다.</p>
                   <div>
-                    <button type="button" className="text-button" onClick={() => onNotice("캐시 제거 계획 화면은 다음 단계에서 연결합니다.")}>캐시 제거</button>
-                    <button type="button" className="text-button warning-button" onClick={() => onNotice("데이터 제거는 dry-run 보고서부터 제공합니다.")}>데이터 제거</button>
-                    <button type="button" className="text-button danger-button" onClick={() => onNotice("모든 파일 제거는 현재 비활성화되어 있습니다.")}>모든 파일 제거</button>
+                    <button type="button" className="text-button" disabled aria-describedby="destructive-settings-unavailable" title="안전한 캐시 제거 계획이 아직 제공되지 않습니다">캐시 제거</button>
+                    <button type="button" className="text-button warning-button" disabled aria-describedby="destructive-settings-unavailable" title="dry-run과 undo를 제공하기 전에는 사용할 수 없습니다">데이터 제거</button>
+                    <button type="button" className="text-button danger-button" disabled aria-describedby="destructive-settings-unavailable" title="영구 삭제는 지원하지 않습니다">모든 파일 제거</button>
                   </div>
                 </div>
               </>

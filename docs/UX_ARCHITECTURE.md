@@ -81,7 +81,7 @@
 - 전체 닫기는 tab strip 최우측, 탭 닫기는 각 탭에 위치한다.
 - 최소화 시 view header 중앙의 복원 control로 돌아온다.
 - Related gallery를 열면 현재 탭 바로 다음에 자식 탭으로 삽입한다.
-- 현재 mock sprite는 실제 cell 비율인 1:1로 대표 이미지와 페이지 preview를 표시한다. Phase 3의 실제 thumbnail 계약은 각 이미지의 width/height를 전달해 source별 비율을 적용한다.
+- browser review sprite는 실제 cell 비율인 1:1을 보존하고, production thumbnail은 resolver가 전달한 width/height와 `object-fit: contain`으로 source 비율을 유지한다. page를 누르면 같은 전역 coordinator의 critical 요청을 사용하는 확대 dialog가 열린다.
 - 페이지 preview 전체는 잘라내거나 짧은 중첩 스크롤에 가두지 않고 상세 본문의 단일 scroll context에서 확인한다.
 
 ### Review workspace

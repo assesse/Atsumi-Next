@@ -7,6 +7,7 @@ type SideRailProps = {
   collapsed: boolean;
   autoFindCount: number;
   attentionCount: number;
+  sourceLabel: string;
   onNavigate: (view: ViewId) => void;
   onToggle: () => void;
 };
@@ -22,6 +23,7 @@ export function SideRail({
   collapsed,
   autoFindCount,
   attentionCount,
+  sourceLabel,
   onNavigate,
   onToggle,
 }: SideRailProps) {
@@ -59,7 +61,7 @@ export function SideRail({
       <div className="sidebar-foot">
         <span className="live-indicator">
           <i />
-          <span className="nav-label">Mock source</span>
+          <span className="nav-label">{sourceLabel}</span>
         </span>
         <button
           type="button"

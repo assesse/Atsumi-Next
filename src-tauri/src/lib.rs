@@ -361,7 +361,7 @@ pub fn run() -> tauri::Result<()> {
         .run(tauri::generate_context!());
 
     if let Err(ref error) = result {
-        tracing::error!(error = %error, "Atsumi Next exited with an error");
+        tracing::error!(error_type = %std::any::type_name_of_val(error), "Atsumi Next exited with an error");
     }
     result
 }
