@@ -12,16 +12,18 @@ use uuid::Uuid;
 
 use crate::{
     application::{
-        ArtifactRepository, DownloadMutationOutcome, DownloadQueueAddOutcome, DownloadQueueRecord,
-        DownloadRepository, RepositoryError, StateRepository,
+        ArtifactRepository, DownloadArtifactPlan, DownloadCheckpoint, DownloadMutationOutcome,
+        DownloadPageAttempt, DownloadPageAttemptResult, DownloadPipelineRepository,
+        DownloadPrepared, DownloadQueueAddOutcome, DownloadQueueRecord, DownloadRepository,
+        QuarantineSaga, QuarantineSagaState, RepositoryError, StateRepository, StoredPage,
     },
     domain::{
-        ArtifactBundle, ArtifactRelativePath, DownloadArtifact, DownloadArtifactState,
-        DownloadChangedEvent, DownloadEntry, DownloadEntryId, DownloadJobProjection,
-        DownloadListRequest, DownloadPage, DownloadReviewKind, FixtureDownloadJobDescriptor,
-        FixtureDownloadJobStep, Gallery, GalleryId, GalleryMetadata, JobEvent, JobRef, JobState,
-        PageArtifact, PageArtifactState, SettingsSnapshot, SourcePageNumber,
-        WindowPlacementSnapshot,
+        ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
+        ArtifactStorageFormat, DownloadArtifact, DownloadArtifactState, DownloadChangedEvent,
+        DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
+        DownloadListRequest, DownloadPage, DownloadReviewKind, FixtureDownloadJobStep, Gallery,
+        GalleryId, GalleryMetadata, JobEvent, JobRef, JobState, PageArtifact, PageArtifactState,
+        SettingsSnapshot, SourcePageNumber, WindowPlacementSnapshot,
     },
 };
 
@@ -351,7 +353,7 @@ impl DownloadRepository for SqliteRepository {
             transaction.commit().map_err(map_sqlite_error)?;
             return Ok(DownloadQueueAddOutcome::Added(DownloadQueueRecord {
                 entries,
-                fixture_jobs: Vec::new(),
+                jobs: Vec::new(),
             }));
         }
 
@@ -366,7 +368,7 @@ impl DownloadRepository for SqliteRepository {
             )
             .map_err(map_sqlite_error)?;
 
-        let mut fixture_jobs = Vec::new();
+        let mut jobs = Vec::new();
         for (position, gallery_id) in galleries.iter().enumerate() {
             let existing_entry_id = transaction
                 .query_row(
@@ -436,7 +438,7 @@ impl DownloadRepository for SqliteRepository {
                             [&job_id],
                         )
                         .map_err(map_sqlite_error)?;
-                    fixture_jobs.push(FixtureDownloadJobDescriptor {
+                    jobs.push(DownloadJobDescriptor {
                         job_id,
                         entry_id: entry_id.clone(),
                         gallery_id: *gallery_id,
@@ -473,7 +475,7 @@ impl DownloadRepository for SqliteRepository {
         transaction.commit().map_err(map_sqlite_error)?;
         Ok(DownloadQueueAddOutcome::Added(DownloadQueueRecord {
             entries,
-            fixture_jobs,
+            jobs,
         }))
     }
 
@@ -1055,14 +1057,21 @@ impl ArtifactRepository for SqliteRepository {
                 r#"
                     INSERT INTO download_artifacts (
                         entry_id, gallery_id, revision, relative_directory,
-                        expected_page_count, state
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                        expected_page_count, state, manifest_relative_path,
+                        manifest_schema_version, writer_version,
+                        hash_profile_version, completed_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                     ON CONFLICT (entry_id) DO UPDATE SET
                         gallery_id = excluded.gallery_id,
                         revision = excluded.revision,
                         relative_directory = excluded.relative_directory,
                         expected_page_count = excluded.expected_page_count,
-                        state = excluded.state
+                        state = excluded.state,
+                        manifest_relative_path = excluded.manifest_relative_path,
+                        manifest_schema_version = excluded.manifest_schema_version,
+                        writer_version = excluded.writer_version,
+                        hash_profile_version = excluded.hash_profile_version,
+                        completed_at = excluded.completed_at
                 "#,
                 params![
                     bundle.artifact.entry_id.as_str(),
@@ -1071,6 +1080,15 @@ impl ArtifactRepository for SqliteRepository {
                     bundle.artifact.relative_directory.as_str(),
                     i64::from(bundle.artifact.expected_page_count),
                     bundle.artifact.state.as_str(),
+                    bundle
+                        .artifact
+                        .manifest_relative_path
+                        .as_ref()
+                        .map(ArtifactRelativePath::as_str),
+                    bundle.artifact.manifest_schema_version.map(i64::from),
+                    bundle.artifact.writer_version,
+                    i64::from(bundle.artifact.hash_profile_version),
+                    bundle.artifact.completed_at,
                 ],
             )
             .map_err(map_sqlite_error)?;
@@ -1087,8 +1105,9 @@ impl ArtifactRepository for SqliteRepository {
                     r#"
                         INSERT INTO download_pages (
                             entry_id, gallery_id, source_page_number,
-                            relative_path, state, byte_length
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                            relative_path, state, byte_length, sha256,
+                            storage_format, source_revision, verified_at, excluded
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                     "#,
                     params![
                         page.entry_id.as_str(),
@@ -1099,6 +1118,11 @@ impl ArtifactRepository for SqliteRepository {
                         page.byte_length
                             .map(|value| to_sql_integer(value, "page byte length"))
                             .transpose()?,
+                        page.sha256.as_ref().map(ArtifactSha256::as_str),
+                        page.storage_format.map(ArtifactStorageFormat::as_str),
+                        page.source_revision,
+                        page.verified_at,
+                        page.excluded,
                     ],
                 )
                 .map_err(map_sqlite_error)?;
@@ -1125,7 +1149,12 @@ impl ArtifactRepository for SqliteRepository {
                         a.revision,
                         a.relative_directory,
                         a.expected_page_count,
-                        a.state
+                        a.state,
+                        a.manifest_relative_path,
+                        a.manifest_schema_version,
+                        a.writer_version,
+                        a.hash_profile_version,
+                        a.completed_at
                     FROM download_artifacts a
                     JOIN galleries g ON g.gallery_id = a.gallery_id
                     WHERE a.entry_id = ?1
@@ -1152,7 +1181,7 @@ impl ArtifactRepository for SqliteRepository {
             stored_u64(stored.gallery_revision, "gallery revision")?,
             metadata,
         );
-        let artifact = DownloadArtifact::new(
+        let mut artifact = DownloadArtifact::new(
             entry_id.clone(),
             gallery_id,
             stored_u64(stored.artifact_revision, "download artifact revision")?,
@@ -1164,11 +1193,43 @@ impl ArtifactRepository for SqliteRepository {
                 .map_err(domain_corruption)?,
         )
         .map_err(domain_corruption)?;
+        artifact.hash_profile_version =
+            stored_u32(stored.hash_profile_version, "artifact hash profile version")?;
+        match (
+            stored.manifest_relative_path,
+            stored.manifest_schema_version,
+            stored.writer_version,
+            stored.completed_at,
+        ) {
+            (Some(path), Some(schema), Some(writer), Some(completed_at)) => {
+                let hash_profile_version = artifact.hash_profile_version;
+                artifact = artifact
+                    .with_manifest(
+                        ArtifactRelativePath::new(path).map_err(domain_corruption)?,
+                        stored_u32(schema, "manifest schema version")?,
+                        writer,
+                        hash_profile_version,
+                        completed_at,
+                    )
+                    .map_err(domain_corruption)?;
+            }
+            (Some(path), None, None, None) if artifact.state != DownloadArtifactState::Complete => {
+                artifact.manifest_relative_path =
+                    Some(ArtifactRelativePath::new(path).map_err(domain_corruption)?);
+            }
+            (None, None, None, None) => {}
+            _ => {
+                return Err(RepositoryError::Corrupt(
+                    "download artifact has incomplete manifest metadata".into(),
+                ));
+            }
+        }
 
         let mut statement = connection
             .prepare(
                 r#"
-                    SELECT gallery_id, source_page_number, relative_path, state, byte_length
+                    SELECT gallery_id, source_page_number, relative_path, state, byte_length,
+                           sha256, storage_format, source_revision, verified_at, excluded
                     FROM download_pages
                     WHERE entry_id = ?1
                     ORDER BY source_page_number ASC
@@ -1189,26 +1250,1475 @@ impl ArtifactRepository for SqliteRepository {
                 .byte_length
                 .map(|value| stored_u64(value, "page byte length"))
                 .transpose()?;
-            pages.push(
-                PageArtifact::new(
-                    entry_id.clone(),
-                    page_gallery_id,
-                    source_page_number,
-                    ArtifactRelativePath::new(stored.relative_path).map_err(domain_corruption)?,
-                    stored
-                        .page_state
-                        .parse::<PageArtifactState>()
-                        .map_err(domain_corruption)?,
-                    byte_length,
-                )
-                .map_err(domain_corruption)?,
-            );
+            let mut page = PageArtifact::new(
+                entry_id.clone(),
+                page_gallery_id,
+                source_page_number,
+                ArtifactRelativePath::new(stored.relative_path).map_err(domain_corruption)?,
+                stored
+                    .page_state
+                    .parse::<PageArtifactState>()
+                    .map_err(domain_corruption)?,
+                byte_length,
+            )
+            .map_err(domain_corruption)?;
+            match (
+                stored.sha256,
+                stored.storage_format,
+                stored.source_revision,
+                stored.verified_at,
+            ) {
+                (Some(sha256), Some(format), Some(source_revision), Some(verified_at)) => {
+                    page = page
+                        .with_verification(
+                            ArtifactSha256::new(sha256).map_err(domain_corruption)?,
+                            format
+                                .parse::<ArtifactStorageFormat>()
+                                .map_err(domain_corruption)?,
+                            source_revision,
+                            verified_at,
+                        )
+                        .map_err(domain_corruption)?;
+                }
+                (None, None, None, None) => {}
+                _ => {
+                    return Err(RepositoryError::Corrupt(
+                        "download page has incomplete verification metadata".into(),
+                    ));
+                }
+            }
+            pages.push(page.with_excluded(stored.excluded));
         }
 
         ArtifactBundle::new(gallery, artifact, pages)
             .map(Some)
             .map_err(domain_corruption)
     }
+}
+
+impl DownloadPipelineRepository for SqliteRepository {
+    fn pipeline_begin(
+        &self,
+        descriptor: &DownloadJobDescriptor,
+    ) -> Result<DownloadJobProjection, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let target = read_pipeline_target(&transaction, descriptor)?;
+        if target.state != JobState::Queued {
+            if target.state == JobState::ResolvingMetadata {
+                let projection =
+                    target.into_projection(Some("Metadata resolution is already active"));
+                transaction.commit().map_err(map_sqlite_error)?;
+                return projection;
+            }
+            return Err(invalid_pipeline_state(&target, "begin"));
+        }
+        let projection = transition_pipeline_target(
+            &transaction,
+            target,
+            JobState::ResolvingMetadata,
+            None,
+            None,
+            None,
+            None,
+            "Resolving gallery metadata",
+        )?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(projection)
+    }
+
+    fn pipeline_prepare(
+        &self,
+        plan: &DownloadArtifactPlan,
+    ) -> Result<DownloadPrepared, RepositoryError> {
+        if plan.source_pages.is_empty() {
+            return Err(RepositoryError::Other(
+                "download artifact plan must contain at least one source page".into(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let target = read_pipeline_target(&transaction, &plan.descriptor)?;
+        if target.state != JobState::ResolvingMetadata {
+            return Err(invalid_pipeline_state(&target, "prepare artifact"));
+        }
+
+        transaction
+            .execute(
+                r#"
+                    INSERT INTO galleries (
+                        gallery_id, revision, title, primary_artist, primary_group,
+                        source_page_count
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    ON CONFLICT (gallery_id) DO UPDATE SET
+                        revision = excluded.revision,
+                        title = excluded.title,
+                        primary_artist = excluded.primary_artist,
+                        primary_group = excluded.primary_group,
+                        source_page_count = excluded.source_page_count
+                "#,
+                params![
+                    plan.gallery.id.get(),
+                    to_sql_integer(plan.gallery.revision, "gallery revision")?,
+                    plan.gallery.metadata.title,
+                    plan.gallery.metadata.primary_artist,
+                    plan.gallery.metadata.primary_group,
+                    i64::from(plan.gallery.metadata.source_page_count),
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+
+        let previous_artifact_revision = transaction
+            .query_row(
+                "SELECT revision FROM download_artifacts WHERE entry_id = ?1",
+                [&plan.descriptor.entry_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(map_sqlite_error)?;
+        let artifact_revision = previous_artifact_revision
+            .map(|revision| next_stored_revision(revision, "artifact revision"))
+            .transpose()?
+            .unwrap_or(0);
+        transaction
+            .execute(
+                r#"
+                    INSERT INTO download_artifacts (
+                        entry_id, gallery_id, revision, relative_directory,
+                        expected_page_count, state, manifest_relative_path,
+                        hash_profile_version
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, 'incomplete', ?6, 1)
+                    ON CONFLICT (entry_id) DO UPDATE SET
+                        gallery_id = excluded.gallery_id,
+                        revision = excluded.revision,
+                        relative_directory = excluded.relative_directory,
+                        expected_page_count = excluded.expected_page_count,
+                        state = 'incomplete',
+                        manifest_relative_path = excluded.manifest_relative_path,
+                        manifest_schema_version = NULL,
+                        writer_version = NULL,
+                        completed_at = NULL
+                "#,
+                params![
+                    plan.descriptor.entry_id,
+                    plan.gallery.id.get(),
+                    to_sql_integer(artifact_revision, "artifact revision")?,
+                    plan.relative_directory.as_str(),
+                    i64::try_from(plan.source_pages.len()).map_err(|_| {
+                        RepositoryError::Other("source page count exceeds SQLite range".into())
+                    })?,
+                    plan.manifest_relative_path.as_str(),
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+
+        for source_page in &plan.source_pages {
+            let relative_path = ArtifactRelativePath::new(format!(
+                "{}/{:04}.webp",
+                plan.relative_directory.as_str(),
+                source_page.source_page_number.get()
+            ))
+            .map_err(|error| RepositoryError::Other(error.to_string()))?;
+            transaction
+                .execute(
+                    r#"
+                        INSERT INTO download_pages (
+                            entry_id, gallery_id, source_page_number,
+                            relative_path, state, excluded
+                        ) VALUES (?1, ?2, ?3, ?4, 'pending', 0)
+                        ON CONFLICT (entry_id, source_page_number) DO UPDATE SET
+                            gallery_id = excluded.gallery_id,
+                            relative_path = excluded.relative_path
+                    "#,
+                    params![
+                        plan.descriptor.entry_id,
+                        plan.gallery.id.get(),
+                        i64::from(source_page.source_page_number.get()),
+                        relative_path.as_str(),
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
+        }
+
+        let unexpected_pages = transaction
+            .query_row(
+                r#"
+                    SELECT COUNT(*)
+                    FROM download_pages
+                    WHERE entry_id = ?1
+                      AND source_page_number > ?2
+                "#,
+                params![
+                    plan.descriptor.entry_id,
+                    i64::try_from(plan.source_pages.len()).unwrap_or(i64::MAX),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(map_sqlite_error)?;
+        if unexpected_pages != 0 {
+            return Err(RepositoryError::Corrupt(
+                "download artifact contains source pages beyond the current gallery metadata"
+                    .into(),
+            ));
+        }
+
+        let total_units = u64::try_from(plan.source_pages.len())
+            .map_err(|_| RepositoryError::Other("download page count overflowed".into()))?;
+        let verified_units = transaction
+            .query_row(
+                r#"
+                    SELECT COUNT(*)
+                    FROM download_pages
+                    WHERE entry_id = ?1
+                      AND state = 'present'
+                      AND byte_length IS NOT NULL
+                      AND sha256 IS NOT NULL
+                      AND storage_format = 'webp'
+                      AND source_revision IS NOT NULL
+                      AND verified_at IS NOT NULL
+                      AND excluded = 0
+                "#,
+                [&plan.descriptor.entry_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(map_sqlite_error)?;
+        let verified_units = stored_u64(verified_units, "verified page count")?;
+        let projection = transition_pipeline_target(
+            &transaction,
+            target,
+            JobState::Downloading,
+            Some(verified_units),
+            Some(total_units),
+            None,
+            None,
+            "Downloading verified source pages",
+        )?;
+
+        let mut statement = transaction
+            .prepare(
+                r#"
+                    SELECT source_page_number, relative_path, byte_length,
+                           sha256, storage_format, source_revision, verified_at, excluded
+                    FROM download_pages
+                    WHERE entry_id = ?1
+                      AND state = 'present'
+                      AND byte_length IS NOT NULL
+                      AND sha256 IS NOT NULL
+                      AND storage_format IS NOT NULL
+                      AND source_revision IS NOT NULL
+                      AND verified_at IS NOT NULL
+                    ORDER BY source_page_number ASC
+                "#,
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map([&plan.descriptor.entry_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, bool>(7)?,
+                ))
+            })
+            .map_err(map_sqlite_error)?;
+        let mut checkpoints = Vec::new();
+        for row in rows {
+            let row = row.map_err(map_sqlite_error)?;
+            checkpoints.push(DownloadCheckpoint {
+                page: StoredPage {
+                    source_page_number: SourcePageNumber::new(stored_u32(
+                        row.0,
+                        "checkpoint source page number",
+                    )?)
+                    .map_err(domain_corruption)?,
+                    relative_path: ArtifactRelativePath::new(row.1).map_err(domain_corruption)?,
+                    byte_length: stored_u64(row.2, "checkpoint byte length")?,
+                    sha256: ArtifactSha256::new(row.3).map_err(domain_corruption)?,
+                    storage_format: row
+                        .4
+                        .parse::<ArtifactStorageFormat>()
+                        .map_err(domain_corruption)?,
+                    source_revision: row.5,
+                    verified_at: row.6,
+                },
+                excluded: row.7,
+            });
+        }
+        drop(statement);
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(DownloadPrepared {
+            projection,
+            checkpoints,
+        })
+    }
+
+    fn pipeline_page_attempt_start(
+        &self,
+        attempt: &DownloadPageAttempt,
+    ) -> Result<(), RepositoryError> {
+        let connection = self.connection()?;
+        ensure_current_pipeline_attempt(&connection, &attempt.descriptor)?;
+        connection
+            .execute(
+                r#"
+                    INSERT INTO download_page_attempts (
+                        job_id, job_attempt, source_page_number,
+                        candidate_index, started_at
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                    ON CONFLICT (
+                        job_id, job_attempt, source_page_number, candidate_index
+                    ) DO NOTHING
+                "#,
+                params![
+                    attempt.descriptor.job_id,
+                    to_sql_integer(attempt.descriptor.worker_attempt, "download attempt")?,
+                    i64::from(attempt.source_page_number.get()),
+                    i64::from(attempt.candidate_index),
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        Ok(())
+    }
+
+    fn pipeline_page_attempt_finish(
+        &self,
+        result: &DownloadPageAttemptResult,
+    ) -> Result<(), RepositoryError> {
+        let connection = self.connection()?;
+        ensure_current_pipeline_attempt(&connection, &result.attempt.descriptor)?;
+        connection
+            .execute(
+                r#"
+                    INSERT INTO download_page_attempts (
+                        job_id, job_attempt, source_page_number,
+                        candidate_index, started_at, finished_at,
+                        outcome, error_code, error_message, bytes_received
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        ?5, ?6, ?7, ?8
+                    )
+                    ON CONFLICT (
+                        job_id, job_attempt, source_page_number, candidate_index
+                    ) DO UPDATE SET
+                        finished_at = excluded.finished_at,
+                        outcome = excluded.outcome,
+                        error_code = excluded.error_code,
+                        error_message = excluded.error_message,
+                        bytes_received = excluded.bytes_received
+                "#,
+                params![
+                    result.attempt.descriptor.job_id,
+                    to_sql_integer(result.attempt.descriptor.worker_attempt, "download attempt")?,
+                    i64::from(result.attempt.source_page_number.get()),
+                    i64::from(result.attempt.candidate_index),
+                    result.outcome.as_str(),
+                    result.error_code,
+                    result.error_message,
+                    result
+                        .bytes_received
+                        .map(|bytes| to_sql_integer(bytes, "received page bytes"))
+                        .transpose()?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        Ok(())
+    }
+
+    fn pipeline_page_verified(
+        &self,
+        descriptor: &DownloadJobDescriptor,
+        page: &StoredPage,
+    ) -> Result<DownloadJobProjection, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let target = read_pipeline_target(&transaction, descriptor)?;
+        if target.state != JobState::Downloading {
+            return Err(invalid_pipeline_state(&target, "record a verified page"));
+        }
+        let changed = transaction
+            .execute(
+                r#"
+                    UPDATE download_pages
+                    SET state = 'present',
+                        relative_path = ?1,
+                        byte_length = ?2,
+                        sha256 = ?3,
+                        storage_format = ?4,
+                        source_revision = ?5,
+                        verified_at = ?6
+                    WHERE entry_id = ?7 AND source_page_number = ?8
+                "#,
+                params![
+                    page.relative_path.as_str(),
+                    to_sql_integer(page.byte_length, "page byte length")?,
+                    page.sha256.as_str(),
+                    page.storage_format.as_str(),
+                    page.source_revision,
+                    page.verified_at,
+                    descriptor.entry_id,
+                    i64::from(page.source_page_number.get()),
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if changed != 1 {
+            return Err(RepositoryError::Corrupt(format!(
+                "download page {} has no prepared checkpoint",
+                page.source_page_number.get()
+            )));
+        }
+        let completed_units = transaction
+            .query_row(
+                r#"
+                    SELECT COUNT(*)
+                    FROM download_pages
+                    WHERE entry_id = ?1 AND state = 'present' AND excluded = 0
+                      AND byte_length IS NOT NULL AND sha256 IS NOT NULL
+                      AND storage_format = 'webp' AND source_revision IS NOT NULL
+                      AND verified_at IS NOT NULL
+                "#,
+                [&descriptor.entry_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(map_sqlite_error)?;
+        let projection = update_pipeline_progress(
+            &transaction,
+            target,
+            stored_u64(completed_units, "verified page count")?,
+            "Verified a downloaded source page",
+        )?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(projection)
+    }
+
+    fn pipeline_stage(
+        &self,
+        descriptor: &DownloadJobDescriptor,
+        state: JobState,
+        message: &'static str,
+    ) -> Result<DownloadJobProjection, RepositoryError> {
+        if !matches!(state, JobState::Hashing | JobState::Verifying) {
+            return Err(RepositoryError::Other(
+                "pipeline stage must be hashing or verifying".into(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let target = read_pipeline_target(&transaction, descriptor)?;
+        if !target.state.allows_transition_to(state) {
+            return Err(invalid_pipeline_state(&target, "advance the pipeline"));
+        }
+        let projection = transition_pipeline_target(
+            &transaction,
+            target,
+            state,
+            None,
+            None,
+            None,
+            None,
+            message,
+        )?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(projection)
+    }
+
+    fn pipeline_complete(
+        &self,
+        descriptor: &DownloadJobDescriptor,
+        manifest: &ArtifactManifest,
+        manifest_relative_path: &ArtifactRelativePath,
+    ) -> Result<DownloadJobProjection, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let target = read_pipeline_target(&transaction, descriptor)?;
+        if target.state != JobState::Verifying {
+            return Err(invalid_pipeline_state(&target, "complete the artifact"));
+        }
+        let expected = transaction
+            .query_row(
+                "SELECT expected_page_count FROM download_artifacts WHERE entry_id = ?1",
+                [&descriptor.entry_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(map_sqlite_error)?;
+        let verified = transaction
+            .query_row(
+                r#"
+                    SELECT COUNT(*)
+                    FROM download_pages
+                    WHERE entry_id = ?1 AND state = 'present' AND excluded = 0
+                      AND byte_length IS NOT NULL AND sha256 IS NOT NULL
+                      AND storage_format = 'webp' AND source_revision IS NOT NULL
+                      AND verified_at IS NOT NULL
+                "#,
+                [&descriptor.entry_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(map_sqlite_error)?;
+        if expected != verified
+            || stored_u32(expected, "expected artifact page count")? != manifest.expected_page_count
+            || manifest.pages.len() != manifest.expected_page_count as usize
+        {
+            return Err(RepositoryError::Other(
+                "artifact cannot complete before every source page is verified".into(),
+            ));
+        }
+        let artifact_changed = transaction
+            .execute(
+                r#"
+                    UPDATE download_artifacts
+                    SET revision = revision + 1,
+                        state = 'complete',
+                        manifest_relative_path = ?1,
+                        manifest_schema_version = ?2,
+                        writer_version = ?3,
+                        hash_profile_version = ?4,
+                        completed_at = ?5
+                    WHERE entry_id = ?6 AND state = 'incomplete'
+                "#,
+                params![
+                    manifest_relative_path.as_str(),
+                    i64::from(manifest.schema_version),
+                    manifest.writer_version,
+                    i64::from(manifest.hash_profile_version),
+                    manifest.completed_at,
+                    descriptor.entry_id,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        if artifact_changed != 1 {
+            return Err(RepositoryError::Other(
+                "artifact changed concurrently while completing".into(),
+            ));
+        }
+        let projection = transition_pipeline_target(
+            &transaction,
+            target,
+            JobState::Completed,
+            Some(stored_u64(verified, "verified page count")?),
+            Some(stored_u64(expected, "expected page count")?),
+            None,
+            None,
+            "Download completed and artifact integrity was verified",
+        )?;
+        transaction
+            .execute(
+                r#"
+                    UPDATE download_attempts
+                    SET finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        outcome_state = 'completed',
+                        error_code = NULL,
+                        error_message = NULL
+                    WHERE job_id = ?1 AND attempt = ?2
+                "#,
+                params![
+                    descriptor.job_id,
+                    to_sql_integer(descriptor.worker_attempt, "download attempt")?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(projection)
+    }
+
+    fn pipeline_fail(
+        &self,
+        descriptor: &DownloadJobDescriptor,
+        code: &str,
+        message: &str,
+        _retryable: bool,
+    ) -> Result<Option<DownloadJobProjection>, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let target = match read_pipeline_target(&transaction, descriptor) {
+            Ok(target) => target,
+            Err(RepositoryError::Other(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if !target.state.is_active() || !target.state.allows_transition_to(JobState::Failed) {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(None);
+        }
+        let projection = transition_pipeline_target(
+            &transaction,
+            target,
+            JobState::Failed,
+            None,
+            None,
+            Some(code),
+            Some(message),
+            "Download stopped before artifact verification completed",
+        )?;
+        transaction
+            .execute(
+                r#"
+                    UPDATE download_attempts
+                    SET finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        outcome_state = 'failed', error_code = ?1, error_message = ?2
+                    WHERE job_id = ?3 AND attempt = ?4
+                "#,
+                params![
+                    code,
+                    message,
+                    descriptor.job_id,
+                    to_sql_integer(descriptor.worker_attempt, "download attempt")?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(Some(projection))
+    }
+
+    fn pipeline_resume_interrupted(&self) -> Result<Vec<DownloadJobDescriptor>, RepositoryError> {
+        let entry_ids = {
+            let connection = self.connection()?;
+            let mut statement = connection
+                .prepare(
+                    r#"
+                        SELECT d.entry_id
+                        FROM download_entries d
+                        JOIN download_artifacts a ON a.entry_id = d.entry_id
+                        WHERE d.state = 'interrupted'
+                        ORDER BY d.created_at ASC, d.entry_id ASC
+                    "#,
+                )
+                .map_err(map_sqlite_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(map_sqlite_error)?;
+            let mut entry_ids = Vec::new();
+            for row in rows {
+                entry_ids.push(
+                    DownloadEntryId::new(row.map_err(map_sqlite_error)?)
+                        .map_err(domain_corruption)?,
+                );
+            }
+            entry_ids
+        };
+        if entry_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let job_refs = match <Self as DownloadRepository>::download_retry(self, &entry_ids)? {
+            DownloadMutationOutcome::Applied(job_refs) => job_refs,
+            DownloadMutationOutcome::EntryNotFound(entry_id) => {
+                return Err(RepositoryError::Corrupt(format!(
+                    "interrupted download entry {entry_id} disappeared during resume"
+                )))
+            }
+            DownloadMutationOutcome::InvalidState { entry_id, state } => {
+                return Err(RepositoryError::Other(format!(
+                    "interrupted download entry {entry_id} changed to {state} during resume"
+                )))
+            }
+        };
+        let connection = self.connection()?;
+        let mut descriptors = Vec::new();
+        for job_ref in job_refs.into_iter().filter(|job_ref| !job_ref.reused) {
+            let descriptor = connection
+                .query_row(
+                    r#"
+                        SELECT job_id, entry_id, gallery_id, attempt
+                        FROM download_jobs WHERE job_id = ?1
+                    "#,
+                    [&job_ref.job_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .map_err(map_sqlite_error)?;
+            descriptors.push(DownloadJobDescriptor {
+                job_id: descriptor.0,
+                entry_id: descriptor.1,
+                gallery_id: GalleryId::new(descriptor.2).map_err(domain_corruption)?,
+                worker_attempt: stored_u64(descriptor.3, "download attempt")?,
+            });
+        }
+        Ok(descriptors)
+    }
+
+    fn pipeline_descriptors_for_jobs(
+        &self,
+        jobs: &[JobRef],
+    ) -> Result<Vec<DownloadJobDescriptor>, RepositoryError> {
+        let connection = self.connection()?;
+        let mut descriptors = Vec::new();
+        for job in jobs.iter().filter(|job| !job.reused) {
+            let stored = connection
+                .query_row(
+                    r#"
+                        SELECT job_id, entry_id, gallery_id, attempt
+                        FROM download_jobs WHERE job_id = ?1
+                    "#,
+                    [&job.job_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(map_sqlite_error)?
+                .ok_or_else(|| {
+                    RepositoryError::Corrupt(format!(
+                        "download job {:?} disappeared before launch",
+                        job.job_id
+                    ))
+                })?;
+            let attempt = stored_u64(stored.3, "download attempt")?;
+            if attempt != job.worker_attempt {
+                return Err(RepositoryError::Other(format!(
+                    "download job {:?} changed attempt before launch",
+                    job.job_id
+                )));
+            }
+            descriptors.push(DownloadJobDescriptor {
+                job_id: stored.0,
+                entry_id: stored.1,
+                gallery_id: GalleryId::new(stored.2).map_err(domain_corruption)?,
+                worker_attempt: attempt,
+            });
+        }
+        Ok(descriptors)
+    }
+
+    fn pipeline_mark_artifact_issue(
+        &self,
+        entry_id: &DownloadEntryId,
+        code: &str,
+        message: &str,
+    ) -> Result<Option<DownloadJobProjection>, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let Some(target) = read_download_target(&transaction, entry_id)? else {
+            return Err(RepositoryError::Corrupt(format!(
+                "artifact references missing download entry {entry_id}"
+            )));
+        };
+        transaction
+            .execute(
+                r#"
+                    UPDATE download_artifacts
+                    SET revision = revision + 1, state = 'missing_artifacts'
+                    WHERE entry_id = ?1 AND state != 'quarantined'
+                "#,
+                [entry_id.as_str()],
+            )
+            .map_err(map_sqlite_error)?;
+        if target.state != JobState::Completed {
+            transaction.commit().map_err(map_sqlite_error)?;
+            return Ok(None);
+        }
+        let descriptor = DownloadJobDescriptor {
+            job_id: target.job_id,
+            entry_id: target.entry_id.to_string(),
+            gallery_id: GalleryId::new(target.gallery_id).map_err(domain_corruption)?,
+            worker_attempt: stored_u64(target.attempt, "download attempt")?,
+        };
+        let pipeline_target = read_pipeline_target(&transaction, &descriptor)?;
+        let projection = transition_pipeline_target(
+            &transaction,
+            pipeline_target,
+            JobState::Failed,
+            None,
+            None,
+            Some(code),
+            Some(message),
+            "Artifact integrity needs attention",
+        )?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(Some(projection))
+    }
+
+    fn pipeline_artifact_bundle(
+        &self,
+        entry_id: &DownloadEntryId,
+    ) -> Result<Option<ArtifactBundle>, RepositoryError> {
+        <Self as ArtifactRepository>::artifact_bundle_get(self, entry_id)
+    }
+
+    fn pipeline_artifact_bundles(&self) -> Result<Vec<ArtifactBundle>, RepositoryError> {
+        let entry_ids = {
+            let connection = self.connection()?;
+            let mut statement = connection
+                .prepare("SELECT entry_id FROM download_artifacts ORDER BY entry_id ASC")
+                .map_err(map_sqlite_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(map_sqlite_error)?;
+            let mut entry_ids = Vec::new();
+            for row in rows {
+                entry_ids.push(
+                    DownloadEntryId::new(row.map_err(map_sqlite_error)?)
+                        .map_err(domain_corruption)?,
+                );
+            }
+            entry_ids
+        };
+        let mut bundles = Vec::with_capacity(entry_ids.len());
+        for entry_id in entry_ids {
+            if let Some(bundle) =
+                <Self as ArtifactRepository>::artifact_bundle_get(self, &entry_id)?
+            {
+                bundles.push(bundle);
+            }
+        }
+        Ok(bundles)
+    }
+
+    fn pipeline_quarantine_begin(&self, saga: &QuarantineSaga) -> Result<(), RepositoryError> {
+        if saga.state != QuarantineSagaState::PendingQuarantine {
+            return Err(RepositoryError::Other(
+                "quarantine saga must begin in pending_quarantine".into(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let target = read_download_target(&transaction, &saga.entry_id)?
+            .ok_or_else(|| RepositoryError::Other("download entry no longer exists".into()))?;
+        if target.state != JobState::Completed {
+            return Err(RepositoryError::Other(format!(
+                "download entry cannot be quarantined from {}",
+                target.state
+            )));
+        }
+        let artifact = transaction
+            .query_row(
+                "SELECT relative_directory, state FROM download_artifacts WHERE entry_id = ?1",
+                [saga.entry_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(map_sqlite_error)?
+            .ok_or_else(|| RepositoryError::Other("download artifact no longer exists".into()))?;
+        if artifact.0 != saga.original_relative_path.as_str() || artifact.1 != "complete" {
+            return Err(RepositoryError::Other(
+                "download artifact is not a verified complete artifact".into(),
+            ));
+        }
+        transaction
+            .execute(
+                r#"
+                    INSERT INTO quarantine_records (
+                        record_id, entry_id, original_relative_path,
+                        quarantine_relative_path, reason, state,
+                        original_entry_state, original_artifact_state,
+                        created_at
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, 'pending_quarantine',
+                        'completed', 'complete',
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                "#,
+                params![
+                    saga.record_id,
+                    saga.entry_id.as_str(),
+                    saga.original_relative_path.as_str(),
+                    saga.quarantine_relative_path.as_str(),
+                    saga.reason,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        transaction.commit().map_err(map_sqlite_error)
+    }
+
+    fn pipeline_quarantine_complete(
+        &self,
+        record_id: &str,
+    ) -> Result<DownloadJobProjection, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let entry_id = transaction
+            .query_row(
+                "SELECT entry_id FROM quarantine_records WHERE record_id = ?1 AND state = 'pending_quarantine'",
+                [record_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(map_sqlite_error)?
+            .ok_or_else(|| RepositoryError::Other("quarantine operation is no longer pending".into()))?;
+        let entry_id = DownloadEntryId::new(entry_id).map_err(domain_corruption)?;
+        let target = read_download_target(&transaction, &entry_id)?
+            .ok_or_else(|| RepositoryError::Other("download entry no longer exists".into()))?;
+        if target.state != JobState::Completed {
+            return Err(RepositoryError::Other(
+                "download entry changed while it was being quarantined".into(),
+            ));
+        }
+        let descriptor = DownloadJobDescriptor {
+            job_id: target.job_id.clone(),
+            entry_id: target.entry_id.to_string(),
+            gallery_id: GalleryId::new(target.gallery_id).map_err(domain_corruption)?,
+            worker_attempt: stored_u64(target.attempt, "download attempt")?,
+        };
+        let pipeline_target = read_pipeline_target(&transaction, &descriptor)?;
+        let artifact_changed = transaction
+            .execute(
+                "UPDATE download_artifacts SET revision = revision + 1, state = 'quarantined' WHERE entry_id = ?1 AND state = 'complete'",
+                [entry_id.as_str()],
+            )
+            .map_err(map_sqlite_error)?;
+        if artifact_changed != 1 {
+            return Err(RepositoryError::Other(
+                "artifact changed while it was being quarantined".into(),
+            ));
+        }
+        transaction
+            .execute(
+                "UPDATE download_pages SET state = 'quarantined' WHERE entry_id = ?1 AND state = 'present'",
+                [entry_id.as_str()],
+            )
+            .map_err(map_sqlite_error)?;
+        let projection = transition_pipeline_target(
+            &transaction,
+            pipeline_target,
+            JobState::Quarantined,
+            None,
+            None,
+            None,
+            None,
+            "Artifact moved to recoverable quarantine",
+        )?;
+        transaction
+            .execute(
+                "UPDATE quarantine_records SET state = 'quarantined' WHERE record_id = ?1 AND state = 'pending_quarantine'",
+                [record_id],
+            )
+            .map_err(map_sqlite_error)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(projection)
+    }
+
+    fn pipeline_restore_begin(
+        &self,
+        entry_id: &DownloadEntryId,
+    ) -> Result<QuarantineSaga, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let target = read_download_target(&transaction, entry_id)?
+            .ok_or_else(|| RepositoryError::Other("download entry no longer exists".into()))?;
+        if target.state != JobState::Quarantined {
+            return Err(RepositoryError::Other(format!(
+                "download entry cannot be restored from {}",
+                target.state
+            )));
+        }
+        let stored = transaction
+            .query_row(
+                r#"
+                    SELECT record_id, original_relative_path,
+                           quarantine_relative_path, reason
+                    FROM quarantine_records
+                    WHERE entry_id = ?1 AND state = 'quarantined'
+                    ORDER BY created_at DESC, record_id DESC
+                    LIMIT 1
+                "#,
+                [entry_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(map_sqlite_error)?
+            .ok_or_else(|| {
+                RepositoryError::Corrupt("quarantined entry has no active record".into())
+            })?;
+        let changed = transaction
+            .execute(
+                "UPDATE quarantine_records SET state = 'pending_restore' WHERE record_id = ?1 AND state = 'quarantined'",
+                [&stored.0],
+            )
+            .map_err(map_sqlite_error)?;
+        if changed != 1 {
+            return Err(RepositoryError::Other(
+                "quarantine record changed before restore".into(),
+            ));
+        }
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(QuarantineSaga {
+            record_id: stored.0,
+            entry_id: entry_id.clone(),
+            original_relative_path: ArtifactRelativePath::new(stored.1)
+                .map_err(domain_corruption)?,
+            quarantine_relative_path: ArtifactRelativePath::new(stored.2)
+                .map_err(domain_corruption)?,
+            reason: stored.3,
+            state: QuarantineSagaState::PendingRestore,
+        })
+    }
+
+    fn pipeline_restore_complete(
+        &self,
+        record_id: &str,
+    ) -> Result<DownloadJobProjection, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let entry_id = transaction
+            .query_row(
+                "SELECT entry_id FROM quarantine_records WHERE record_id = ?1 AND state = 'pending_restore'",
+                [record_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(map_sqlite_error)?
+            .ok_or_else(|| RepositoryError::Other("restore operation is no longer pending".into()))?;
+        let entry_id = DownloadEntryId::new(entry_id).map_err(domain_corruption)?;
+        let target = read_download_target(&transaction, &entry_id)?
+            .ok_or_else(|| RepositoryError::Other("download entry no longer exists".into()))?;
+        if target.state != JobState::Quarantined {
+            return Err(RepositoryError::Other(
+                "download entry changed while it was being restored".into(),
+            ));
+        }
+        let descriptor = DownloadJobDescriptor {
+            job_id: target.job_id.clone(),
+            entry_id: target.entry_id.to_string(),
+            gallery_id: GalleryId::new(target.gallery_id).map_err(domain_corruption)?,
+            worker_attempt: stored_u64(target.attempt, "download attempt")?,
+        };
+        let pipeline_target = read_pipeline_target(&transaction, &descriptor)?;
+        let artifact_changed = transaction
+            .execute(
+                "UPDATE download_artifacts SET revision = revision + 1, state = 'complete' WHERE entry_id = ?1 AND state = 'quarantined'",
+                [entry_id.as_str()],
+            )
+            .map_err(map_sqlite_error)?;
+        if artifact_changed != 1 {
+            return Err(RepositoryError::Other(
+                "artifact changed while it was being restored".into(),
+            ));
+        }
+        transaction
+            .execute(
+                "UPDATE download_pages SET state = 'present' WHERE entry_id = ?1 AND state = 'quarantined'",
+                [entry_id.as_str()],
+            )
+            .map_err(map_sqlite_error)?;
+        let projection = transition_pipeline_target(
+            &transaction,
+            pipeline_target,
+            JobState::Completed,
+            None,
+            None,
+            None,
+            None,
+            "Artifact restored from quarantine",
+        )?;
+        transaction
+            .execute(
+                r#"
+                    UPDATE quarantine_records
+                    SET state = 'restored',
+                        restored_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE record_id = ?1 AND state = 'pending_restore'
+                "#,
+                [record_id],
+            )
+            .map_err(map_sqlite_error)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(projection)
+    }
+
+    fn pipeline_pending_quarantine_sagas(&self) -> Result<Vec<QuarantineSaga>, RepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                r#"
+                    SELECT record_id, entry_id, original_relative_path,
+                           quarantine_relative_path, reason, state
+                    FROM quarantine_records
+                    WHERE state IN ('pending_quarantine', 'pending_restore')
+                    ORDER BY created_at ASC, record_id ASC
+                "#,
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(map_sqlite_error)?;
+        let mut sagas = Vec::new();
+        for row in rows {
+            let row = row.map_err(map_sqlite_error)?;
+            let state = match row.5.as_str() {
+                "pending_quarantine" => QuarantineSagaState::PendingQuarantine,
+                "pending_restore" => QuarantineSagaState::PendingRestore,
+                _ => {
+                    return Err(RepositoryError::Corrupt(
+                        "pending quarantine query returned an invalid state".into(),
+                    ))
+                }
+            };
+            sagas.push(QuarantineSaga {
+                record_id: row.0,
+                entry_id: DownloadEntryId::new(row.1).map_err(domain_corruption)?,
+                original_relative_path: ArtifactRelativePath::new(row.2)
+                    .map_err(domain_corruption)?,
+                quarantine_relative_path: ArtifactRelativePath::new(row.3)
+                    .map_err(domain_corruption)?,
+                reason: row.4,
+                state,
+            });
+        }
+        Ok(sagas)
+    }
+}
+
+struct StoredPipelineTarget {
+    job_id: String,
+    entry_id: String,
+    gallery_id: i64,
+    job_revision: i64,
+    entry_revision: i64,
+    state: JobState,
+    completed_units: i64,
+    total_units: i64,
+    attempt: i64,
+    progress: f64,
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+impl StoredPipelineTarget {
+    fn into_projection(
+        self,
+        message: Option<&str>,
+    ) -> Result<DownloadJobProjection, RepositoryError> {
+        Ok(DownloadJobProjection {
+            job: JobEvent {
+                job_id: self.job_id,
+                gallery_id: Some(self.gallery_id),
+                revision: stored_u64(self.job_revision, "job revision")?,
+                state: self.state,
+                completed_units: Some(stored_u64(self.completed_units, "completed units")?),
+                total_units: Some(stored_u64(self.total_units, "total units")?),
+                message: message.map(str::to_owned),
+            },
+            download: DownloadChangedEvent {
+                entry_id: self.entry_id,
+                gallery_id: self.gallery_id,
+                revision: stored_u64(self.entry_revision, "download revision")?,
+                state: self.state,
+                progress: Some(self.progress),
+                attempt: Some(stored_u64(self.attempt, "download attempt")?),
+                error_code: self.error_code,
+                error_message: self.error_message,
+            },
+        })
+    }
+}
+
+fn read_pipeline_target(
+    transaction: &Transaction<'_>,
+    descriptor: &DownloadJobDescriptor,
+) -> Result<StoredPipelineTarget, RepositoryError> {
+    let stored = transaction
+        .query_row(
+            r#"
+                SELECT j.job_id, j.entry_id, j.gallery_id, j.revision,
+                       d.revision, j.state, j.completed_units, j.total_units,
+                       j.attempt, d.progress, j.last_error_code, j.last_error_message
+                FROM download_jobs j
+                JOIN download_entries d
+                  ON d.entry_id = j.entry_id AND d.gallery_id = j.gallery_id
+                WHERE j.job_id = ?1
+            "#,
+            [&descriptor.job_id],
+            |row| {
+                Ok(StoredPipelineTarget {
+                    job_id: row.get(0)?,
+                    entry_id: row.get(1)?,
+                    gallery_id: row.get(2)?,
+                    job_revision: row.get(3)?,
+                    entry_revision: row.get(4)?,
+                    state: row
+                        .get::<_, String>(5)?
+                        .parse::<JobState>()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                5,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                    completed_units: row.get(6)?,
+                    total_units: row.get(7)?,
+                    attempt: row.get(8)?,
+                    progress: row.get(9)?,
+                    error_code: row.get(10)?,
+                    error_message: row.get(11)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .ok_or_else(|| RepositoryError::Other("download job no longer exists".into()))?;
+    if stored.entry_id != descriptor.entry_id
+        || stored.gallery_id != descriptor.gallery_id.get()
+        || stored_u64(stored.attempt, "download attempt")? != descriptor.worker_attempt
+    {
+        return Err(RepositoryError::Other(
+            "download worker descriptor is stale".into(),
+        ));
+    }
+    Ok(stored)
+}
+
+fn ensure_current_pipeline_attempt(
+    connection: &Connection,
+    descriptor: &DownloadJobDescriptor,
+) -> Result<(), RepositoryError> {
+    let current = connection
+        .query_row(
+            "SELECT entry_id, gallery_id, attempt FROM download_jobs WHERE job_id = ?1",
+            [&descriptor.job_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    if current.is_none_or(|current| {
+        current.0 != descriptor.entry_id
+            || current.1 != descriptor.gallery_id.get()
+            || u64::try_from(current.2).ok() != Some(descriptor.worker_attempt)
+    }) {
+        return Err(RepositoryError::Other(
+            "download worker descriptor is stale".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transition_pipeline_target(
+    transaction: &Transaction<'_>,
+    target: StoredPipelineTarget,
+    next_state: JobState,
+    completed_units: Option<u64>,
+    total_units: Option<u64>,
+    error_code: Option<&str>,
+    error_message: Option<&str>,
+    message: &'static str,
+) -> Result<DownloadJobProjection, RepositoryError> {
+    if !target.state.allows_transition_to(next_state) {
+        return Err(invalid_pipeline_state(&target, "transition"));
+    }
+    let job_revision = next_stored_revision(target.job_revision, "job revision")?;
+    let entry_revision = next_stored_revision(target.entry_revision, "download revision")?;
+    let completed_units = completed_units
+        .map(|value| to_sql_integer(value, "completed units"))
+        .transpose()?
+        .unwrap_or(target.completed_units);
+    let total_units = total_units
+        .map(|value| to_sql_integer(value, "total units"))
+        .transpose()?
+        .unwrap_or(target.total_units);
+    if total_units <= 0 || completed_units < 0 || completed_units > total_units {
+        return Err(RepositoryError::Corrupt(
+            "download progress units are inconsistent".into(),
+        ));
+    }
+    let progress = (completed_units as f64 / total_units as f64) * 100.0;
+    let terminal = !next_state.is_active();
+    let changed_jobs = transaction
+        .execute(
+            r#"
+                UPDATE download_jobs
+                SET revision = ?1, state = ?2,
+                    completed_units = ?3, total_units = ?4,
+                    last_error_code = ?5, last_error_message = ?6,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    started_at = CASE
+                        WHEN ?2 != 'queued' THEN COALESCE(
+                            started_at,
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        ) ELSE started_at END,
+                    finished_at = CASE
+                        WHEN ?7 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        ELSE NULL END
+                WHERE job_id = ?8 AND revision = ?9 AND attempt = ?10 AND state = ?11
+            "#,
+            params![
+                to_sql_integer(job_revision, "job revision")?,
+                next_state.to_string(),
+                completed_units,
+                total_units,
+                error_code,
+                error_message,
+                terminal,
+                target.job_id,
+                target.job_revision,
+                target.attempt,
+                target.state.to_string(),
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    let changed_entries = transaction
+        .execute(
+            r#"
+                UPDATE download_entries
+                SET revision = ?1, state = ?2, progress = ?3,
+                    review_kind = NULL, review_id = NULL,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE entry_id = ?4 AND revision = ?5 AND state = ?6
+            "#,
+            params![
+                to_sql_integer(entry_revision, "download revision")?,
+                next_state.to_string(),
+                progress,
+                target.entry_id,
+                target.entry_revision,
+                target.state.to_string(),
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    if changed_jobs != 1 || changed_entries != 1 {
+        return Err(RepositoryError::Other(
+            "download pipeline state changed concurrently".into(),
+        ));
+    }
+    StoredPipelineTarget {
+        job_revision: to_sql_integer(job_revision, "job revision")?,
+        entry_revision: to_sql_integer(entry_revision, "download revision")?,
+        state: next_state,
+        completed_units,
+        total_units,
+        progress,
+        error_code: error_code.map(str::to_owned),
+        error_message: error_message.map(str::to_owned),
+        ..target
+    }
+    .into_projection(Some(message))
+}
+
+fn update_pipeline_progress(
+    transaction: &Transaction<'_>,
+    target: StoredPipelineTarget,
+    completed_units: u64,
+    message: &'static str,
+) -> Result<DownloadJobProjection, RepositoryError> {
+    let total_units = stored_u64(target.total_units, "total units")?;
+    if completed_units > total_units {
+        return Err(RepositoryError::Corrupt(
+            "verified page count exceeds the expected page count".into(),
+        ));
+    }
+    let job_revision = next_stored_revision(target.job_revision, "job revision")?;
+    let entry_revision = next_stored_revision(target.entry_revision, "download revision")?;
+    let progress = if total_units == 0 {
+        0.0
+    } else {
+        (completed_units as f64 / total_units as f64) * 100.0
+    };
+    let changed_jobs = transaction
+        .execute(
+            r#"
+                UPDATE download_jobs
+                SET revision = ?1, completed_units = ?2,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE job_id = ?3 AND revision = ?4 AND attempt = ?5 AND state = ?6
+            "#,
+            params![
+                to_sql_integer(job_revision, "job revision")?,
+                to_sql_integer(completed_units, "completed units")?,
+                target.job_id,
+                target.job_revision,
+                target.attempt,
+                target.state.to_string(),
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    let changed_entries = transaction
+        .execute(
+            r#"
+                UPDATE download_entries
+                SET revision = ?1, progress = ?2,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE entry_id = ?3 AND revision = ?4 AND state = ?5
+            "#,
+            params![
+                to_sql_integer(entry_revision, "download revision")?,
+                progress,
+                target.entry_id,
+                target.entry_revision,
+                target.state.to_string(),
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    if changed_jobs != 1 || changed_entries != 1 {
+        return Err(RepositoryError::Other(
+            "download pipeline progress changed concurrently".into(),
+        ));
+    }
+    StoredPipelineTarget {
+        job_revision: to_sql_integer(job_revision, "job revision")?,
+        entry_revision: to_sql_integer(entry_revision, "download revision")?,
+        completed_units: to_sql_integer(completed_units, "completed units")?,
+        progress,
+        ..target
+    }
+    .into_projection(Some(message))
+}
+
+fn invalid_pipeline_state(target: &StoredPipelineTarget, operation: &str) -> RepositoryError {
+    RepositoryError::Other(format!(
+        "download job {:?} cannot {operation} from {}",
+        target.job_id, target.state
+    ))
 }
 
 struct StoredDownloadTarget {
@@ -1547,6 +3057,11 @@ struct StoredArtifactBundle {
     relative_directory: String,
     expected_page_count: i64,
     artifact_state: String,
+    manifest_relative_path: Option<String>,
+    manifest_schema_version: Option<i64>,
+    writer_version: Option<String>,
+    hash_profile_version: i64,
+    completed_at: Option<String>,
 }
 
 fn stored_artifact_bundle(row: &Row<'_>) -> rusqlite::Result<StoredArtifactBundle> {
@@ -1561,6 +3076,11 @@ fn stored_artifact_bundle(row: &Row<'_>) -> rusqlite::Result<StoredArtifactBundl
         relative_directory: row.get(7)?,
         expected_page_count: row.get(8)?,
         artifact_state: row.get(9)?,
+        manifest_relative_path: row.get(10)?,
+        manifest_schema_version: row.get(11)?,
+        writer_version: row.get(12)?,
+        hash_profile_version: row.get(13)?,
+        completed_at: row.get(14)?,
     })
 }
 
@@ -1570,6 +3090,11 @@ struct StoredPageArtifact {
     relative_path: String,
     page_state: String,
     byte_length: Option<i64>,
+    sha256: Option<String>,
+    storage_format: Option<String>,
+    source_revision: Option<String>,
+    verified_at: Option<String>,
+    excluded: bool,
 }
 
 fn stored_page_artifact(row: &Row<'_>) -> rusqlite::Result<StoredPageArtifact> {
@@ -1579,6 +3104,11 @@ fn stored_page_artifact(row: &Row<'_>) -> rusqlite::Result<StoredPageArtifact> {
         relative_path: row.get(2)?,
         page_state: row.get(3)?,
         byte_length: row.get(4)?,
+        sha256: row.get(5)?,
+        storage_format: row.get(6)?,
+        source_revision: row.get(7)?,
+        verified_at: row.get(8)?,
+        excluded: row.get(9)?,
     })
 }
 

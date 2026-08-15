@@ -14,8 +14,15 @@ use std::{
     time::Duration,
 };
 
-use application::ApplicationService;
-use infrastructure::{HitomiLiveAdapter, HitomiLiveConfig, SqliteRepository};
+use application::{
+    ApplicationService, ArtifactStore, DownloadPipelineRepository, DownloadSourcePort,
+    DownloadSupervisor, StateRepository,
+};
+use domain::DownloadJobProjection;
+use infrastructure::{
+    FilesystemArtifactStore, HitomiLiveAdapter, HitomiLiveConfig, SqliteRepository,
+    WindowsFolderPicker,
+};
 use interface::AppState;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
@@ -83,6 +90,7 @@ pub fn run() -> tauri::Result<()> {
             let repository = SqliteRepository::open(&database_path)?;
             let repository = Arc::new(repository);
             let settings = ApplicationService::new(repository.clone()).settings_get()?;
+            let download_root_configured = !settings.download_root.trim().is_empty();
             let live_source = Arc::new(HitomiLiveAdapter::new(HitomiLiveConfig {
                 max_concurrent_requests: settings.concurrent_image_requests as usize,
                 request_start_interval: Duration::from_millis(
@@ -91,7 +99,7 @@ pub fn run() -> tauri::Result<()> {
                 ..HitomiLiveConfig::default()
             })?);
             let service = ApplicationService::new(repository.clone())
-                .with_download_repository(repository)
+                .with_download_repository(repository.clone())
                 .with_search_repository(live_source.clone());
             let recovered_entries = service.download_recover_interrupted()?;
             let thumbnail_config = ThumbnailCoordinatorConfig {
@@ -99,7 +107,7 @@ pub fn run() -> tauri::Result<()> {
                 request_start_interval: Duration::from_millis(settings.request_start_interval_ms),
                 ..ThumbnailCoordinatorConfig::default()
             };
-            let thumbnail_resolver: Arc<dyn ThumbnailResolver> = live_source;
+            let thumbnail_resolver: Arc<dyn ThumbnailResolver> = live_source.clone();
             let thumbnails = ThumbnailCoordinator::new(thumbnail_resolver, thumbnail_config)?;
             let (thumbnail_completion_tx, thumbnail_completion_rx) =
                 mpsc::channel::<ThumbnailCompletionEventDto>();
@@ -113,10 +121,61 @@ pub fn run() -> tauri::Result<()> {
                         }
                     }
                 })?;
+            let artifact_store: Arc<dyn ArtifactStore> =
+                Arc::new(FilesystemArtifactStore::new());
+            let download_repository: Arc<dyn DownloadPipelineRepository> = repository.clone();
+            let settings_repository: Arc<dyn StateRepository> = repository;
+            let download_source: Arc<dyn DownloadSourcePort> = live_source;
+            let (download_event_tx, download_event_rx) =
+                mpsc::channel::<DownloadJobProjection>();
+            let download_app = app.handle().clone();
+            thread::Builder::new()
+                .name("atsumi-download-events".into())
+                .spawn(move || {
+                    while let Ok(projection) = download_event_rx.recv() {
+                        if let Err(error) = download_app.emit("job:changed", &projection.job) {
+                            tracing::warn!(error = %error, "could not emit job:changed");
+                        }
+                        if let Err(error) =
+                            download_app.emit("download:changed", &projection.download)
+                        {
+                            tracing::warn!(error = %error, "could not emit download:changed");
+                        }
+                    }
+                })?;
+            let downloads = DownloadSupervisor::new(
+                download_repository,
+                settings_repository,
+                download_source,
+                Arc::clone(&artifact_store),
+                download_event_tx,
+                2,
+            )?;
+            let (reconciled_artifacts, reconcile_issues, resumed_jobs) =
+                if download_root_configured {
+                    match downloads.reconcile() {
+                        Ok(report) => (
+                            report.verified_artifacts,
+                            report.issues.len(),
+                            report.resumed_jobs,
+                        ),
+                        Err(_) => {
+                            tracing::warn!(
+                                "startup artifact reconciliation was deferred; no ambiguous file was changed"
+                            );
+                            (0, 1, 0)
+                        }
+                    }
+                } else {
+                    (0, 0, 0)
+                };
             app.manage(AppState::new(
                 service,
                 thumbnails,
                 thumbnail_completion_tx,
+                downloads,
+                Arc::new(WindowsFolderPicker::new()),
+                artifact_store,
             ));
             if let Some(window) = app.get_webview_window("main") {
                 window.show()?;
@@ -127,6 +186,9 @@ pub fn run() -> tauri::Result<()> {
                 database_file = "atsumi-next.sqlite3",
                 app_version = env!("CARGO_PKG_VERSION"),
                 recovered_entries,
+                reconciled_artifacts,
+                reconcile_issues,
+                resumed_jobs,
                 "Atsumi Next backend initialized"
             );
             Ok(())
@@ -143,7 +205,11 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::download_entries_list,
             interface::commands::download_retry,
             interface::commands::download_cancel,
+            interface::commands::download_quarantine,
+            interface::commands::download_quarantine_undo,
             interface::commands::download_active_count,
+            interface::commands::artifact_open_first,
+            interface::commands::app_reconcile,
             interface::commands::thumbnail_request,
             interface::commands::thumbnail_cancel,
             interface::commands::thumbnail_invalidate,

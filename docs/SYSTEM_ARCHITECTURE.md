@@ -141,7 +141,7 @@ type JobEvent = {
 - host별 동시성, 전역 요청 시작 간격, cooldown을 독립 설정한다.
 - 2026-08-04 Classic 실측의 `동시 5, 최소 25ms`를 초기 profile로 가져온다.
 - connection pool 구조로 바뀌면 별도 probe로 다시 측정한다.
-- 검색, thumbnail, 다운로드는 하나의 pooled transport와 전역/host별 permit을 공유하고 `critical > visible > download > prefetch` 순서로 dispatch한다.
+- 검색, thumbnail, 다운로드는 하나의 pooled transport와 전역/host별 permit을 공유하고 `critical > visible > prefetch > download` 순서로 dispatch한다. 화면에 곧 보일 미리보기가 백그라운드 artifact 다운로드에 굶지 않는다.
 - 429는 `Retry-After` 또는 기본 cooldown, 503·timeout은 bounded exponential backoff와 stable jitter를 적용한다. 404와 계약 오류는 반복 재시도하지 않는다.
 - 대기·backoff·body read는 cancellation token을 확인하며, 취소 뒤 도착한 결과는 cache에 넣지 않는다.
 - telemetry는 host, attempt, elapsed와 분류 code만 기록하고 URL query·cookie·검색어는 기록하지 않는다.
@@ -157,7 +157,17 @@ type JobEvent = {
 - 카드 preview는 `IntersectionObserver`의 near-viewport 경계 안에서만 구독하고, 경계를 벗어나면 frontend 구독과 Blob URL을 해제한다. Detail/Review의 현재 작업은 `critical`, 화면 안 카드는 `visible`, 나머지는 `prefetch`로 분류한다.
 - retryable failure는 짧은 negative-cache TTL 뒤 한정 재시도하고, permanent failure는 더 긴 negative cache로 반복 원격 호출을 막는다. WebView decode 실패는 해당 key cache를 무효화한 뒤 한 번만 재해석한다.
 - production Tauri는 `HitomiLiveAdapter` 하나를 `SearchRepository`와 `ThumbnailResolver` 양쪽에 공유 주입한다. 브라우저 review mode와 단위 테스트만 fixture resolver를 사용한다.
-- resolver는 HTTPS allowlist·redirect 재검증·응답 크기·MIME/signature·decode dimension/allocation을 검사하고 WebP 후보를 순서대로 시도한다. disk cache는 artifact pipeline에서 versioned cache로 추가한다.
+- resolver는 HTTPS allowlist·redirect 재검증·응답 크기·MIME/signature·decode dimension/allocation을 검사하고 WebP 후보를 순서대로 시도한다. thumbnail은 재생성 가능한 bounded memory cache이며, 영속 파일은 검증된 download artifact만 소유한다.
+
+## Download artifact pipeline
+
+- queue commit 뒤 bounded gallery worker가 자동 시작하며, source metadata와 이미지 I/O 중에는 SQLite transaction을 잡지 않는다.
+- 원본 `source_page_number`와 source revision을 immutable identity로 사용한다. source payload의 identity가 계획과 다르면 저장 전에 거부한다.
+- 각 page는 bounded HTTP body read, `.part` 64KiB chunk write, flush/sync, decode/WebP 검증, SHA-256 후 atomic rename 순서를 따른다.
+- 검증된 원본 WebP는 byte를 보존하고 JPEG/PNG는 RGBA lossless WebP로 변환한다. alpha는 보존하며, 변환 입력의 animation은 첫 frame 정책이다. 이 정책과 writer/app version은 manifest에 기록한다.
+- manifest schema 1은 gallery snapshot, source page mapping, relative path, byte length, SHA-256, storage format, exclusion/quarantine, 완료 시각과 HashProfile version을 가진다.
+- 모든 page 파일과 DB checkpoint를 다시 검증하고 manifest temp write/sync/atomic replace를 마친 뒤에만 DB artifact/job/entry를 `completed`로 바꾼다.
+- startup/manual reconcile은 pending quarantine saga를 먼저 마무리하고, 완료 artifact의 파일·hash·manifest를 검사한 뒤 interrupted job을 verified checkpoint부터 재개한다.
 
 ## 해시와 중복
 

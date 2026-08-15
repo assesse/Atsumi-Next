@@ -13,6 +13,8 @@ $verificationDirectory = Join-Path $projectRoot ".runtime\verification"
 $timestamp = [DateTimeOffset]::Now.ToString("yyyyMMdd-HHmmss")
 $logPath = Join-Path $verificationDirectory "verify-$timestamp.log"
 $env:CI = "true"
+$previousCargoIncremental = $env:CARGO_INCREMENTAL
+$env:CARGO_INCREMENTAL = "0"
 
 New-Item -ItemType Directory -Force -Path $verificationDirectory | Out-Null
 
@@ -176,4 +178,9 @@ try {
   Write-VerificationLog "Log: $logPath"
 } finally {
   Pop-Location
+  if ($null -eq $previousCargoIncremental) {
+    Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
+  } else {
+    $env:CARGO_INCREMENTAL = $previousCargoIncremental
+  }
 }

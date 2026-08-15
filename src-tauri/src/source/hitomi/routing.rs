@@ -472,15 +472,77 @@ pub fn webp_full_candidates(
     Ok(deduplicate_candidates(urls))
 }
 
+/// Full-size candidates used by the artifact downloader. WebP derivatives are
+/// preferred so already-valid WebP bytes can be preserved. The original JPEG
+/// or PNG endpoints are retained as a conversion fallback.
+pub fn download_full_candidates(
+    file: &HitomiPageFile,
+    routing: &GgRoutingTable,
+) -> Result<Vec<HitomiImageCandidate>, SourceContractError> {
+    validate_file_hash(&file.hash, "Hitomi page file hash")?;
+    let mut candidates = webp_full_candidates(file, routing)?;
+    let extension = file
+        .name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .ok_or_else(|| {
+            SourceContractError::invalid_data(
+                "Hitomi page filename",
+                "does not contain a supported extension",
+            )
+        })?;
+    let (extension, content_type) = match extension.as_str() {
+        "jpg" | "jpeg" => (extension, "image/jpeg"),
+        "png" => (extension, "image/png"),
+        "webp" => (extension, "image/webp"),
+        _ => {
+            return if candidates.is_empty() {
+                Err(SourceContractError::invalid_data(
+                    "Hitomi page filename",
+                    "does not identify a supported downloadable image format",
+                ))
+            } else {
+                Ok(candidates)
+            }
+        }
+    };
+    let full_path = full_path(&file.hash, routing)?;
+    let real_path = real_path(&file.hash);
+    for host in ["a", "b"] {
+        candidates.push(candidate_with_content_type(
+            format!("https://{host}.{HITOMI_CONTENT_DOMAIN}/images/{full_path}.{extension}"),
+            HitomiImageKind::Full,
+            content_type,
+            &file.source_revision,
+        ));
+        candidates.push(candidate_with_content_type(
+            format!("https://{host}.{HITOMI_CONTENT_DOMAIN}/{extension}/{real_path}.{extension}"),
+            HitomiImageKind::Full,
+            content_type,
+            &file.source_revision,
+        ));
+    }
+    Ok(deduplicate_candidates(candidates))
+}
+
 fn candidate(
     url: String,
     kind: HitomiImageKind,
     source_revision: &SourceRevision,
 ) -> HitomiImageCandidate {
+    candidate_with_content_type(url, kind, "image/webp", source_revision)
+}
+
+fn candidate_with_content_type(
+    url: String,
+    kind: HitomiImageKind,
+    content_type: &str,
+    source_revision: &SourceRevision,
+) -> HitomiImageCandidate {
     HitomiImageCandidate {
         url,
         kind,
-        content_type: "image/webp".to_owned(),
+        content_type: content_type.to_owned(),
         source_revision: source_revision.clone(),
     }
 }

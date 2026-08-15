@@ -3,13 +3,14 @@ import { FluentIcon } from "./FluentIcon";
 type SelectionToolbarProps = {
   count: number;
   downloadsView: boolean;
+  restoreMode?: boolean;
   onAll: () => void;
   onClear: () => void;
   onPrimary: () => void;
   onDelete: () => void;
 };
 
-export function SelectionToolbar({ count, downloadsView, onAll, onClear, onPrimary, onDelete }: SelectionToolbarProps) {
+export function SelectionToolbar({ count, downloadsView, restoreMode = false, onAll, onClear, onPrimary, onDelete }: SelectionToolbarProps) {
   return (
     <div className="selection-slot">
       <div className={`selection-toolbar${count > 0 ? " is-visible" : ""}`} aria-live="polite">
@@ -26,7 +27,7 @@ export function SelectionToolbar({ count, downloadsView, onAll, onClear, onPrima
               <FluentIcon glyph="\uE896" /> {downloadsView ? "선택 파일 다운로드" : "다운로드"}
             </button>
             <button type="button" className="text-button danger-button" onClick={onDelete}>
-              {downloadsView ? "제거" : "제외"}
+              {downloadsView ? (restoreMode ? "복원" : "격리") : "제외"}
             </button>
           </>
         ) : null}

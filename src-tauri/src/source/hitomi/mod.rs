@@ -20,8 +20,8 @@ pub use model::{
 };
 pub use nozomi::{parse_nozomi_ids, parse_nozomi_range, NozomiByteRange, MAX_NOZOMI_RANGE_ITEMS};
 pub use routing::{
-    parse_gg_routing, webp_full_candidates, webp_thumbnail_candidates, GgRoutingTable,
-    HitomiImageCandidate, HitomiImageKind, ThumbnailSize,
+    download_full_candidates, parse_gg_routing, webp_full_candidates, webp_thumbnail_candidates,
+    GgRoutingTable, HitomiImageCandidate, HitomiImageKind, ThumbnailSize,
 };
 
 #[cfg(test)]

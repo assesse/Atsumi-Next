@@ -45,8 +45,8 @@ impl HttpPriority {
         match self {
             Self::Critical => 0,
             Self::Visible => 1,
-            Self::Download => 2,
-            Self::Prefetch => 3,
+            Self::Prefetch => 2,
+            Self::Download => 3,
         }
     }
 }
@@ -80,7 +80,7 @@ impl ExpectedContent {
         match self {
             Self::Script => "text/javascript, application/javascript;q=0.9, text/plain;q=0.5",
             Self::Nozomi => "application/x-nozomi, application/octet-stream;q=0.5",
-            Self::Image => "image/webp, image/jpeg;q=0.8, image/png;q=0.7",
+            Self::Image => "image/webp, image/avif;q=0.9, image/jpeg;q=0.8, image/png;q=0.7",
         }
     }
 
@@ -107,7 +107,7 @@ impl ExpectedContent {
             }
             Self::Image => matches!(
                 mime.as_str(),
-                "image/webp" | "image/jpeg" | "image/jpg" | "image/png"
+                "image/webp" | "image/avif" | "image/jpeg" | "image/jpg" | "image/png"
             ),
         }
     }

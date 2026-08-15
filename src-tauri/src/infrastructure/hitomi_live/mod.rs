@@ -12,12 +12,17 @@ use std::{
 use image::{GenericImageView, ImageFormat, ImageReader, Limits};
 
 use crate::{
-    application::RepositoryError,
+    application::{
+        DownloadGallerySnapshot, DownloadPagePayload, DownloadSourceImageFormat,
+        DownloadSourcePage, DownloadSourcePort, RepositoryError,
+    },
+    domain::{Gallery, GalleryId, GalleryMetadata, SourcePageNumber},
     source::{
         hitomi::{
-            galleryinfo_script_url, gg_script_url, parse_galleryinfo_script, parse_gg_routing,
-            parse_nozomi_ids, webp_thumbnail_candidates, GgRoutingTable, HitomiGalleryMetadata,
-            HitomiImageCandidate, ThumbnailSize, HITOMI_METADATA_ORIGIN,
+            download_full_candidates, galleryinfo_script_url, gg_script_url,
+            parse_galleryinfo_script, parse_gg_routing, parse_nozomi_ids,
+            webp_thumbnail_candidates, GgRoutingTable, HitomiGalleryMetadata, HitomiImageCandidate,
+            ThumbnailSize, HITOMI_METADATA_ORIGIN,
         },
         SourceContractError, SourceErrorCode,
     },
@@ -308,6 +313,129 @@ impl ThumbnailResolver for HitomiLiveAdapter {
     }
 }
 
+impl DownloadSourcePort for HitomiLiveAdapter {
+    fn gallery_snapshot(
+        &self,
+        gallery_id: GalleryId,
+        cancellation: &CancellationToken,
+    ) -> Result<DownloadGallerySnapshot, SourceContractError> {
+        check_cancelled(cancellation)?;
+        let source_id = u64::try_from(gallery_id.get()).map_err(|_| {
+            SourceContractError::validation("galleryId", "must be a positive integer")
+        })?;
+        let metadata = self.fetch_metadata(source_id)?;
+        check_cancelled(cancellation)?;
+        let source_page_count = u32::try_from(metadata.pages.len()).map_err(|_| {
+            SourceContractError::invalid_data(
+                "gallery page count",
+                "exceeds the supported 32-bit range",
+            )
+        })?;
+        let gallery_metadata = GalleryMetadata::new(
+            metadata.title.clone(),
+            metadata.artists.first().cloned(),
+            metadata.groups.first().cloned(),
+            source_page_count,
+        )
+        .map_err(|error| {
+            SourceContractError::invalid_data("gallery metadata", error.to_string())
+        })?;
+        let gallery_revision = metadata
+            .source_revision
+            .as_str()
+            .rsplit_once(':')
+            .and_then(|(_, fingerprint)| u64::from_str_radix(fingerprint, 16).ok())
+            .unwrap_or(1);
+        let pages = metadata
+            .pages
+            .iter()
+            .map(|page| {
+                Ok(DownloadSourcePage {
+                    source_page_number: SourcePageNumber::new(page.source_page).map_err(
+                        |error| {
+                            SourceContractError::invalid_data(
+                                "source page number",
+                                error.to_string(),
+                            )
+                        },
+                    )?,
+                    source_revision: page.source_revision.to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, SourceContractError>>()?;
+        Ok(DownloadGallerySnapshot {
+            gallery: Gallery::new(gallery_id, gallery_revision, gallery_metadata),
+            source_revision: metadata.source_revision.to_string(),
+            pages,
+        })
+    }
+
+    fn download_page(
+        &self,
+        gallery_id: GalleryId,
+        source_page_number: SourcePageNumber,
+        cancellation: &CancellationToken,
+    ) -> Result<DownloadPagePayload, SourceContractError> {
+        check_cancelled(cancellation)?;
+        let source_id = u64::try_from(gallery_id.get()).map_err(|_| {
+            SourceContractError::validation("galleryId", "must be a positive integer")
+        })?;
+        let metadata = self.fetch_metadata(source_id)?;
+        let page = metadata.page(source_page_number.get())?;
+        let routing = self.fetch_gg_routing()?;
+        let candidates = download_full_candidates(page, &routing)?;
+        if candidates.is_empty() {
+            return Err(SourceContractError::image_candidates_exhausted());
+        }
+
+        let mut last_error = None;
+        for (candidate_index, candidate) in candidates.iter().enumerate() {
+            check_cancelled(cancellation)?;
+            let payload = self.transport.execute(HttpRequest {
+                url: candidate.url.clone(),
+                expected: ExpectedContent::Image,
+                max_bytes: IMAGE_RESPONSE_LIMIT,
+                range: None,
+                priority: HttpPriority::Download,
+                cancellation: Some(cancellation.clone()),
+            });
+            let payload = match payload {
+                Ok(payload) => payload,
+                Err(error)
+                    if matches!(
+                        error.code,
+                        SourceErrorCode::NotFound
+                            | SourceErrorCode::ImageResponseInvalid
+                            | SourceErrorCode::ImageDecodeFailed
+                    ) =>
+                {
+                    last_error = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            match decode_download_payload(
+                payload,
+                source_page_number,
+                candidate.source_revision.to_string(),
+                u32::try_from(candidate_index).unwrap_or(u32::MAX),
+            ) {
+                Ok(page) => return Ok(page),
+                Err(error)
+                    if matches!(
+                        error.code,
+                        SourceErrorCode::ImageResponseInvalid | SourceErrorCode::ImageDecodeFailed
+                    ) =>
+                {
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(SourceContractError::image_candidates_exhausted))
+    }
+}
+
 fn source_thumbnail_error(error: SourceContractError) -> ThumbnailResolveError {
     if error.code == SourceErrorCode::Cancelled {
         return ThumbnailResolveError::cancelled();
@@ -408,11 +536,86 @@ fn decode_thumbnail(
     })
 }
 
+fn decode_download_payload(
+    payload: HttpPayload,
+    source_page_number: SourcePageNumber,
+    source_revision: String,
+    candidate_index: u32,
+) -> Result<DownloadPagePayload, SourceContractError> {
+    let format = image::guess_format(&payload.bytes).map_err(|_| {
+        SourceContractError::image_response_invalid(
+            "download bytes do not contain a supported image signature",
+        )
+    })?;
+    let source_format = match format {
+        ImageFormat::WebP => DownloadSourceImageFormat::Webp,
+        ImageFormat::Jpeg => DownloadSourceImageFormat::Jpeg,
+        ImageFormat::Png => DownloadSourceImageFormat::Png,
+        ImageFormat::Avif => DownloadSourceImageFormat::Avif,
+        _ => {
+            return Err(SourceContractError::image_response_invalid(format!(
+                "download image format {format:?} is unsupported"
+            )))
+        }
+    };
+    let declared_type = payload
+        .content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if !mime_matches_format(declared_type, format) {
+        return Err(SourceContractError::image_response_invalid(format!(
+            "download Content-Type {declared_type:?} does not match decoded {format:?} data"
+        )));
+    }
+
+    let bytes = payload.bytes;
+    let decode_result = catch_unwind(AssertUnwindSafe(|| {
+        let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
+        let mut limits = Limits::default();
+        limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+        limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+        limits.max_alloc = Some(MAX_IMAGE_DECODE_ALLOC);
+        reader.limits(limits);
+        reader.decode()
+    }));
+    let image = match decode_result {
+        Ok(Ok(image)) => image,
+        Ok(Err(error)) => {
+            return Err(SourceContractError::image_decode_failed(format!(
+                "image decoder rejected the download payload: {error}"
+            )))
+        }
+        Err(_) => {
+            return Err(SourceContractError::image_decode_failed(
+                "image decoder rejected malformed download input",
+            ))
+        }
+    };
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return Err(SourceContractError::image_decode_failed(
+            "decoded download dimensions must be positive",
+        ));
+    }
+    Ok(DownloadPagePayload {
+        source_page_number,
+        bytes,
+        source_revision,
+        source_format,
+        width,
+        height,
+        candidate_index,
+    })
+}
+
 fn canonical_image_content_type(format: ImageFormat) -> &'static str {
     match format {
         ImageFormat::WebP => "image/webp",
         ImageFormat::Jpeg => "image/jpeg",
         ImageFormat::Png => "image/png",
+        ImageFormat::Avif => "image/avif",
         _ => "application/octet-stream",
     }
 }
@@ -424,6 +627,7 @@ fn mime_matches_format(mime: &str, format: ImageFormat) -> bool {
             mime.eq_ignore_ascii_case("image/jpeg") || mime.eq_ignore_ascii_case("image/jpg")
         }
         ImageFormat::Png => mime.eq_ignore_ascii_case("image/png"),
+        ImageFormat::Avif => mime.eq_ignore_ascii_case("image/avif"),
         _ => false,
     }
 }

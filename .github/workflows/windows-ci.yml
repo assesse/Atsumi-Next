@@ -24,6 +24,7 @@ jobs:
 
     env:
       CI: true
+      CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: "1"
 

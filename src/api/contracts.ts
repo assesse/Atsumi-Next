@@ -208,6 +208,20 @@ export type DownloadPage = {
   entries: DownloadEntry[];
 };
 
+export type ReconcileIssue = {
+  entryId: string;
+  code: string;
+  message: string;
+  recoverable: boolean;
+};
+
+export type ReconcileReport = {
+  inspectedArtifacts: number;
+  verifiedArtifacts: number;
+  resumedJobs: number;
+  issues: ReconcileIssue[];
+};
+
 export type RemovalPlan = {
   planId: string;
   entryIds: string[];

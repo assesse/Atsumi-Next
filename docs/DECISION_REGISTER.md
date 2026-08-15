@@ -44,6 +44,9 @@
 | D-124 | Downloads에서 여러 완료 항목을 선택하고 Enter를 누르면 첫 번째 항목의 첫 검증 파일만 연다. | 2026-08-15 전체 구현 지시 |
 | D-125 | Review는 별도 창이 아니라 현재 앱 위의 대형 dialog로 유지한다. | 2026-08-15 전체 구현 지시 |
 | D-126 | quarantine은 자동으로 영구 삭제하지 않는다. 영구 삭제는 명시적인 사용자 명령과 재확인을 거친다. | 2026-08-15 전체 구현 지시 |
+| D-127 | 다운로드 page는 source page 번호를 immutable identity로 두고, `.part`→decode/WebP→SHA-256→atomic rename→manifest 검증 뒤에만 완료한다. | 2026-08-15 Milestone C 구현 |
+| D-128 | quarantine과 undo는 filesystem move 전 pending DB record를 만드는 crash-safe saga로 처리한다. 원본/격리 경로가 모두 있거나 모두 없으면 자동 삭제·덮어쓰지 않는다. | 2026-08-15 Milestone C 구현 |
+| D-129 | 앱 시작 시 유효한 download root에 대해 quarantine saga와 artifact 무결성을 먼저 reconcile하고, 그 뒤 interrupted job을 verified page checkpoint부터 자동 재개한다. | 2026-08-15 Milestone C 구현 |
 
 ## 제안
 

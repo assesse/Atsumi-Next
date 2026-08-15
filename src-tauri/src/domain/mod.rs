@@ -7,14 +7,16 @@ mod settings;
 mod window_placement;
 
 pub use artifact::{
-    ArtifactBundle, ArtifactRelativePath, DownloadArtifact, DownloadArtifactState, DownloadEntryId,
-    PageArtifact, PageArtifactState,
+    ArtifactBundle, ArtifactConversionPolicy, ArtifactManifest, ArtifactManifestGallery,
+    ArtifactManifestPage, ArtifactRelativePath, ArtifactSha256, ArtifactStorageFormat,
+    DownloadArtifact, DownloadArtifactState, DownloadEntryId, PageArtifact, PageArtifactState,
+    ARTIFACT_MANIFEST_SCHEMA_VERSION, HASH_PROFILE_VERSION,
 };
 pub use download::{DownloadEntry, DownloadListRequest, DownloadPage, DownloadReviewKind};
 pub use gallery::{Gallery, GalleryId, GalleryMetadata, GalleryPageId, SourcePageNumber};
 pub use job::{
-    DownloadChangedEvent, DownloadJobProjection, FixtureDownloadJobDescriptor,
-    FixtureDownloadJobStep, JobEvent, JobRef, JobState,
+    DownloadChangedEvent, DownloadJobDescriptor, DownloadJobProjection, FixtureDownloadJobStep,
+    JobEvent, JobRef, JobState,
 };
 pub use search::{
     GalleryDetail, GalleryPage, GallerySummary, Language, SearchRequest, SearchSort,

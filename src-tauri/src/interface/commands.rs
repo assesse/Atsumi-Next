@@ -1,14 +1,19 @@
-use std::{sync::mpsc::Sender, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{mpsc::Sender, Arc},
+};
 
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
 use crate::{
-    application::{ApplicationError, ApplicationService},
+    application::{
+        ApplicationError, ApplicationService, ArtifactStore, DownloadPipelineError,
+        DownloadPipelineErrorCode, DownloadRootPicker, DownloadSupervisor, ReconcileReport,
+    },
     domain::{
-        DownloadChangedEvent, DownloadEntry, DownloadListRequest, DownloadPage,
-        FixtureDownloadJobStep, GalleryDetail, GalleryPage, JobRef, SearchRequest,
-        SearchSubmission, SettingsPatch, SettingsSnapshot, WindowPlacement,
-        WindowPlacementSnapshot,
+        DownloadChangedEvent, DownloadEntry, DownloadListRequest, DownloadPage, GalleryDetail,
+        GalleryPage, JobRef, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot,
+        WindowPlacement, WindowPlacementSnapshot,
     },
     thumbnail::{
         ThumbnailCompletionEventDto, ThumbnailCoordinator, ThumbnailCoordinatorError,
@@ -23,6 +28,9 @@ pub struct AppState {
     service: ApplicationService,
     thumbnails: ThumbnailCoordinator,
     thumbnail_completions: Sender<ThumbnailCompletionEventDto>,
+    downloads: DownloadSupervisor,
+    download_root_picker: Arc<dyn DownloadRootPicker>,
+    artifact_store: Arc<dyn ArtifactStore>,
 }
 
 impl AppState {
@@ -30,11 +38,17 @@ impl AppState {
         service: ApplicationService,
         thumbnails: ThumbnailCoordinator,
         thumbnail_completions: Sender<ThumbnailCompletionEventDto>,
+        downloads: DownloadSupervisor,
+        download_root_picker: Arc<dyn DownloadRootPicker>,
+        artifact_store: Arc<dyn ArtifactStore>,
     ) -> Self {
         Self {
             service,
             thumbnails,
             thumbnail_completions,
+            downloads,
+            download_root_picker,
+            artifact_store,
         }
     }
 }
@@ -105,16 +119,20 @@ pub async fn download_queue_add(
     galleries: Vec<i64>,
     request_id: String,
 ) -> Result<ApiResult<Vec<DownloadEntry>>, ApiError> {
+    if let Err(error) = ensure_download_root(
+        &app,
+        state.service.clone(),
+        Arc::clone(&state.download_root_picker),
+        Arc::clone(&state.artifact_store),
+    )
+    .await
+    {
+        return Ok(ApiResult::failure(error));
+    }
     match state.service.download_queue_add(galleries, request_id) {
         Ok(launch) => {
-            for descriptor in launch.fixture_jobs {
-                let service = state.service.clone();
-                tauri::async_runtime::spawn(run_fixture_download_job(
-                    app.clone(),
-                    service,
-                    descriptor.job_id,
-                    descriptor.worker_attempt,
-                ));
+            if let Err(error) = state.downloads.enqueue_all(launch.jobs) {
+                return Ok(ApiResult::failure(ApplicationError::from(error).into()));
             }
             Ok(ApiResult::success(launch.entries))
         }
@@ -196,23 +214,13 @@ pub fn thumbnail_stats(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn download_retry(
-    app: AppHandle,
     state: State<'_, AppState>,
     entry_ids: Vec<String>,
 ) -> Result<ApiResult<Vec<JobRef>>, ApiError> {
     match state.service.download_retry(entry_ids) {
         Ok(job_refs) => {
-            for job_ref in &job_refs {
-                if job_ref.reused {
-                    continue;
-                }
-                let service = state.service.clone();
-                tauri::async_runtime::spawn(run_fixture_download_job(
-                    app.clone(),
-                    service,
-                    job_ref.job_id.clone(),
-                    job_ref.worker_attempt,
-                ));
+            if let Err(error) = state.downloads.enqueue_retries(&job_refs) {
+                return Ok(ApiResult::failure(error.into()));
             }
             Ok(ApiResult::success(job_refs))
         }
@@ -226,8 +234,10 @@ pub async fn download_cancel(
     state: State<'_, AppState>,
     entry_ids: Vec<String>,
 ) -> Result<ApiResult<Vec<DownloadEntry>>, ApiError> {
+    let cancellation_ids = entry_ids.clone();
     match state.service.download_cancel(entry_ids) {
         Ok(entries) => {
+            state.downloads.cancel_entries(&cancellation_ids);
             for entry in &entries {
                 let event = DownloadChangedEvent {
                     entry_id: entry.entry_id.to_string(),
@@ -253,6 +263,53 @@ pub async fn download_cancel(
     }
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub async fn artifact_open_first(
+    state: State<'_, AppState>,
+    entry_id: String,
+) -> Result<ApiResult<()>, ApiError> {
+    let downloads = state.downloads.clone();
+    Ok(run_application_blocking("artifact_open_first", move || {
+        downloads.open_first(entry_id)
+    })
+    .await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn download_quarantine(
+    state: State<'_, AppState>,
+    entry_ids: Vec<String>,
+    reason: String,
+) -> Result<ApiResult<Vec<DownloadEntry>>, ApiError> {
+    let downloads = state.downloads.clone();
+    Ok(run_application_blocking("download_quarantine", move || {
+        downloads.quarantine_entries(entry_ids, reason)
+    })
+    .await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn download_quarantine_undo(
+    state: State<'_, AppState>,
+    entry_ids: Vec<String>,
+) -> Result<ApiResult<Vec<DownloadEntry>>, ApiError> {
+    let downloads = state.downloads.clone();
+    Ok(
+        run_application_blocking("download_quarantine_undo", move || {
+            downloads.restore_entries(entry_ids)
+        })
+        .await,
+    )
+}
+
+#[tauri::command]
+pub async fn app_reconcile(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<ReconcileReport>, ApiError> {
+    let downloads = state.downloads.clone();
+    Ok(run_application_blocking("app_reconcile", move || downloads.reconcile()).await)
+}
+
 #[tauri::command]
 pub async fn app_minimize_to_tray(window: WebviewWindow) -> Result<ApiResult<()>, ApiError> {
     match window.hide() {
@@ -268,7 +325,18 @@ pub async fn app_minimize_to_tray(window: WebviewWindow) -> Result<ApiResult<()>
 }
 
 #[tauri::command]
-pub async fn app_quit(app: AppHandle) -> Result<ApiResult<()>, ApiError> {
+pub async fn app_quit(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ApiResult<()>, ApiError> {
+    let downloads = state.downloads.clone();
+    if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
+        downloads.shutdown_and_wait();
+    })
+    .await
+    {
+        tracing::warn!(error = %error, "download workers did not finish shutdown cleanly");
+    }
     app.exit(0);
     Ok(ApiResult::success(()))
 }
@@ -296,6 +364,79 @@ pub async fn gallery_detail_get(
         service.gallery_detail_get(gallery_id)
     })
     .await)
+}
+
+async fn ensure_download_root(
+    app: &AppHandle,
+    service: ApplicationService,
+    picker: Arc<dyn DownloadRootPicker>,
+    store: Arc<dyn ArtifactStore>,
+) -> Result<(), ApiError> {
+    let current = service.settings_get().map_err(ApiError::from)?;
+    if !current.download_root.trim().is_empty() {
+        let root = PathBuf::from(current.download_root);
+        return match tauri::async_runtime::spawn_blocking(move || {
+            store.validate_download_root(&root)
+        })
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(ApplicationError::from(error).into()),
+            Err(error) => Err(blocking_task_error("download_root_validate", &error)),
+        };
+    }
+
+    let selected = match tauri::async_runtime::spawn_blocking(move || {
+        let selected = picker.pick_download_root()?;
+        selected
+            .map(|path| store.validate_download_root(&path))
+            .transpose()
+    })
+    .await
+    {
+        Ok(Ok(selected)) => selected,
+        Ok(Err(error)) => return Err(ApplicationError::from(error).into()),
+        Err(error) => return Err(blocking_task_error("download_root_choose", &error)),
+    };
+    let Some(selected) = selected else {
+        return Err(ApplicationError::from(DownloadPipelineError::new(
+            DownloadPipelineErrorCode::RootSelectionCancelled,
+            "Download folder selection was cancelled; no queue entry was created",
+            false,
+        ))
+        .into());
+    };
+    let selected = selected.to_str().ok_or_else(|| {
+        ApiError::from(ApplicationError::from(DownloadPipelineError::new(
+            DownloadPipelineErrorCode::RootUnavailable,
+            "The selected folder path cannot be represented safely",
+            false,
+        )))
+    })?;
+    let updated = service
+        .settings_update(
+            SettingsPatch {
+                download_root: Some(selected.to_owned()),
+                ..SettingsPatch::default()
+            },
+            current.revision,
+        )
+        .map_err(ApiError::from)?;
+    if let Err(error) = app.emit("settings:changed", &updated) {
+        tracing::warn!(error = %error, "could not emit settings:changed after folder selection");
+    }
+    Ok(())
+}
+
+fn blocking_task_error(operation_id: &'static str, error: &tauri::Error) -> ApiError {
+    tracing::error!(operation_id, error = %error, "blocking backend task did not complete");
+    ApiError {
+        code: "BACKEND_TASK_FAILED".into(),
+        message: "The backend could not complete the request".into(),
+        retryable: true,
+        action: Some(super::ApiAction::Retry),
+        details: None,
+    }
 }
 
 async fn run_application_blocking<T, F>(operation_id: &'static str, operation: F) -> ApiResult<T>
@@ -327,53 +468,6 @@ where
             })
         }
     }
-}
-
-async fn run_fixture_download_job(
-    app: AppHandle,
-    service: ApplicationService,
-    job_id: String,
-    worker_attempt: u64,
-) {
-    let steps = [
-        (
-            Duration::from_millis(75),
-            FixtureDownloadJobStep::ResolvingMetadata,
-        ),
-        (
-            Duration::from_millis(150),
-            FixtureDownloadJobStep::FoundationUnavailable,
-        ),
-    ];
-
-    for (delay, step) in steps {
-        tokio::time::sleep(delay).await;
-        match service.fixture_download_job_advance(&job_id, worker_attempt, step) {
-            Ok(projection) => {
-                if let Err(error) = app.emit("job:changed", &projection.job) {
-                    tracing::warn!(job_id, error = %error, "could not emit job:changed");
-                }
-                if let Err(error) = app.emit("download:changed", &projection.download) {
-                    tracing::warn!(job_id, error = %error, "could not emit download:changed");
-                }
-            }
-            Err(error) => {
-                log_fixture_download_job_error(&job_id, &error);
-                break;
-            }
-        }
-    }
-}
-
-fn log_fixture_download_job_error(job_id: &str, error: &ApplicationError) {
-    tracing::error!(
-        operation_id = "fixture_download_job",
-        job_id,
-        stage = "advance",
-        error_code = "FIXTURE_DOWNLOAD_JOB_ADVANCE_FAILED",
-        error = %error,
-        "fixture download job stopped"
-    );
 }
 
 fn thumbnail_coordinator_error(error: ThumbnailCoordinatorError) -> ApiError {

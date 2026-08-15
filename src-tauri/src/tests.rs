@@ -88,7 +88,7 @@ fn primary_group_migration_preserves_existing_gallery_rows() {
         .expect("insert v3 gallery");
 
     let report = MigrationRunner::run(&mut connection).expect("apply v4 migration");
-    assert_eq!(report.applied_versions, vec![4, 5, 6, 7]);
+    assert_eq!(report.applied_versions, vec![4, 5, 6, 7, 8, 9]);
     let stored: (String, Option<String>) = connection
         .query_row(
             "SELECT title, primary_group FROM galleries WHERE gallery_id = 44",
@@ -167,7 +167,7 @@ fn lifecycle_migration_preserves_v6_download_graph_and_enables_cancelled() {
         .expect("seed v6 download graph");
 
     let report = MigrationRunner::run(&mut connection).expect("apply lifecycle migration");
-    assert_eq!(report.applied_versions, vec![7]);
+    assert_eq!(report.applied_versions, vec![7, 8, 9]);
     let lifecycle: (i64, String, Option<String>, i64) = connection
         .query_row(
             r#"
@@ -259,7 +259,7 @@ fn settings_constraint_migration_clamps_legacy_values() {
         .expect("create legacy schema");
 
     let report = MigrationRunner::run(&mut connection).expect("upgrade legacy schema");
-    assert_eq!(report.applied_versions, vec![2, 3, 4, 5, 6, 7]);
+    assert_eq!(report.applied_versions, vec![2, 3, 4, 5, 6, 7, 8, 9]);
     let tightened: (i64, i64, i64, i64, i64, i64) = connection
         .query_row(
             r#"
@@ -576,7 +576,7 @@ fn queued_fixture_job_stops_honestly_without_creating_artifacts() {
     assert_eq!(first.entries[0].revision, 0);
     assert_eq!(first.entries[0].state, JobState::Queued);
     let descriptor = first
-        .fixture_jobs
+        .jobs
         .first()
         .expect("new queue entry should schedule one fixture job")
         .clone();
@@ -585,7 +585,7 @@ fn queued_fixture_job_stops_honestly_without_creating_artifacts() {
         .download_queue_add(vec![42], "request-42".into())
         .expect("replay queue request");
     assert_eq!(replay.entries, first.entries);
-    assert!(replay.fixture_jobs.is_empty());
+    assert!(replay.jobs.is_empty());
 
     let invalid = service
         .fixture_download_job_advance(
@@ -692,7 +692,7 @@ fn concurrent_retry_reuses_one_job_and_increments_one_attempt() {
     let launch = service
         .download_queue_add(vec![42], "retry-concurrency".into())
         .expect("queue fixture download");
-    let descriptor = launch.fixture_jobs[0].clone();
+    let descriptor = launch.jobs[0].clone();
     service
         .fixture_download_job_advance(
             &descriptor.job_id,
@@ -778,7 +778,7 @@ fn cancelling_an_interrupted_download_preserves_attempt_failure_evidence() {
     let launch = service
         .download_queue_add(vec![42], "cancelled-evidence".into())
         .expect("queue fixture download");
-    let descriptor = launch.fixture_jobs[0].clone();
+    let descriptor = launch.jobs[0].clone();
     service
         .fixture_download_job_advance(
             &descriptor.job_id,
@@ -840,7 +840,7 @@ fn stale_fixture_worker_cannot_advance_a_retried_attempt() {
     let launch = service
         .download_queue_add(vec![42], "stale-worker".into())
         .expect("queue fixture download");
-    let descriptor = launch.fixture_jobs[0].clone();
+    let descriptor = launch.jobs[0].clone();
     service
         .fixture_download_job_advance(
             &descriptor.job_id,
@@ -1304,7 +1304,7 @@ fn gallery_and_artifacts_round_trip_with_original_page_numbers() {
             .download_queue_add(vec![3_005_910], "artifact-round-trip".into())
             .expect("create owning download entry");
         let descriptor = launch
-            .fixture_jobs
+            .jobs
             .first()
             .expect("new fixture download entry")
             .clone();

@@ -96,7 +96,8 @@ impl JobState {
                 Self::Interrupted | Self::Failed | Self::Cancelled,
                 Self::Queued
             ) | (Self::Interrupted | Self::Failed, Self::Cancelled)
-                | (Self::Completed, Self::Quarantined)
+                | (Self::Completed, Self::Quarantined | Self::Failed)
+                | (Self::Quarantined, Self::Completed)
         )
     }
 }
@@ -180,7 +181,7 @@ pub struct DownloadChangedEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FixtureDownloadJobDescriptor {
+pub struct DownloadJobDescriptor {
     pub job_id: String,
     pub entry_id: String,
     pub gallery_id: GalleryId,

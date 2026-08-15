@@ -11,6 +11,7 @@ import type {
   GalleryPage,
   JobEvent,
   JobRef,
+  ReconcileReport,
   SearchRequest,
   SearchSubmission,
   SettingsPatch,
@@ -58,7 +59,11 @@ export interface BackendClient {
   downloadEntriesList(request: DownloadListRequest): Promise<ApiResult<DownloadPage>>;
   downloadRetry(entryIds: string[]): Promise<ApiResult<JobRef[]>>;
   downloadCancel(entryIds: string[]): Promise<ApiResult<DownloadEntry[]>>;
+  downloadQuarantine(entryIds: string[], reason: string): Promise<ApiResult<DownloadEntry[]>>;
+  downloadQuarantineUndo(entryIds: string[]): Promise<ApiResult<DownloadEntry[]>>;
   downloadActiveCount(): Promise<ApiResult<number>>;
+  artifactOpenFirst(entryId: string): Promise<ApiResult<null>>;
+  appReconcile(): Promise<ApiResult<ReconcileReport>>;
   thumbnailRequest(request: ThumbnailRequestDto): Promise<ApiResult<ThumbnailRequestToken>>;
   thumbnailCancel(requestId: string): Promise<ApiResult<boolean>>;
   thumbnailReprioritize(requestId: string, priority: ThumbnailRequestDto["priority"]): Promise<ApiResult<boolean>>;
@@ -444,6 +449,30 @@ class BrowserMockBackend implements BackendClient {
     return ok(cancelled);
   }
 
+  async downloadQuarantine(): Promise<ApiResult<DownloadEntry[]>> {
+    return {
+      ok: false,
+      error: {
+        code: "ARTIFACT_UNAVAILABLE_IN_BROWSER",
+        message: "브라우저 fixture에는 격리할 실제 다운로드 파일이 없습니다.",
+        retryable: false,
+        action: "none",
+      },
+    };
+  }
+
+  async downloadQuarantineUndo(): Promise<ApiResult<DownloadEntry[]>> {
+    return {
+      ok: false,
+      error: {
+        code: "ARTIFACT_UNAVAILABLE_IN_BROWSER",
+        message: "브라우저 fixture에는 복원할 실제 다운로드 파일이 없습니다.",
+        retryable: false,
+        action: "none",
+      },
+    };
+  }
+
   async thumbnailRequest(request: ThumbnailRequestDto): Promise<ApiResult<ThumbnailRequestToken>> {
     if (!Number.isInteger(request.key.galleryId) || request.key.galleryId <= 0) {
       return validationError("key.galleryId", "must be a positive integer");
@@ -529,6 +558,27 @@ class BrowserMockBackend implements BackendClient {
 
   async downloadActiveCount(): Promise<ApiResult<number>> {
     return ok([...this.downloadEntries.values()].filter((entry) => activeDownloadStates.has(entry.state)).length);
+  }
+
+  async artifactOpenFirst(): Promise<ApiResult<null>> {
+    return {
+      ok: false,
+      error: {
+        code: "ARTIFACT_UNAVAILABLE_IN_BROWSER",
+        message: "브라우저 fixture에는 실제 다운로드 파일이 없습니다.",
+        retryable: false,
+        action: "none",
+      },
+    };
+  }
+
+  async appReconcile(): Promise<ApiResult<ReconcileReport>> {
+    return ok({
+      inspectedArtifacts: 0,
+      verifiedArtifacts: 0,
+      resumedJobs: 0,
+      issues: [],
+    });
   }
 
   async appQuit(): Promise<ApiResult<null>> {
@@ -661,8 +711,24 @@ class TauriBackend implements BackendClient {
     return invoke("download_cancel", { entryIds });
   }
 
+  downloadQuarantine(entryIds: string[], reason: string): Promise<ApiResult<DownloadEntry[]>> {
+    return invoke("download_quarantine", { entryIds, reason });
+  }
+
+  downloadQuarantineUndo(entryIds: string[]): Promise<ApiResult<DownloadEntry[]>> {
+    return invoke("download_quarantine_undo", { entryIds });
+  }
+
   downloadActiveCount(): Promise<ApiResult<number>> {
     return invoke("download_active_count");
+  }
+
+  artifactOpenFirst(entryId: string): Promise<ApiResult<null>> {
+    return invoke("artifact_open_first", { entryId });
+  }
+
+  appReconcile(): Promise<ApiResult<ReconcileReport>> {
+    return invoke("app_reconcile");
   }
 
   thumbnailRequest(request: ThumbnailRequestDto): Promise<ApiResult<ThumbnailRequestToken>> {

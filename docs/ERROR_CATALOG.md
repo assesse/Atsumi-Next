@@ -4,7 +4,7 @@
 
 - 사용자 문구, 개발 로그와 프로그램 분기용 code를 분리한다.
 - retry 가능 여부는 호출부가 문자열로 추측하지 않는다.
-- 실패한 URL, HTTP status, attempt는 detail에만 둔다.
+- raw URL과 query는 detail에도 넣지 않는다. 허용된 host, HTTP status, attempt처럼 비식별 진단만 로그에 둔다.
 - 같은 근본 원인은 화면마다 같은 code를 사용한다.
 
 | Code | 사용자 문구 | Retry | 기본 행동 |
@@ -20,9 +20,18 @@
 | `IMAGE_CANDIDATES_EXHAUSTED` | 이미지 서버에서 파일을 찾지 못했습니다 | 조건부 | URL 진단 또는 재조회 |
 | `IMAGE_RESPONSE_INVALID` | 이미지가 아닌 응답을 받았습니다 | 아니오 | 다른 후보를 모두 시도한 뒤 상세 확인 |
 | `IMAGE_DECODE_FAILED` | 이미지 처리에 실패했습니다 | 조건부 | 원본 보존, 상세 확인 |
-| `FILESYSTEM_PERMISSION` | 폴더에 파일을 쓸 수 없습니다 | 아니오 | 설정/경로 열기 |
+| `DOWNLOAD_ROOT_REQUIRED` | 다운로드 폴더를 먼저 선택하세요 | 아니오 | 첫 다운로드에서 선택 |
+| `DOWNLOAD_ROOT_SELECTION_CANCELLED` | 폴더 선택을 취소해 대기열을 만들지 않았습니다 | 아니오 | 원할 때 다시 실행 |
+| `DOWNLOAD_ROOT_UNAVAILABLE` | 선택한 다운로드 폴더를 사용할 수 없습니다 | 아니오 | 권한·경로 확인 |
+| `FILESYSTEM_ERROR` | 파일 작업을 안전하게 완료하지 못했습니다 | 조건부 | 원인 제거 후 재시도 |
 | `FILESYSTEM_MISSING` | 다운로드 폴더를 찾을 수 없습니다 | 아니오 | 재연결 또는 재다운로드 |
-| `FILESYSTEM_CONFLICT` | 같은 위치에 다른 파일이 있습니다 | 아니오 | 사용자 검토 |
+| `FILESYSTEM_PATH_OUTSIDE_ROOT` | 허용된 다운로드 폴더 밖의 작업은 거부됩니다 | 아니오 | 경로 검토 |
+| `IMAGE_ENCODE_FAILED` | 검증된 이미지를 WebP로 저장하지 못했습니다 | 아니오 | 원본·decoder 검토 |
+| `ARTIFACT_MANIFEST_INVALID` | manifest와 파일·DB 기록이 일치하지 않습니다 | 아니오 | 무결성 검사 |
+| `ARTIFACT_HASH_MISMATCH` | 파일의 SHA-256이 검증 기록과 다릅니다 | 아니오 | 무결성 검사·재다운로드 |
+| `DOWNLOAD_WORKER_UNAVAILABLE` | 다운로드 작업기를 시작할 수 없습니다 | 예 | 앱 상태 확인 후 재시도 |
+| `REQUEST_CANCELLED` | 요청이 취소되었습니다 | 아니오 | 필요하면 재시도 |
+| `QUARANTINE_CONFLICT` | 원본과 격리 위치가 모호해 파일을 변경하지 않았습니다 | 아니오 | 두 위치를 사용자 검토 |
 | `DATABASE_BUSY` | 내부 기록이 사용 중입니다 | 예 | 짧은 재시도 |
 | `DATABASE_CORRUPT` | 내부 데이터 복구가 필요합니다 | 아니오 | backup/repair flow |
 | `DATABASE_SCHEMA_NEWER` | 더 새로운 Atsumi Next가 만든 데이터입니다 | 아니오 | 데이터 변경 없이 최신 앱 사용 |
@@ -38,7 +47,6 @@
 | `DUPLICATE_EXACT` | 동일한 이미지가 발견되었습니다 | 아니오 | Review |
 | `DUPLICATE_VISUAL` | 유사한 작품을 확인해야 합니다 | 아니오 | Review |
 | `REVIEW_DECISION_CONFLICT` | 판정 대상이 이후 변경되었습니다 | 아니오 | 최신 상태 다시 로드 |
-| `PATH_OUTSIDE_ROOT` | 허용된 폴더 밖의 작업은 실행할 수 없습니다 | 아니오 | 작업 거부 |
 
 ## 로그 필드
 

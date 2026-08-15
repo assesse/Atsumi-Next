@@ -1,8 +1,70 @@
 use std::{collections::BTreeSet, fmt, path::Component, str::FromStr};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{Gallery, GalleryId, GalleryPageId, SourcePageNumber, ValidationError};
+
+pub const ARTIFACT_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const HASH_PROFILE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ArtifactSha256(String);
+
+impl ArtifactSha256 {
+    pub fn new(value: impl Into<String>) -> Result<Self, ValidationError> {
+        let value = value.into();
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ValidationError::new(
+                "sha256",
+                "must be a lowercase 64-character hexadecimal digest",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ArtifactSha256 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactStorageFormat {
+    Webp,
+}
+
+impl ArtifactStorageFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Webp => "webp",
+        }
+    }
+}
+
+impl FromStr for ArtifactStorageFormat {
+    type Err = ValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "webp" => Ok(Self::Webp),
+            _ => Err(ValidationError::new(
+                "storageFormat",
+                "contains an unsupported value",
+            )),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -155,6 +217,11 @@ pub struct DownloadArtifact {
     pub relative_directory: ArtifactRelativePath,
     pub expected_page_count: u32,
     pub state: DownloadArtifactState,
+    pub manifest_relative_path: Option<ArtifactRelativePath>,
+    pub manifest_schema_version: Option<u32>,
+    pub writer_version: Option<String>,
+    pub hash_profile_version: u32,
+    pub completed_at: Option<String>,
 }
 
 impl DownloadArtifact {
@@ -179,7 +246,48 @@ impl DownloadArtifact {
             relative_directory,
             expected_page_count,
             state,
+            manifest_relative_path: None,
+            manifest_schema_version: None,
+            writer_version: None,
+            hash_profile_version: HASH_PROFILE_VERSION,
+            completed_at: None,
         })
+    }
+
+    pub fn with_manifest(
+        mut self,
+        relative_path: ArtifactRelativePath,
+        schema_version: u32,
+        writer_version: impl Into<String>,
+        hash_profile_version: u32,
+        completed_at: impl Into<String>,
+    ) -> Result<Self, ValidationError> {
+        let writer_version = writer_version.into().trim().to_owned();
+        let completed_at = completed_at.into().trim().to_owned();
+        if schema_version == 0 {
+            return Err(ValidationError::new(
+                "manifestSchemaVersion",
+                "must be greater than zero",
+            ));
+        }
+        if hash_profile_version == 0 {
+            return Err(ValidationError::new(
+                "hashProfileVersion",
+                "must be greater than zero",
+            ));
+        }
+        if writer_version.is_empty() {
+            return Err(ValidationError::new("writerVersion", "must not be empty"));
+        }
+        if completed_at.is_empty() {
+            return Err(ValidationError::new("completedAt", "must not be empty"));
+        }
+        self.manifest_relative_path = Some(relative_path);
+        self.manifest_schema_version = Some(schema_version);
+        self.writer_version = Some(writer_version);
+        self.hash_profile_version = hash_profile_version;
+        self.completed_at = Some(completed_at);
+        Ok(self)
     }
 }
 
@@ -190,6 +298,11 @@ pub struct PageArtifact {
     pub relative_path: ArtifactRelativePath,
     pub state: PageArtifactState,
     pub byte_length: Option<u64>,
+    pub sha256: Option<ArtifactSha256>,
+    pub storage_format: Option<ArtifactStorageFormat>,
+    pub source_revision: Option<String>,
+    pub verified_at: Option<String>,
+    pub excluded: bool,
 }
 
 impl PageArtifact {
@@ -216,6 +329,164 @@ impl PageArtifact {
             relative_path,
             state,
             byte_length,
+            sha256: None,
+            storage_format: None,
+            source_revision: None,
+            verified_at: None,
+            excluded: false,
+        })
+    }
+
+    pub fn with_verification(
+        mut self,
+        sha256: ArtifactSha256,
+        storage_format: ArtifactStorageFormat,
+        source_revision: impl Into<String>,
+        verified_at: impl Into<String>,
+    ) -> Result<Self, ValidationError> {
+        let source_revision = source_revision.into().trim().to_owned();
+        let verified_at = verified_at.into().trim().to_owned();
+        if !matches!(
+            self.state,
+            PageArtifactState::Present | PageArtifactState::Quarantined
+        ) || self.byte_length.is_none()
+        {
+            return Err(ValidationError::new(
+                "pageArtifactState",
+                "verification requires a present or quarantined page with a byte length",
+            ));
+        }
+        if source_revision.is_empty() {
+            return Err(ValidationError::new("sourceRevision", "must not be empty"));
+        }
+        if verified_at.is_empty() {
+            return Err(ValidationError::new("verifiedAt", "must not be empty"));
+        }
+        self.sha256 = Some(sha256);
+        self.storage_format = Some(storage_format);
+        self.source_revision = Some(source_revision);
+        self.verified_at = Some(verified_at);
+        Ok(self)
+    }
+
+    pub fn with_excluded(mut self, excluded: bool) -> Self {
+        self.excluded = excluded;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactManifest {
+    pub schema_version: u32,
+    pub writer_version: String,
+    pub hash_profile_version: u32,
+    pub conversion_policy: ArtifactConversionPolicy,
+    pub gallery: ArtifactManifestGallery,
+    pub expected_page_count: u32,
+    pub pages: Vec<ArtifactManifestPage>,
+    pub completed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactConversionPolicy {
+    pub storage_format: ArtifactStorageFormat,
+    pub webp_encoding: String,
+    pub alpha_policy: String,
+    pub animation_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactManifestGallery {
+    pub gallery_id: i64,
+    pub title: String,
+    pub primary_artist: Option<String>,
+    pub primary_group: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactManifestPage {
+    pub source_page_number: u32,
+    pub relative_path: String,
+    pub byte_length: u64,
+    pub sha256: ArtifactSha256,
+    pub storage_format: ArtifactStorageFormat,
+    pub source_revision: String,
+    pub excluded: bool,
+    pub quarantined: bool,
+}
+
+impl ArtifactManifest {
+    pub fn from_bundle(bundle: &ArtifactBundle) -> Result<Self, ValidationError> {
+        bundle.validate()?;
+        let artifact = &bundle.artifact;
+        if artifact.state != DownloadArtifactState::Complete {
+            return Err(ValidationError::new(
+                "artifactState",
+                "manifest requires a complete artifact",
+            ));
+        }
+        let mut pages = Vec::with_capacity(bundle.pages.len());
+        for page in &bundle.pages {
+            pages.push(ArtifactManifestPage {
+                source_page_number: page.page_id.source_page_number.get(),
+                relative_path: page.relative_path.as_str().to_owned(),
+                byte_length: page.byte_length.ok_or_else(|| {
+                    ValidationError::new("byteLength", "complete pages require a byte length")
+                })?,
+                sha256: page.sha256.clone().ok_or_else(|| {
+                    ValidationError::new("sha256", "complete pages require a digest")
+                })?,
+                storage_format: page.storage_format.ok_or_else(|| {
+                    ValidationError::new("storageFormat", "complete pages require a format")
+                })?,
+                source_revision: page.source_revision.clone().ok_or_else(|| {
+                    ValidationError::new(
+                        "sourceRevision",
+                        "complete pages require a source revision",
+                    )
+                })?,
+                excluded: page.excluded,
+                quarantined: page.state == PageArtifactState::Quarantined,
+            });
+        }
+        Ok(Self {
+            schema_version: artifact.manifest_schema_version.ok_or_else(|| {
+                ValidationError::new(
+                    "manifestSchemaVersion",
+                    "complete artifacts require a manifest version",
+                )
+            })?,
+            writer_version: artifact.writer_version.clone().ok_or_else(|| {
+                ValidationError::new(
+                    "writerVersion",
+                    "complete artifacts require a writer version",
+                )
+            })?,
+            hash_profile_version: artifact.hash_profile_version,
+            conversion_policy: ArtifactConversionPolicy {
+                storage_format: ArtifactStorageFormat::Webp,
+                webp_encoding: "preserve_verified_source_or_lossless_rgba".into(),
+                alpha_policy: "preserve".into(),
+                animation_policy: "preserve_source_webp_otherwise_first_frame".into(),
+            },
+            gallery: ArtifactManifestGallery {
+                gallery_id: bundle.gallery.id.get(),
+                title: bundle.gallery.metadata.title.clone(),
+                primary_artist: bundle.gallery.metadata.primary_artist.clone(),
+                primary_group: bundle.gallery.metadata.primary_group.clone(),
+            },
+            expected_page_count: artifact.expected_page_count,
+            pages,
+            completed_at: artifact.completed_at.clone().ok_or_else(|| {
+                ValidationError::new(
+                    "completedAt",
+                    "complete artifacts require a completion time",
+                )
+            })?,
         })
     }
 }
@@ -293,16 +564,26 @@ impl ArtifactBundle {
             }
         }
 
-        if self.artifact.state == DownloadArtifactState::Complete
-            && (self.pages.len() != self.artifact.expected_page_count as usize
-                || self.pages.iter().any(|page| {
-                    page.state != PageArtifactState::Present || page.byte_length.is_none()
-                }))
-        {
-            return Err(ValidationError::new(
-                "artifactState",
-                "complete artifacts require every verified source page",
-            ));
+        if self.artifact.state == DownloadArtifactState::Complete {
+            let manifest_ready = self.artifact.manifest_relative_path.is_some()
+                && self.artifact.manifest_schema_version.is_some()
+                && self.artifact.writer_version.is_some()
+                && self.artifact.completed_at.is_some();
+            let pages_ready = self.pages.len() == self.artifact.expected_page_count as usize
+                && self.pages.iter().all(|page| {
+                    page.state == PageArtifactState::Present
+                        && page.byte_length.is_some()
+                        && page.sha256.is_some()
+                        && page.storage_format.is_some()
+                        && page.source_revision.is_some()
+                        && page.verified_at.is_some()
+                });
+            if !manifest_ready || !pages_ready {
+                return Err(ValidationError::new(
+                    "artifactState",
+                    "complete artifacts require a manifest and every verified source page",
+                ));
+            }
         }
         Ok(())
     }

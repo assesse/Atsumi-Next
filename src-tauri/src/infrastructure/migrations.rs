@@ -497,6 +497,136 @@ pub const MIGRATIONS: &[Migration] = &[
             FROM download_jobs;
         "#,
     },
+    Migration {
+        version: 8,
+        name: "verified_artifact_pipeline",
+        sql: r#"
+            ALTER TABLE download_artifacts
+            ADD COLUMN manifest_relative_path TEXT
+                CHECK (
+                    manifest_relative_path IS NULL
+                    OR length(trim(manifest_relative_path)) > 0
+                );
+            ALTER TABLE download_artifacts
+            ADD COLUMN manifest_schema_version INTEGER
+                CHECK (manifest_schema_version IS NULL OR manifest_schema_version > 0);
+            ALTER TABLE download_artifacts
+            ADD COLUMN writer_version TEXT
+                CHECK (writer_version IS NULL OR length(trim(writer_version)) > 0);
+            ALTER TABLE download_artifacts
+            ADD COLUMN hash_profile_version INTEGER NOT NULL DEFAULT 1
+                CHECK (hash_profile_version > 0);
+            ALTER TABLE download_artifacts
+            ADD COLUMN completed_at TEXT;
+
+            ALTER TABLE download_pages
+            ADD COLUMN sha256 TEXT
+                CHECK (sha256 IS NULL OR length(sha256) = 64);
+            ALTER TABLE download_pages
+            ADD COLUMN storage_format TEXT
+                CHECK (storage_format IS NULL OR storage_format = 'webp');
+            ALTER TABLE download_pages
+            ADD COLUMN source_revision TEXT
+                CHECK (source_revision IS NULL OR length(trim(source_revision)) > 0);
+            ALTER TABLE download_pages
+            ADD COLUMN verified_at TEXT;
+            ALTER TABLE download_pages
+            ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0
+                CHECK (excluded IN (0, 1));
+
+            CREATE TABLE download_page_attempts (
+                job_id TEXT NOT NULL,
+                job_attempt INTEGER NOT NULL CHECK (job_attempt > 0),
+                source_page_number INTEGER NOT NULL CHECK (source_page_number > 0),
+                candidate_index INTEGER NOT NULL CHECK (candidate_index >= 0),
+                started_at TEXT NOT NULL CHECK (length(started_at) > 0),
+                finished_at TEXT,
+                outcome TEXT CHECK (
+                    outcome IS NULL OR outcome IN (
+                        'succeeded', 'failed', 'cancelled'
+                    )
+                ),
+                error_code TEXT,
+                error_message TEXT,
+                bytes_received INTEGER CHECK (bytes_received IS NULL OR bytes_received >= 0),
+                PRIMARY KEY (
+                    job_id, job_attempt, source_page_number, candidate_index
+                ),
+                FOREIGN KEY (job_id, job_attempt)
+                    REFERENCES download_attempts(job_id, attempt) ON DELETE CASCADE
+            ) STRICT;
+
+            CREATE INDEX download_page_attempts_page_idx
+                ON download_page_attempts(job_id, source_page_number, job_attempt);
+
+            CREATE TABLE quarantine_records (
+                record_id TEXT PRIMARY KEY,
+                entry_id TEXT NOT NULL
+                    REFERENCES download_entries(entry_id) ON DELETE RESTRICT,
+                original_relative_path TEXT NOT NULL
+                    CHECK (length(trim(original_relative_path)) > 0),
+                quarantine_relative_path TEXT NOT NULL UNIQUE
+                    CHECK (length(trim(quarantine_relative_path)) > 0),
+                reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                state TEXT NOT NULL CHECK (state IN ('quarantined', 'restored')),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                restored_at TEXT
+            ) STRICT;
+
+            CREATE INDEX quarantine_records_entry_idx
+                ON quarantine_records(entry_id, state);
+        "#,
+    },
+    Migration {
+        version: 9,
+        name: "crash_safe_quarantine_saga",
+        sql: r#"
+            ALTER TABLE quarantine_records RENAME TO quarantine_records_v8;
+
+            CREATE TABLE quarantine_records (
+                record_id TEXT PRIMARY KEY,
+                entry_id TEXT NOT NULL
+                    REFERENCES download_entries(entry_id) ON DELETE RESTRICT,
+                original_relative_path TEXT NOT NULL
+                    CHECK (length(trim(original_relative_path)) > 0),
+                quarantine_relative_path TEXT NOT NULL UNIQUE
+                    CHECK (length(trim(quarantine_relative_path)) > 0),
+                reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+                state TEXT NOT NULL CHECK (state IN (
+                    'pending_quarantine', 'quarantined',
+                    'pending_restore', 'restored'
+                )),
+                original_entry_state TEXT NOT NULL DEFAULT 'completed'
+                    CHECK (original_entry_state = 'completed'),
+                original_artifact_state TEXT NOT NULL DEFAULT 'complete'
+                    CHECK (original_artifact_state = 'complete'),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                restored_at TEXT
+            ) STRICT;
+
+            INSERT INTO quarantine_records (
+                record_id, entry_id, original_relative_path,
+                quarantine_relative_path, reason, state,
+                original_entry_state, original_artifact_state,
+                created_at, restored_at
+            )
+            SELECT
+                record_id, entry_id, original_relative_path,
+                quarantine_relative_path, reason, state,
+                'completed', 'complete', created_at, restored_at
+            FROM quarantine_records_v8;
+
+            DROP TABLE quarantine_records_v8;
+
+            CREATE INDEX quarantine_records_entry_idx
+                ON quarantine_records(entry_id, state);
+            CREATE UNIQUE INDEX quarantine_records_active_entry_idx
+                ON quarantine_records(entry_id)
+                WHERE state IN (
+                    'pending_quarantine', 'quarantined', 'pending_restore'
+                );
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

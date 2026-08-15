@@ -60,7 +60,7 @@
 
 ## Phase 3: 첫 수직 기능
 
-진행 중이다. 저장 fixture로 고정한 Hitomi source parser를 실제 metadata 검색·상세·WebP 미리보기 read adapter에 연결했고, requestId/active-gallery 멱등성을 가진 다운로드 queue/list, revision snapshot, startup `interrupted` 복구 기반을 구현했다. retry/cancel, attempt 이력과 `cancelled` 상태도 SQLite 계약으로 연결했다. Explore/Downloads/Detail/Review는 하나의 전역 thumbnail coordinator를 사용하며 in-flight 병합·우선순위·취소·메모리/negative cache를 공유한다. 검색과 미리보기는 같은 HTTP pool·host gate·metadata/gg cache를 사용한다. production mock 완료 경로는 제거했으며 신규 queue는 실제 artifact pipeline이 없으면 `interrupted`에서 멈춘다. artifact 처리와 파일 열기는 이어서 연결한다.
+완료했다. 실제 Hitomi read adapter와 공용 HTTP scheduler를 검색·상세·미리보기·페이지 다운로드에 연결했다. requestId/active-gallery 멱등 queue, retry/cancel과 attempt 이력, bounded gallery worker, source page별 checkpoint를 SQLite에 영속한다. 페이지는 bounded body read와 `.part` write, MIME/signature/decode 검증, WebP 정규화, SHA-256, atomic rename을 거치며 versioned manifest와 DB snapshot이 모두 맞을 때만 완료된다. 시작 시 active job을 `interrupted`로 바꾼 뒤 verified checkpoint부터 재개하고, startup/manual reconcile은 누락·hash·manifest 문제를 안전 상태로 표시한다. 완료 첫 페이지는 canonical root 확인 뒤 Windows 기본 viewer로 열며, 제거는 crash-safe quarantine saga와 undo로 처리하고 자동 영구 삭제하지 않는다.
 
 범위:
 
@@ -76,6 +76,13 @@
 - 다운로드 중 강제 종료와 복구
 - 실제 파일과 DB reconciliation
 - Windows 기본 viewer 열기
+
+검증 근거:
+
+- synthetic 실제 PNG 입력을 WebP·SHA-256·manifest로 완료하는 filesystem/SQLite 통합 테스트
+- 두 번째 페이지 중단 뒤 첫 verified page를 다시 받지 않는 resume 테스트
+- 파일 이동과 DB commit 사이 강제 종료를 재조정하는 quarantine fault-injection 테스트
+- quarantine/undo 후 manifest path·상태와 실제 폴더 복원 테스트
 
 ## Phase 4: Auto Find와 운영 UX
 

@@ -3,6 +3,8 @@ use thiserror::Error;
 use crate::domain::{DownloadEntryId, GalleryId, JobState, ValidationError};
 use crate::source::SourceContractError;
 
+use super::DownloadPipelineError;
+
 #[derive(Debug, Error)]
 pub enum RepositoryError {
     #[error("database is busy: {0}")]
@@ -45,6 +47,8 @@ pub enum ApplicationError {
         state: JobState,
         operation: &'static str,
     },
+    #[error(transparent)]
+    DownloadPipeline(#[from] DownloadPipelineError),
     #[error(transparent)]
     Repository(#[from] RepositoryError),
 }

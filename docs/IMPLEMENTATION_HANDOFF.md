@@ -17,17 +17,17 @@
 | 영역 | 상태 | 현재 근거 |
 |---|---|---|
 | startup·single-instance | 완료 | 두 번째 실행은 기존 창을 복원하며, fatal startup은 non-zero exit·사용자 안내·로컬 오류 로그를 남긴다 |
-| DB·migration | 완료 | schema v7, future-schema 무변경 거부, timestamp/version backup, WAL·explicit startup recovery 검증 완료 |
+| DB·migration | 완료 | schema v9, future-schema 무변경 거부, timestamp/version backup, WAL·explicit startup recovery 검증 완료 |
 | Hitomi search | 완료 | production live adapter, query serialization, paging/filter/popular fixture contract 검증 완료; live smoke만 미검증 |
 | detail·Related | 완료 | typed galleryinfo detail·Related 5개와 source-page identity를 저장 fixture 통합 테스트로 검증 |
-| thumbnail | 부분 완료 | 전역 coordinator와 live WebP resolver·우선순위·취소·cache 검증 완료; persistent disk cache는 artifact 단계에서 추가 |
-| download | blocker | queue는 실제 artifact pipeline 없이 `interrupted`에서 정직하게 중단 |
-| resume·reconcile | blocker | 파일 checkpoint·manifest·reconcile 미구현 |
-| file open | blocker | `artifact_open_first` 미구현 |
+| thumbnail | 완료 | 전역 coordinator와 live resolver·viewport 구독·우선순위·취소·memory/negative cache 검증 완료 |
+| download | 완료 | 실제 source page를 `.part`→decode/WebP→SHA-256→atomic rename→manifest 순서로 저장하고 검증 뒤에만 완료 |
+| resume·reconcile | 완료 | verified page checkpoint resume, startup/manual DB·manifest·파일 검사와 quarantine saga 복구 검증 |
+| file open | 완료 | verified first non-quarantined page를 root 내부 canonical path로 확인하고 Windows ShellExecute로 실행 |
 | Auto Find | blocker | Phase 안내 동작만 존재 |
 | gallery duplicate | blocker | Review UI는 있으나 실제 evidence·decision 영속 경로 없음 |
 | internal duplicate | blocker | 실제 artifact 기반 scan·removal plan 미구현 |
-| quarantine | blocker | DB·filesystem move·undo 미구현 |
+| quarantine | 완료 | root 내부 atomic move, pending saga, startup 복구, undo와 무자동삭제 검증 |
 | Classic import | blocker | read-only dry-run·conflict·rollback 미구현 |
 | Windows build·CI | 완료 | 최소 CSP·capability, 공용 `tools/verify.ps1`, Windows CI와 Tauri no-bundle release 검증 완료 |
 
@@ -44,19 +44,29 @@
 ### Milestone B — Hitomi read path
 
 - `source/hitomi`: galleryinfo·gg.js·Nozomi range와 WebP 후보를 명시적 type으로 parsing하며 parser/resolver contract version을 각각 1로 고정했다. 저장 fixture는 필드 누락, AVIF/WebP flag, 404/429/503/timeout과 잘못된 payload 경계를 포함한다.
-- `infrastructure/hitomi_live`: production 검색·상세·Related·썸네일이 같은 `HitomiLiveAdapter`와 pooled HTTP scheduler를 공유한다. 전역/host별 concurrency, 최소 시작 간격, `critical > visible > download > prefetch`, cancellation, bounded backoff+jitter, Retry-After와 cooldown을 적용한다.
+- `infrastructure/hitomi_live`: production 검색·상세·Related·썸네일·페이지 다운로드가 같은 `HitomiLiveAdapter`와 pooled HTTP scheduler를 공유한다. 전역/host별 concurrency, 최소 시작 간격, `critical > visible > prefetch > download`, cancellation, bounded backoff+jitter, Retry-After와 cooldown을 적용한다.
 - 원격 응답은 HTTPS allowlist와 redirect host를 다시 확인하고 size·MIME·signature·decode dimension/allocation을 제한한다. query·cookie·raw URL은 사용자 오류나 기본 로그에 노출하지 않는다.
 - `ThumbnailResolver`와 frontend adapter는 새 worker를 만들지 않고 기존 전역 coordinator를 사용한다. backend의 typed failure와 retryability를 WebView까지 보존하고 접근 가능한 한국어 fallback 상태를 표시한다.
 - production Tauri는 live adapter를 기본 주입하며 브라우저 review mode와 테스트만 fixture를 사용한다. 데이터 schema 변경은 없다.
+
+### Milestone C — download·artifact·recovery
+
+- `application/download_supervisor.rs`: bounded gallery worker가 실제 queue를 자동 claim한다. source/file 작업 밖에서만 짧은 SQLite transaction을 사용하고, cancel token·attempt generation으로 오래된 worker가 새 retry를 변경하지 못하게 한다.
+- `infrastructure/artifact_store.rs`: 절대 download root의 쓰기 가능성과 canonical containment를 확인한다. page는 `.part`에 64KiB 단위로 쓰고 sync·decode·lossless WebP·SHA-256을 검증한 뒤 atomic rename한다. manifest도 temp/sync/round-trip/atomic replace를 거친다.
+- `domain/artifact.rs`: manifest schema 1과 HashProfile 1, immutable source page mapping, writer/conversion policy, page digest·format·quarantine 상태를 typed model로 고정했다.
+- `sqlite_repository.rs` migration 8/9: artifact/page verification metadata, page candidate attempt, quarantine saga를 additive schema로 추가했다. 파일·manifest 검증 전에는 repository가 `completed` 전이를 거부한다.
+- `DownloadSupervisor::reconcile`: pending quarantine move를 먼저 복구하고 completed artifact의 page hash·manifest를 점검한 뒤 interrupted job을 verified checkpoint부터 재개한다. 모호한 원본/격리 경로는 삭제·덮어쓰지 않는다.
+- frontend는 실제 `artifact_open_first`, 수동 무결성 검사, Downloads 격리·undo를 typed client로 호출한다. 브라우저 review mode는 실제 파일이 없음을 안정 오류로 표시한다.
+- 데이터 호환성: DB schema는 9로 상승한다. v8은 artifact 검증 metadata, v9는 crash-safe quarantine 상태를 추가하며 기존 v7 column 의미를 바꾸지 않는다.
 
 ## 4. Contracts and versions
 
 - 앱/package/Tauri version: `0.1.0`
 - Rust MSRV: `1.88.0` (working tree)
-- DB schema version: 7
-- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`
-- manifest schema version: 미구현
-- HashProfile version: 미구현
+- DB schema version: 9
+- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`
+- manifest schema version: 1
+- HashProfile version: 1 (artifact SHA-256 profile; perceptual duplicate profile은 Milestone E에서 별도 추가)
 - Hitomi parser version: 1
 - Hitomi resolver version: 1
 - 주요 command/event: `docs/API_CONTRACT_V2.md`를 기준으로 하며 실제 handler와 함께 갱신한다.
@@ -86,7 +96,8 @@
 - A/B 통합 working tree: `tools/verify.ps1` 성공 — frontend 89/89, Rust lib 77/77(외부 live smoke 1개 opt-in 제외), startup 1/1, typecheck/build/clippy/Tauri release/whitespace 통과. 이후 parser/resolver version 회귀 1개를 추가해 source suite 12/12를 재검증했다.
 - 검증 로그: `.runtime/verification/verify-20260815-165051.log`.
 - 외부 Hitomi live smoke는 일반 fixture CI와 분리했다. 2026-08-15 실행은 sandbox network/승인 사용량 제한 때문에 완료하지 못했으며 production 구현 완료와 live 검증 상태를 분리한다.
-- E2E는 실제 파일을 생성·검증한 결과가 있을 때만 통과로 기록한다.
+- Milestone C 통합 검증: `tools/verify.ps1 -SkipInstall` 성공 — Rust lib 83/83 + startup 1/1, frontend 89/89, typecheck·production build·Clippy `-D warnings`·Tauri release·whitespace 검사를 통과했다. synthetic PNG를 실제 WebP 파일·SHA-256·manifest로 만들고, 2-page 중단/재시작에서 page 1을 재요청하지 않는 resume, quarantine 이동/undo와 DB commit 직전 fault recovery를 검증했다. 로그는 `.runtime/verification/verify-20260815-180348.log`에 있다.
+- 실제 Windows ShellExecute는 자동 테스트에서 외부 뷰어를 띄우지 않았으며, canonical first-page 선택까지 자동 검증했다. 최종 수동 앱 검토에서 실제 open을 확인한다.
 
 ## 7. Known limitations and blockers
 
@@ -117,5 +128,6 @@
 - 최종 branch: `agent/phase-3-foundation`
 - 기준 원격: `origin` → `assesse/Atsumi-Next`
 - `6a2c96a` — `chore: harden startup database safety and windows ci`
-- 이후 milestone commit, push 결과와 PR 상태는 완료 시 SHA와 함께 누적한다.
+- `af9878a` — `feat: connect live hitomi search metadata and thumbnails`
+- Milestone C 이후 commit, push 결과와 PR 상태는 완료 시 SHA와 함께 누적한다.
 - PR merge, `main` 직접 push, force push, release/tag 생성은 수행하지 않는다.

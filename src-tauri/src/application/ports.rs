@@ -1,6 +1,6 @@
 use crate::domain::{
-    ArtifactBundle, DownloadEntry, DownloadEntryId, DownloadJobProjection, DownloadListRequest,
-    DownloadPage, FixtureDownloadJobDescriptor, FixtureDownloadJobStep, GalleryDetail, GalleryId,
+    ArtifactBundle, DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
+    DownloadListRequest, DownloadPage, FixtureDownloadJobStep, GalleryDetail, GalleryId,
     GalleryPage, JobRef, JobState, SearchRequest, SearchSubmission, SettingsSnapshot,
     WindowPlacementSnapshot,
 };
@@ -10,7 +10,7 @@ use super::RepositoryError;
 #[derive(Debug, Clone, PartialEq)]
 pub struct DownloadQueueRecord {
     pub entries: Vec<DownloadEntry>,
-    pub fixture_jobs: Vec<FixtureDownloadJobDescriptor>,
+    pub jobs: Vec<DownloadJobDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

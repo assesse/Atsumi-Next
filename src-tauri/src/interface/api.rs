@@ -158,6 +158,25 @@ impl From<ApplicationError> for ApiError {
                     ("operation".into(), json!(operation)),
                 ])),
             },
+            ApplicationError::DownloadPipeline(error) => Self {
+                code: error.code.as_str().into(),
+                message: error.message,
+                retryable: error.retryable,
+                action: Some(if error.retryable {
+                    ApiAction::Retry
+                } else if matches!(
+                    error.code,
+                    crate::application::DownloadPipelineErrorCode::ArtifactMissing
+                        | crate::application::DownloadPipelineErrorCode::HashMismatch
+                        | crate::application::DownloadPipelineErrorCode::ManifestInvalid
+                        | crate::application::DownloadPipelineErrorCode::QuarantineConflict
+                ) {
+                    ApiAction::Review
+                } else {
+                    ApiAction::None
+                }),
+                details: None,
+            },
             ApplicationError::Repository(error) => error.into(),
         }
     }

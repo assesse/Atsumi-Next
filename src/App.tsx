@@ -61,6 +61,7 @@ export default function App() {
     () => new Set(["female:glasses", "female:kimono"]),
   );
   const [toast, setToast] = useState<Toast>(null);
+  const [reconcilingArtifacts, setReconcilingArtifacts] = useState(false);
   const [settingsPreview, setSettingsPreview] = useState<{ maxColumns: number; previewWidth: number } | null>(null);
   const [exitActiveDownloads, setExitActiveDownloads] = useState<number | null>(null);
   const [exitStatusError, setExitStatusError] = useState(false);
@@ -345,13 +346,21 @@ export default function App() {
   const openStatusDetail = useCallback((_: GalleryId) => openActivity(), [openActivity]);
 
   const openArtifact = useCallback(
-    (id: GalleryId) => {
+    async (id: GalleryId) => {
       const gallery = galleriesRef.current.get(id);
       if (!gallery) return;
-      if (gallery.download?.state === "completed") {
-        showToast(`${gallery.title} 파일 실행은 artifact adapter 연결 단계에서 수행합니다.`);
-      } else {
+      if (gallery.download?.state !== "completed") {
         showToast(`${gallery.title}은 아직 실행할 수 있는 완료 파일이 없습니다.`);
+        return;
+      }
+      try {
+        const result = await backend.artifactOpenFirst(gallery.download.entryId);
+        if (!result.ok) {
+          showToast(result.error.message);
+          setDownloadsRefresh((value) => value + 1);
+        }
+      } catch {
+        showToast("완료 파일을 Windows 기본 뷰어로 열지 못했습니다.");
       }
     },
     [showToast],
@@ -470,6 +479,66 @@ export default function App() {
     }
   }, [beginDownloadMutation, finishDownloadMutation, showToast]);
 
+  const quarantineGalleries = useCallback(async (ids: GalleryId[]) => {
+    const downloads = ids
+      .map((id) => galleriesRef.current.get(id)?.download)
+      .filter((download): download is NonNullable<Gallery["download"]> => download !== undefined);
+    const restoring = downloads.length > 0 && downloads.every((download) => download.state === "quarantined");
+    const eligible = downloads.filter((download) =>
+      restoring ? download.state === "quarantined" : download.state === "completed",
+    );
+    if (!eligible.length || eligible.length !== downloads.length) {
+      showToast(restoring
+        ? "선택한 모든 항목이 격리 상태일 때만 함께 복원할 수 있습니다."
+        : "검증이 완료된 다운로드만 격리할 수 있습니다.");
+      return;
+    }
+    const confirmed = window.confirm(restoring
+      ? `${eligible.length}개 항목을 원래 위치로 복원할까요?`
+      : `${eligible.length}개 항목을 복구 가능한 격리 폴더로 옮길까요? 자동으로 영구 삭제되지 않습니다.`);
+    if (!confirmed) return;
+    try {
+      const result = restoring
+        ? await backend.downloadQuarantineUndo(eligible.map((download) => download.entryId))
+        : await backend.downloadQuarantine(
+            eligible.map((download) => download.entryId),
+            "사용자가 Downloads 화면에서 격리를 확인함",
+          );
+      if (!result.ok) {
+        showToast(result.error.message);
+        return;
+      }
+      setGalleries((current) => mergeDownloadEntries(current, result.data));
+      dispatch({ type: "selection.clear" });
+      showToast(restoring ? "격리한 파일을 원래 위치로 복원했습니다." : "파일을 복구 가능한 격리 폴더로 옮겼습니다.");
+    } catch {
+      showToast(restoring ? "격리 파일 복원 요청에 실패했습니다." : "파일 격리 요청에 실패했습니다.");
+    }
+  }, [showToast]);
+
+  const reconcileArtifacts = useCallback(async () => {
+    if (reconcilingArtifacts) return;
+    setReconcilingArtifacts(true);
+    try {
+      const result = await backend.appReconcile();
+      if (!result.ok) {
+        showToast(result.error.message);
+        return;
+      }
+      setDownloadsRefresh((value) => value + 1);
+      const summary = result.data.issues.length
+        ? `${result.data.inspectedArtifacts}개 검사 · ${result.data.issues.length}개 문제를 안전 상태로 표시했습니다.`
+        : `${result.data.verifiedArtifacts}개 artifact의 DB·manifest·파일 무결성을 확인했습니다.`;
+      showToast(result.data.resumedJobs
+        ? `${summary} ${result.data.resumedJobs}개 작업을 재개했습니다.`
+        : summary);
+    } catch {
+      showToast("artifact 무결성 검사를 실행하지 못했습니다.");
+    } finally {
+      setReconcilingArtifacts(false);
+    }
+  }, [reconcilingArtifacts, showToast]);
+
   const loadExplorePage = useCallback(async (page: number) => {
     if (!query.queryId || page < 1 || query.phase === "loading-page") return;
     const queryId = query.queryId;
@@ -529,16 +598,13 @@ export default function App() {
       }
       if (event.key === "Delete" && selectedIds.length) {
         event.preventDefault();
-        showToast(
-          ui.view === "downloads"
-            ? `${selectedIds.length}개 항목의 격리 계획을 엽니다. 실제 파일은 변경하지 않았습니다.`
-            : `${selectedIds.length}개 항목의 제외 확인을 엽니다.`,
-        );
+        if (ui.view === "downloads") void quarantineGalleries(selectedIds);
+        else showToast(`${selectedIds.length}개 항목의 제외 확인을 엽니다.`);
       }
     };
     window.addEventListener("keydown", keyDown);
     return () => window.removeEventListener("keydown", keyDown);
-  }, [closeActivity, galleries, openArtifact, openExitConfirm, queueGalleries, selectedIds, showToast, ui.detail.activeId, ui.overlays, ui.search, ui.view]);
+  }, [closeActivity, galleries, openArtifact, openExitConfirm, quarantineGalleries, queueGalleries, selectedIds, showToast, ui.detail.activeId, ui.overlays, ui.search, ui.view]);
 
   const reviewParent = ui.overlays.reviewGalleryId === null ? undefined : galleries.get(ui.overlays.reviewGalleryId);
   const reviewCandidate = reviewParent
@@ -604,6 +670,7 @@ export default function App() {
               ) : ui.view === "downloads" ? (
                 <>
                   <GroupingControl value={ui.grouping.downloads} onChange={(grouping) => dispatch({ type: "grouping.set", view: "downloads", grouping })} />
+                  <button type="button" className="text-button" disabled={reconcilingArtifacts} onClick={() => void reconcileArtifacts()}><FluentIcon glyph="\uE9D9" /> {reconcilingArtifacts ? "무결성 검사 중" : "무결성 검사"}</button>
                   <button type="button" className="text-button" onClick={() => showToast("내부 중복 검사는 Phase 6 계약 뒤에 연결합니다.")}><FluentIcon glyph="\uE9D9" /> 내부 중복 검사</button>
                   <button type="button" className="text-button primary" onClick={() => void queueGalleries(visibleIds)}><FluentIcon glyph="\uE896" /> 전체 다운로드</button>
                 </>
@@ -631,10 +698,11 @@ export default function App() {
           <SelectionToolbar
             count={ui.selection.ids.size}
             downloadsView={ui.view === "downloads"}
+            restoreMode={selectedIds.length > 0 && selectedIds.every((id) => galleries.get(id)?.download?.state === "quarantined")}
             onAll={() => dispatch({ type: "selection.all", ids: visibleIds })}
             onClear={() => dispatch({ type: "selection.clear" })}
             onPrimary={() => void queueGalleries(selectedIds)}
-            onDelete={() => showToast(ui.view === "downloads" ? "격리 계획만 준비하며 실제 파일은 변경하지 않습니다." : "제외 확인 화면을 준비합니다.")}
+            onDelete={() => ui.view === "downloads" ? void quarantineGalleries(selectedIds) : showToast("제외 확인 화면을 준비합니다.")}
           />
           <section ref={galleryViewport} className="gallery-viewport">
             {settingsLoading || (ui.view === "explore" && query.phase === "submitting") || (ui.view === "downloads" && downloadsLoading) ? (

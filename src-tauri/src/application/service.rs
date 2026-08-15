@@ -1,10 +1,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::domain::{
-    DownloadEntry, DownloadEntryId, DownloadJobProjection, DownloadListRequest, DownloadPage,
-    FixtureDownloadJobDescriptor, FixtureDownloadJobStep, GalleryDetail, GalleryId, GalleryPage,
-    JobRef, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot, ValidationError,
-    WindowPlacement, WindowPlacementSnapshot,
+    DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
+    DownloadListRequest, DownloadPage, FixtureDownloadJobStep, GalleryDetail, GalleryId,
+    GalleryPage, JobRef, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot,
+    ValidationError, WindowPlacement, WindowPlacementSnapshot,
 };
 
 use super::{
@@ -15,7 +15,7 @@ use super::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct DownloadQueueLaunch {
     pub entries: Vec<DownloadEntry>,
-    pub fixture_jobs: Vec<FixtureDownloadJobDescriptor>,
+    pub jobs: Vec<DownloadJobDescriptor>,
 }
 
 pub struct ApplicationService {
@@ -156,7 +156,7 @@ impl ApplicationService {
         {
             DownloadQueueAddOutcome::Added(record) => Ok(DownloadQueueLaunch {
                 entries: record.entries,
-                fixture_jobs: record.fixture_jobs,
+                jobs: record.jobs,
             }),
             DownloadQueueAddOutcome::IdempotencyConflict => {
                 Err(ApplicationError::IdempotencyConflict {

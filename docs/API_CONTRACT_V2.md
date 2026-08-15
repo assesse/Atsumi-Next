@@ -1,6 +1,6 @@
 # API Contract V2
 
-Phase 3A에서 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다. 아직 구현되지 않은 후속 command는 표에서 별도로 구분한다.
+Phase 3 완료 시점에 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다. 아직 구현되지 않은 후속 command는 표에서 별도로 구분한다.
 
 ## 공통 규칙
 
@@ -40,15 +40,15 @@ type ApiError = {
 | `download_entries_list` | `DownloadListRequest` | `DownloadPage` | 예 |
 | `download_retry` | `{ entryIds }` | `JobRef[]` | 현재 active job 재사용 |
 | `download_cancel` | `{ entryIds }` | `DownloadEntry[]` | 예 |
+| `download_quarantine` | `{ entryIds, reason }` | `DownloadEntry[]` | active quarantine record로 중복 방지 |
+| `download_quarantine_undo` | `{ entryIds }` | `DownloadEntry[]` | active quarantine record 기반 |
 | `thumbnail_request` | `ThumbnailRequest` | `ThumbnailRequestToken` | 같은 key의 in-flight 작업 병합 |
 | `thumbnail_cancel` | `{ requestId }` | `boolean` | 예 |
 | `thumbnail_invalidate` | `{ key }` | cache removal flags | 예 |
 | `thumbnail_reprioritize` | `{ requestId, priority }` | `boolean` | 우선순위 승격만 적용 |
 | `thumbnail_stats` | 없음 | `ThumbnailWorkerStats` | 예 |
-| `download_remove` | `{ entryIds, mode }` | `RemovalPlan` 또는 `JobRef` | plan 승인 기반 |
-| `artifact_open_first` | `{ entryId }` | `OpenResult` | 예 |
-| `activity_list` | filter | `ActivityItem[]` | 예 |
-| `app_reconcile` | `{ scope }` | `JobRef` | active job 재사용 |
+| `artifact_open_first` | `{ entryId }` | `null` | 검증 snapshot 기반 |
+| `app_reconcile` | 없음 | `ReconcileReport` | pending saga와 interrupted job 재사용 |
 
 ## Event
 
@@ -57,7 +57,6 @@ type ApiError = {
 | `job:changed` | job state, progress와 revision |
 | `download:changed` | download entry projection의 부분 변경 |
 | `thumbnail:ready` | requestId, gallery/page key, delivery 또는 typed failure |
-| `activity.changed` | 전역 작업 요약 변경 |
 | `settings:changed` | 다른 window에서 바뀐 설정 snapshot |
 
 이벤트가 유실돼도 `list/get` command로 현재 상태를 다시 구성할 수 있어야 한다.
@@ -116,7 +115,7 @@ type DownloadState =
 - 같은 `requestId`와 같은 정규화 ID 집합은 최초 queue 응답 snapshot을 그대로 재생하며 새 job을 만들지 않는다. 최신 상태는 `download_entries_list`로 재구성한다.
 - 같은 `requestId`를 다른 ID 집합에 재사용하면 `IDEMPOTENCY_CONFLICT`를 반환한다.
 - 새 `requestId`라도 같은 gallery가 `queued`, `resolving_metadata`, `downloading`, `hashing`, `verifying`, `retry_wait` 중 하나이면 기존 active entry를 재사용한다.
-- 앱 시작 시 위 active 상태로 남은 job과 entry는 한 transaction에서 `interrupted`로 전환한다. 자동 resume은 하지 않으며 후속 `download_retry`/cancel 정책으로 처리한다.
+- single-instance를 획득한 앱 시작 시 위 active 상태로 남은 job과 entry는 한 transaction에서 `interrupted`로 전환한다. download root가 유효하면 DB·manifest·파일 reconcile 뒤 같은 entry/job의 새 attempt로 자동 resume하며, verified page checkpoint는 다시 받지 않는다.
 - `download_entries_list`의 `query`는 UTF-8 기준 최대 500 bytes이며 현재 `entryId`와 `galleryId`에만 적용한다. 결과는 `galleryId`, `entryId` 오름차순으로 고정한다.
 
 ### Retry와 cancel
@@ -143,9 +142,16 @@ type ThumbnailRequest = {
 - 동일 key의 동시 요청은 프로세스 전역에서 하나로 합친다. 마지막 구독자가 사라지면 queued/running resolver에 cancellation을 전달한다.
 - 완료는 `thumbnail:ready` event로 전달한다. 메모리 cache hit에서는 event가 command 응답보다 먼저 올 수 있으므로 frontend transport는 requestId별 미매칭 event를 잠시 보관한다.
 - WebView decode 실패는 `thumbnail_invalidate`로 해당 key의 success/negative cache를 비운 뒤 다시 해석할 수 있다.
-- frontend는 원본 URL, retry, cache eviction을 직접 결정하지 않는다. Tauri는 실제 HTTP resolver를, 브라우저 검토 모드는 결정론적 fixture resolver를 같은 port 뒤에서 사용한다. disk cache는 artifact pipeline 단계에서 추가한다.
-- production resolver는 검색과 같은 pooled transport를 공유한다. HTTP dispatch는 `critical > visible > download > prefetch`, 전역·host별 동시성, 최소 시작 간격, cancellation, bounded retry, `Retry-After`, 429/503 cooldown을 적용한다.
+- frontend는 원본 URL, retry, cache eviction을 직접 결정하지 않는다. Tauri는 실제 HTTP resolver를, 브라우저 검토 모드는 결정론적 fixture resolver를 같은 port 뒤에서 사용한다. thumbnail cache는 재생성 가능한 bounded memory cache이며 영속 파일은 download artifact 경계가 소유한다.
+- production resolver는 검색·download와 같은 pooled transport를 공유한다. HTTP dispatch는 `critical > visible > prefetch > download`, 전역·host별 동시성, 최소 시작 간격, cancellation, bounded retry, `Retry-After`, 429/503 cooldown을 적용한다.
 - thumbnail failure code는 `cancelled`, `notFound`, `candidatesExhausted`, `responseInvalid`, `decodeFailed`, `temporarilyUnavailable`, `unauthorized`, `invalidData`, `resolver`, `coordinatorClosed` 중 하나다. frontend는 backend가 전달한 `retryable`을 보존하고 문자열 prefix로 retry를 추측하지 않는다.
+
+## Artifact·reconcile·quarantine 계약
+
+- `completed`는 실제 WebP page 전부의 decode·byte length·SHA-256, source page mapping, schema 1 manifest와 DB snapshot이 일치한 뒤에만 기록한다.
+- `app_reconcile`은 `{ inspectedArtifacts, verifiedArtifacts, resumedJobs, issues[] }`를 반환한다. 각 issue는 `entryId`, stable `code`, 사용자 문구와 `recoverable`을 가진다.
+- quarantine은 `pending_quarantine -> quarantined`, undo는 `pending_restore -> restored` saga다. filesystem atomic move와 SQLite commit 사이에 종료되면 다음 reconcile이 원본/격리 경로 존재를 비교해 마무리한다.
+- 둘 다 존재하거나 둘 다 없으면 자동 삭제·덮어쓰기를 하지 않고 `QUARANTINE_CONFLICT`를 반환한다. 자동 purge command는 없다.
 
 ## 후속 계약
 
