@@ -45,8 +45,10 @@ import {
 } from "./state/duplicateProjection";
 import { mergeDownloadEntries, mergeGalleryDetail, mergeGalleryPage } from "./state/galleryProjection";
 import { galleryQueryReducer, initialGalleryQueryState } from "./state/galleryQuery";
+import { ExplorePageSession } from "./state/explorePageSession";
 import { visibleGalleries } from "./state/selectors";
 import { initialUiState, uiReducer } from "./state/uiState";
+import { useThumbnailClient } from "./thumbnail";
 
 const viewConfig: Record<ViewId, { eyebrow: string; title: string }> = {
   explore: { eyebrow: "EXPLORE", title: "갤러리 탐색" },
@@ -133,6 +135,7 @@ const internalStatusLabel = (loading: boolean, error: string | null, run?: Inter
 };
 
 export default function App() {
+  const thumbnailClient = useThumbnailClient();
   const [ui, dispatch] = useReducer(uiReducer, initialUiState);
   const [query, dispatchQuery] = useReducer(galleryQueryReducer, initialGalleryQueryState);
   const [galleries, setGalleries] = useState<ReadonlyMap<GalleryId, Gallery>>(() => new Map());
@@ -203,12 +206,38 @@ export default function App() {
   const visibleIdsRef = useRef<GalleryId[]>([]);
   const activityOpener = useRef<HTMLElement | null>(null);
   const galleryViewport = useRef<HTMLElement>(null);
+  const explorePageSession = useRef<ExplorePageSession | null>(null);
+  const exploreNavigationToken = useRef(0);
+  const exploreRestoreFrame = useRef<number | null>(null);
+  if (!explorePageSession.current) {
+    explorePageSession.current = new ExplorePageSession({
+      fetchPage: (queryId, page) => backend.searchPageGet(queryId, page),
+      warmPage: (page) => {
+        const releases = page.items.map((item, index) => thumbnailClient.subscribe({
+          key: {
+            kind: "gallery-cover" as const,
+            galleryId: item.id,
+            ...(item.thumbnailKey?.trim() ? { sourceKey: item.thumbnailKey.trim() } : {}),
+            fallback: { kind: "fixture-sheet-cell" as const, index: index % 6 },
+          },
+          consumer: "explore",
+          priority: "prefetch",
+        }, () => undefined));
+        return () => releases.forEach((release) => release());
+      },
+    });
+  }
   const { settings, loading: settingsLoading, error: settingsError, save: saveSettings } = useSettings();
   const maximumColumns = settingsPreview?.maxColumns ?? settings.maxColumns;
   const previewWidth = settingsPreview?.previewWidth ?? settings.previewWidth;
   const [galleryColumns, setGalleryColumns] = useState(1);
 
   useWindowPlacement();
+
+  useEffect(() => () => {
+    explorePageSession.current?.clear();
+    if (exploreRestoreFrame.current !== null) window.cancelAnimationFrame(exploreRestoreFrame.current);
+  }, []);
 
   const showToast = useCallback((message: string) => {
     window.clearTimeout(toastTimer.current);
@@ -466,6 +495,11 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     const token = ++searchToken.current;
+    exploreNavigationToken.current += 1;
+    if (exploreRestoreFrame.current !== null) {
+      window.cancelAnimationFrame(exploreRestoreFrame.current);
+      exploreRestoreFrame.current = null;
+    }
     const request: SearchRequest = exploreSearchOverride ?? {
       text: ui.search.explore.committed,
       includeTags: [],
@@ -474,6 +508,7 @@ export default function App() {
       sort: ui.exploreSort,
       pageSize: 50,
     };
+    explorePageSession.current?.clear();
     dispatchQuery({ type: "submit.started", token });
     void backend.searchSubmit(request).then((result) => {
       if (cancelled || token !== searchToken.current) return;
@@ -482,8 +517,11 @@ export default function App() {
         return;
       }
       dispatchQuery({ type: "submit.succeeded", token, submission: result.data });
+      explorePageSession.current?.start(result.data.queryId, result.data.firstPage);
       setExploreIds(result.data.firstPage.items.map((item) => item.id));
       setGalleries((current) => mergeGalleryPage(current, result.data.firstPage).galleries);
+      if (galleryViewport.current) galleryViewport.current.scrollTop = 0;
+      explorePageSession.current?.prefetchAdjacent();
       if (request.text.trim() || request.includeTags.length || request.excludeTags.length) {
         void hydrateSearchHistory();
       }
@@ -1263,28 +1301,38 @@ export default function App() {
   }, [duplicateRun?.state, hydrateDuplicateSnapshot, showToast]);
 
   const loadExplorePage = useCallback(async (page: number) => {
-    if (!query.queryId || page < 1 || query.phase === "loading-page") return;
+    if (!query.queryId || page < 1) return;
     const queryId = query.queryId;
+    const navigationToken = ++exploreNavigationToken.current;
+    if (exploreRestoreFrame.current !== null) {
+      window.cancelAnimationFrame(exploreRestoreFrame.current);
+      exploreRestoreFrame.current = null;
+    }
+    if (query.page && galleryViewport.current) {
+      explorePageSession.current?.recordScroll(query.page.page, galleryViewport.current.scrollTop);
+    }
     dispatchQuery({ type: "page.started", queryId, page });
-    try {
-      const result = await backend.searchPageGet(queryId, page);
-      if (!result.ok) {
-        dispatchQuery({ type: "page.failed", queryId, page, error: result.error });
-        return;
-      }
-      dispatchQuery({ type: "page.succeeded", queryId, page: result.data });
-      setExploreIds(result.data.items.map((item) => item.id));
-      setGalleries((current) => mergeGalleryPage(current, result.data).galleries);
-      galleryViewport.current?.scrollTo({ top: 0, behavior: "smooth" });
-    } catch {
+    const result = await explorePageSession.current?.open(page);
+    if (!result || result.status === "stale" || navigationToken !== exploreNavigationToken.current) return;
+    if (result.status === "failed") {
       dispatchQuery({
         type: "page.failed",
         queryId,
         page,
-        error: { code: "BACKEND_UNAVAILABLE", message: "검색 페이지를 불러오지 못했습니다.", retryable: true, action: "retry" },
+        error: result.error,
       });
+      return;
     }
-  }, [query.phase, query.queryId]);
+    dispatchQuery({ type: "page.succeeded", queryId, page: result.page });
+    setExploreIds(result.page.items.map((item) => item.id));
+    setGalleries((current) => mergeGalleryPage(current, result.page).galleries);
+    exploreRestoreFrame.current = window.requestAnimationFrame(() => {
+      if (navigationToken === exploreNavigationToken.current && galleryViewport.current) {
+        galleryViewport.current.scrollTop = result.scrollTop;
+      }
+      exploreRestoreFrame.current = null;
+    });
+  }, [query.page, query.queryId]);
 
   const selectedIds = useMemo(() => [...ui.selection.ids], [ui.selection.ids]);
   const selectedCompletedEntryId = useMemo(() => {
@@ -1292,6 +1340,10 @@ export default function App() {
     const download = displayGalleries.get(selectedIds[0]!)?.download;
     return download?.state === "completed" ? download.entryId : null;
   }, [displayGalleries, selectedIds]);
+  const selectedHasInternalResult = useMemo(() => (
+    selectedCompletedEntryId !== null
+    && internalSnapshot.groups.some((group) => group.entryId === selectedCompletedEntryId)
+  ), [internalSnapshot.groups, selectedCompletedEntryId]);
 
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
@@ -1489,13 +1541,21 @@ export default function App() {
                 </>
               ) : ui.view === "downloads" ? (
                 <>
+                  <p className="sr-only" id="duplicate-scan-explanation">작품 간 검사는 서로 다른 앨범을 비교하고, 내부 페이지 검사는 각 앨범 안에서 반복되거나 유사한 페이지를 찾습니다.</p>
                   <GroupingControl value={ui.grouping.downloads} onChange={(grouping) => dispatch({ type: "grouping.set", view: "downloads", grouping })} />
                   <button type="button" className="text-button" disabled={reconcilingArtifacts} onClick={() => void reconcileArtifacts()}><FluentIcon glyph="\uE9D9" /> {reconcilingArtifacts ? "무결성 검사 중" : "무결성 검사"}</button>
-                  <button type="button" className="text-button" disabled={duplicateLoading || duplicatePending || duplicateRun?.state === "running"} onClick={() => void startDuplicateScan()}><FluentIcon glyph="\uE9D9" /> {duplicateRun?.state === "failed" ? "작품 중복 다시 검사" : "작품 중복 검사"}</button>
+                  <button type="button" className="text-button" aria-describedby="duplicate-scan-explanation" title="완료된 모든 앨범을 서로 비교해 작품 단위 중복 후보를 찾습니다." disabled={duplicateLoading || duplicatePending || duplicateRun?.state === "running"} onClick={() => void startDuplicateScan()}><FluentIcon glyph="\uE9D9" /> 전체 작품 간 중복 검사</button>
                   {duplicateRun?.state === "running" ? <button type="button" className="text-button danger-button" disabled={duplicatePending} onClick={() => void cancelDuplicateScan()}><FluentIcon glyph="\uE711" /> 중복 검사 취소</button> : null}
-                  <button type="button" className="text-button" disabled={internalLoading || internalPending || internalRun?.state === "running"} onClick={() => void startInternalScan()}><FluentIcon glyph="\uE9D9" /> {internalRun?.state === "failed" ? "내부 중복 다시 검사" : "내부 중복 검사"}</button>
+                  <button type="button" className="text-button" aria-describedby="duplicate-scan-explanation" title="완료된 모든 앨범 각각의 내부 페이지를 비교해 반복·유사 페이지를 찾습니다." disabled={internalLoading || internalPending || internalRun?.state === "running"} onClick={() => void startInternalScan()}><FluentIcon glyph="\uE9D9" /> 전체 앨범 내부 페이지 검사</button>
                   {internalRun?.state === "running" ? <button type="button" className="text-button danger-button" disabled={internalPending} onClick={() => void cancelInternalScan()}><FluentIcon glyph="\uE711" /> 내부 검사 취소</button> : null}
-                  <button type="button" className="text-button" disabled={!selectedCompletedEntryId || internalPending} title={selectedCompletedEntryId ? "선택한 완료 앨범의 내부 중복 페이지를 검토합니다." : "완료된 앨범 하나를 선택하세요."} onClick={() => selectedCompletedEntryId && openInternalReview(selectedCompletedEntryId)}><FluentIcon glyph="\uE890" /> 선택 앨범 내부 검토</button>
+                  <button type="button" className="text-button" disabled={!selectedCompletedEntryId || internalPending} title={!selectedCompletedEntryId ? "완료된 앨범 하나를 선택하세요." : selectedHasInternalResult ? "저장된 내부 페이지 검사 결과를 엽니다." : "저장된 내부 결과가 없습니다. 먼저 전체 앨범 내부 페이지 검사를 실행하세요."} onClick={() => {
+                    if (!selectedCompletedEntryId) return;
+                    if (!selectedHasInternalResult) {
+                      showToast("저장된 내부 결과가 없습니다. 먼저 ‘전체 앨범 내부 페이지 검사’를 실행하세요.");
+                      return;
+                    }
+                    openInternalReview(selectedCompletedEntryId);
+                  }}><FluentIcon glyph="\uE890" /> 선택 앨범 내부 결과 열기</button>
                   <button type="button" className="text-button primary" onClick={() => void queueGalleries(visibleIds)}><FluentIcon glyph="\uE896" /> 전체 다운로드</button>
                 </>
               ) : null}

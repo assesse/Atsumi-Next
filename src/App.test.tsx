@@ -1,8 +1,9 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { backend } from "./api/backend";
+import type { GalleryPage } from "./api/contracts";
 import { galleryId } from "./core/types";
 import { browserFixtureThumbnailAdapter, ThumbnailClient, ThumbnailProvider } from "./thumbnail";
 
@@ -10,6 +11,25 @@ const testThumbnailClient = new ThumbnailClient(browserFixtureThumbnailAdapter);
 const TestApp = () => <ThumbnailProvider client={testThumbnailClient}><App /></ThumbnailProvider>;
 
 const settle = (delay = 20) => new Promise((resolve) => window.setTimeout(resolve, delay));
+
+const explorePage = (page: number, totalPages = 20): GalleryPage => ({
+  page,
+  totalPages,
+  items: [{
+    id: galleryId(9_000_000 + page),
+    title: `Explore page ${page}`,
+    artist: "paging fixture",
+    pages: 1,
+    language: "korean",
+    tags: [],
+    series: [],
+    characters: [],
+    publishedRank: 20260820,
+    popularity: 0,
+    thumbnailWidth: 512,
+    thumbnailHeight: 768,
+  }],
+});
 
 const clickButtonContaining = (container: HTMLElement, label: string): HTMLButtonElement => {
   const button = [...container.querySelectorAll<HTMLButtonElement>("button")]
@@ -20,7 +40,22 @@ const clickButtonContaining = (container: HTMLElement, label: string): HTMLButto
 };
 
 describe("App Phase 3A backend flow", () => {
-  afterEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    class TestResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => window.setTimeout(() => callback(Date.now()), 0));
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => window.clearTimeout(id));
+  });
+
+  afterEach(() => {
+    testThumbnailClient.dispose();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
 
   it("hydrates Recent and Downloads and queues through the formal backend client", async () => {
     const seeded = await backend.downloadQueueAdd([galleryId(4051038)], "app-test-seed-download");
@@ -60,6 +95,61 @@ describe("App Phase 3A backend flow", () => {
       [galleryId(4051027)],
       expect.stringMatching(/^frontend-queue-\d+-\d+$/),
     );
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("projects cached Explore pages, warms adjacent pages once, and restores each page scroll position", async () => {
+    const searchSubmit = vi.spyOn(backend, "searchSubmit").mockResolvedValue({
+      ok: true,
+      data: { queryId: "paging-query", firstPage: explorePage(1) },
+    });
+    const searchPageGet = vi.spyOn(backend, "searchPageGet").mockImplementation(async (_queryId, page) => ({
+      ok: true,
+      data: explorePage(page),
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<TestApp />);
+      await settle();
+    });
+    expect(searchSubmit).toHaveBeenCalledOnce();
+    expect(searchPageGet.mock.calls.filter(([, page]) => page === 2)).toHaveLength(1);
+
+    const viewport = container.querySelector<HTMLElement>(".gallery-viewport");
+    if (!viewport) throw new Error("Explore viewport was not rendered");
+    await act(async () => {
+      clickButtonContaining(container, "다음");
+      await settle();
+    });
+    await act(async () => {
+      clickButtonContaining(container, "다음");
+      await settle();
+    });
+    expect(container.textContent).toContain("Explore page 3");
+    expect(searchPageGet.mock.calls.filter(([, page]) => page === 3)).toHaveLength(1);
+    expect(searchPageGet.mock.calls.filter(([, page]) => page === 4)).toHaveLength(1);
+    expect(searchPageGet.mock.calls.filter(([, page]) => page === 2)).toHaveLength(1);
+
+    viewport.scrollTop = 417;
+    const fourthCallsBeforeForeground = searchPageGet.mock.calls.filter(([, page]) => page === 4).length;
+    await act(async () => {
+      clickButtonContaining(container, "다음");
+      await settle();
+    });
+    expect(searchPageGet.mock.calls.filter(([, page]) => page === 4)).toHaveLength(fourthCallsBeforeForeground);
+    viewport.scrollTop = 88;
+    const thirdCallsBeforeReturn = searchPageGet.mock.calls.filter(([, page]) => page === 3).length;
+    await act(async () => {
+      clickButtonContaining(container, "이전");
+      await settle();
+    });
+    expect(searchPageGet.mock.calls.filter(([, page]) => page === 3)).toHaveLength(thirdCallsBeforeReturn);
+    expect(viewport.scrollTop).toBe(417);
 
     await act(async () => root.unmount());
     container.remove();
@@ -113,7 +203,7 @@ describe("App Phase 3A backend flow", () => {
     container.remove();
   });
 
-  it("persists series and character favorites across cards, detail, related items, and remount", async () => {
+  it("keeps series and character favorites in detail and related metadata while cards stay compact", async () => {
     const favoriteSet = vi.spyOn(backend, "favoriteSet");
     const container = document.createElement("div");
     document.body.append(container);
@@ -124,26 +214,29 @@ describe("App Phase 3A backend flow", () => {
       await settle();
     });
     const archiveCard = container.querySelector<HTMLElement>('[data-gallery-id="4051038"]');
-    const series = archiveCard?.querySelector<HTMLButtonElement>('[title^="시리즈 · rain archives"]');
-    const character = archiveCard?.querySelector<HTMLButtonElement>('[title^="캐릭터 · mira lane"]');
-    if (!archiveCard || !series || !character) throw new Error("Series/character fixture chips were not rendered");
-
-    await act(async () => {
-      series.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
-      character.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
-      await settle();
-    });
-    expect(favoriteSet).toHaveBeenCalledWith({ namespace: "series", value: "rain archives" }, true);
-    expect(favoriteSet).toHaveBeenCalledWith({ namespace: "character", value: "mira lane" }, true);
-    expect([...container.querySelectorAll<HTMLButtonElement>('[title^="시리즈 · rain archives"]')]
-      .every((chip) => chip.classList.contains("favorite"))).toBe(true);
-    expect([...container.querySelectorAll<HTMLButtonElement>('[title^="캐릭터 · mira lane"]')]
-      .every((chip) => chip.classList.contains("favorite"))).toBe(true);
+    if (!archiveCard) throw new Error("Archive fixture card was not rendered");
+    expect(archiveCard.querySelector('[title^="시리즈 · rain archives"]')).toBeNull();
+    expect(archiveCard.querySelector('[title^="캐릭터 · mira lane"]')).toBeNull();
 
     await act(async () => {
       archiveCard.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
       await settle();
     });
+    const detailSeries = container.querySelector<HTMLButtonElement>('.detail-workspace [title^="rain archives"]');
+    const detailCharacter = container.querySelector<HTMLButtonElement>('.detail-workspace [title^="mira lane"]');
+    if (!detailSeries || !detailCharacter) throw new Error("Detail series/character chips were not rendered");
+    await act(async () => {
+      detailSeries.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+      detailCharacter.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+      await settle();
+    });
+    expect(favoriteSet).toHaveBeenCalledWith({ namespace: "series", value: "rain archives" }, true);
+    expect(favoriteSet).toHaveBeenCalledWith({ namespace: "character", value: "mira lane" }, true);
+    expect([...container.querySelectorAll<HTMLButtonElement>('.detail-workspace [title^="rain archives"]')]
+      .every((chip) => chip.classList.contains("favorite"))).toBe(true);
+    expect([...container.querySelectorAll<HTMLButtonElement>('.detail-workspace [title^="mira lane"]')]
+      .every((chip) => chip.classList.contains("favorite"))).toBe(true);
+
     const matchingDetailChips = [...container.querySelectorAll<HTMLButtonElement>(
       '.detail-workspace [title^="rain archives"], .detail-workspace [title^="시리즈 · rain archives"]',
     )];
@@ -157,8 +250,8 @@ describe("App Phase 3A backend flow", () => {
       root.render(<TestApp />);
       await settle();
     });
-    expect(container.querySelector<HTMLButtonElement>('[title^="시리즈 · rain archives"]')).toHaveClass("favorite");
-    expect(container.querySelector<HTMLButtonElement>('[title^="캐릭터 · mira lane"]')).toHaveClass("favorite");
+    expect(container.querySelector('[data-gallery-id="4051038"] [title^="시리즈 · rain archives"]')).toBeNull();
+    expect(container.querySelector('[data-gallery-id="4051038"] [title^="캐릭터 · mira lane"]')).toBeNull();
 
     await act(async () => root.unmount());
     container.remove();
@@ -292,7 +385,7 @@ describe("App Phase 3A backend flow", () => {
     expect(container.textContent).toContain("initial duplicate snapshot unavailable");
 
     await act(async () => {
-      clickButtonContaining(container, "작품 중복 검사");
+      clickButtonContaining(container, "전체 작품 간 중복 검사");
       await settle(15);
     });
     expect(scanStart).toHaveBeenCalledTimes(1);
@@ -306,7 +399,7 @@ describe("App Phase 3A backend flow", () => {
     expect(container.textContent).toContain("중복 검사 취소됨");
 
     await act(async () => {
-      clickButtonContaining(container, "작품 중복 검사");
+      clickButtonContaining(container, "전체 작품 간 중복 검사");
       await settle(130);
     });
     expect(container.textContent).toContain("중복 검사 완료");
