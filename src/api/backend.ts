@@ -84,7 +84,8 @@ export interface BackendClient {
     expectedRevision: number,
   ): Promise<ApiResult<WindowPlacementSnapshot>>;
   searchSubmit(request: SearchRequest): Promise<ApiResult<SearchSubmission>>;
-  searchPageGet(queryId: string, page: number): Promise<ApiResult<GalleryPage>>;
+  searchPageGet(queryId: string, page: number, requestId: string): Promise<ApiResult<GalleryPage>>;
+  searchPageCancel(requestId: string): Promise<ApiResult<boolean>>;
   galleryDetailGet(galleryId: GalleryDetail["id"]): Promise<ApiResult<GalleryDetail>>;
   favoritesList(): Promise<ApiResult<FavoriteRecord[]>>;
   favoriteSet(key: FavoriteKey, enabled: boolean): Promise<ApiResult<FavoriteMutationResult>>;
@@ -568,8 +569,12 @@ class BrowserMockBackend implements BackendClient {
     return ok({ queryId, firstPage });
   }
 
-  async searchPageGet(queryId: string, page: number): Promise<ApiResult<GalleryPage>> {
+  async searchPageGet(queryId: string, page: number, requestId: string): Promise<ApiResult<GalleryPage>> {
     const normalizedQueryId = queryId.trim();
+    const normalizedRequestId = requestId.trim();
+    if (!normalizedRequestId || new TextEncoder().encode(normalizedRequestId).length > 200) {
+      return validationError("requestId", "must contain between 1 and 200 bytes");
+    }
     if (!normalizedQueryId) return validationError("queryId", "must not be empty");
     if (new TextEncoder().encode(normalizedQueryId).length > 200) {
       return validationError("queryId", "must be at most 200 bytes");
@@ -588,6 +593,14 @@ class BrowserMockBackend implements BackendClient {
       return validationError("page", "must not exceed the available search pages");
     }
     return ok(pageResult);
+  }
+
+  async searchPageCancel(requestId: string): Promise<ApiResult<boolean>> {
+    const normalizedRequestId = requestId.trim();
+    if (!normalizedRequestId || new TextEncoder().encode(normalizedRequestId).length > 200) {
+      return validationError("requestId", "must contain between 1 and 200 bytes");
+    }
+    return ok(true);
   }
 
   async galleryDetailGet(galleryId: GalleryDetail["id"]): Promise<ApiResult<GalleryDetail>> {
@@ -1774,8 +1787,12 @@ class TauriBackend implements BackendClient {
     return invoke("search_submit", { request });
   }
 
-  searchPageGet(queryId: string, page: number): Promise<ApiResult<GalleryPage>> {
-    return invoke("search_page_get", { queryId, page });
+  searchPageGet(queryId: string, page: number, requestId: string): Promise<ApiResult<GalleryPage>> {
+    return invoke("search_page_get", { queryId, page, requestId });
+  }
+
+  searchPageCancel(requestId: string): Promise<ApiResult<boolean>> {
+    return invoke("search_page_cancel", { requestId });
   }
 
   galleryDetailGet(galleryId: GalleryDetail["id"]): Promise<ApiResult<GalleryDetail>> {

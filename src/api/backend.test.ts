@@ -120,19 +120,19 @@ describe("browser backend search contract", () => {
     const submitted = await backend.searchSubmit(searchRequest({ pageSize: 2 }));
     if (!submitted.ok) throw new Error(submitted.error.message);
 
-    const second = await backend.searchPageGet(submitted.data.queryId, 2);
+    const second = await backend.searchPageGet(submitted.data.queryId, 2, "page-request-2");
     expect(second.ok).toBe(true);
     if (!second.ok) return;
     expect(second.data.page).toBe(2);
     expect(second.data.items).toHaveLength(1);
     expect(second.data.items[0]?.id).not.toBe(submitted.data.firstPage.items[0]?.id);
 
-    const outside = await backend.searchPageGet(submitted.data.queryId, 3);
+    const outside = await backend.searchPageGet(submitted.data.queryId, 3, "page-request-3");
     expect(outside).toMatchObject({ ok: false, error: { code: "VALIDATION_ERROR" } });
   });
 
   it("returns structured errors for unknown queries and galleries", async () => {
-    const page = await backend.searchPageGet("missing-query", 1);
+    const page = await backend.searchPageGet("missing-query", 1, "page-request-missing");
     const detail = await backend.galleryDetailGet(galleryId(999));
 
     expect(page).toMatchObject({ ok: false, error: { code: "QUERY_NOT_FOUND" } });

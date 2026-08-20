@@ -10,7 +10,7 @@ use reqwest::Url;
 use crate::{
     application::{
         ArtifactStore, AutoFindSource, AutoFindSourceRequest, DownloadSourcePort,
-        ExistingPageVerification, SearchRepository,
+        ExistingPageVerification, RepositoryError, SearchRepository,
     },
     domain::{ArtifactRelativePath, GalleryId, Language, SearchRequest, SearchSort},
     infrastructure::FilesystemArtifactStore,
@@ -19,7 +19,7 @@ use crate::{
             galleryinfo_script_url, gg_script_url, parse_galleryinfo_script, parse_gg_routing,
             webp_thumbnail_candidates, ThumbnailSize, HITOMI_METADATA_ORIGIN,
         },
-        SourceContractError,
+        SourceContractError, SourceErrorCode,
     },
     thumbnail::{CancellationToken, ThumbnailKey, ThumbnailResolver},
 };
@@ -348,6 +348,20 @@ fn live_search_contract_covers_paging_filters_popular_and_related_without_networ
         .unwrap();
     assert_eq!(recent.first_page.total_pages, 3);
     assert_eq!(recent.first_page.items[0].id.get(), 1003);
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let cancelled_error = adapter
+        .search_page_get_cancellable(&recent.query_id, 2, &cancelled)
+        .unwrap_err();
+    assert!(matches!(
+        cancelled_error,
+        RepositoryError::Source(error) if error.code == SourceErrorCode::Cancelled
+    ));
+    assert_eq!(
+        transport.call_count(&galleryinfo_script_url(1002).unwrap()),
+        0,
+        "a cancelled page request must not fetch metadata"
+    );
     let second = adapter
         .search_page_get(&recent.query_id, 2)
         .unwrap()

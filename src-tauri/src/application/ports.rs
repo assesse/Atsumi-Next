@@ -73,6 +73,26 @@ pub trait SearchRepository: Send + Sync {
         page: u32,
     ) -> Result<Option<GalleryPage>, RepositoryError>;
 
+    fn search_page_get_cancellable(
+        &self,
+        query_id: &str,
+        page: u32,
+        cancellation: &crate::thumbnail::CancellationToken,
+    ) -> Result<Option<GalleryPage>, RepositoryError> {
+        if cancellation.is_cancelled() {
+            return Err(RepositoryError::Source(
+                crate::source::SourceContractError::cancelled(),
+            ));
+        }
+        let result = self.search_page_get(query_id, page)?;
+        if cancellation.is_cancelled() {
+            return Err(RepositoryError::Source(
+                crate::source::SourceContractError::cancelled(),
+            ));
+        }
+        Ok(result)
+    }
+
     fn gallery_detail_get(
         &self,
         gallery_id: GalleryId,

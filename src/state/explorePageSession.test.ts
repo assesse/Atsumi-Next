@@ -143,12 +143,16 @@ describe("ExplorePageSession", () => {
 
   it("ignores an old query response after a new search starts", async () => {
     let complete: ((result: ApiResult<GalleryPage>) => void) | undefined;
-    const fetchPage = vi.fn(() => new Promise<ApiResult<GalleryPage>>((resolve) => { complete = resolve; }));
-    const session = new ExplorePageSession({ fetchPage });
+    const fetchPage = vi.fn((_queryId: string, _pageNumber: number, _requestId: string) =>
+      new Promise<ApiResult<GalleryPage>>((resolve) => { complete = resolve; }));
+    const cancelPage = vi.fn();
+    const session = new ExplorePageSession({ fetchPage, cancelPage });
     session.start("query-a", page(1));
     const old = session.open(2);
     await flush();
+    const requestId = fetchPage.mock.calls[0]?.[2];
     session.start("query-b", page(1));
+    expect(cancelPage).toHaveBeenCalledWith(requestId);
     complete?.({ ok: true, data: page(2) });
 
     await expect(old).resolves.toEqual({ status: "stale" });

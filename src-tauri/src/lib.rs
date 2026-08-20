@@ -318,6 +318,7 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::window_placement_update,
             interface::commands::search_submit,
             interface::commands::search_page_get,
+            interface::commands::search_page_cancel,
             interface::commands::gallery_detail_get,
             interface::commands::favorites_list,
             interface::commands::favorite_set,

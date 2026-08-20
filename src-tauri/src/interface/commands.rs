@@ -1,6 +1,7 @@
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{mpsc::Sender, Arc},
+    sync::{mpsc::Sender, Arc, Mutex},
 };
 
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
@@ -21,12 +22,13 @@ use crate::{
         InternalRemovalApplyRequest, InternalRemovalPlan, InternalRemovalPlanRequest,
         InternalRemovalResult, InternalRemovalUndoRequest, InternalScanRun, JobRef,
         SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot,
-        WindowPlacement, WindowPlacementSnapshot,
+        ValidationError, WindowPlacement, WindowPlacementSnapshot,
     },
     thumbnail::{
-        ThumbnailCompletionEventDto, ThumbnailCoordinator, ThumbnailCoordinatorError,
-        ThumbnailInvalidationDto, ThumbnailKey, ThumbnailPriority, ThumbnailRequestDto,
-        ThumbnailRequestTokenDto, ThumbnailRuntimeConfigDto, ThumbnailWorkerStatsDto,
+        CancellationToken, ThumbnailCompletionEventDto, ThumbnailCoordinator,
+        ThumbnailCoordinatorError, ThumbnailInvalidationDto, ThumbnailKey, ThumbnailPriority,
+        ThumbnailRequestDto, ThumbnailRequestTokenDto, ThumbnailRuntimeConfigDto,
+        ThumbnailWorkerStatsDto,
     },
 };
 
@@ -43,6 +45,62 @@ pub struct AppState {
     classic_import: ClassicImportService,
     download_root_picker: Arc<dyn DownloadRootPicker>,
     artifact_store: Arc<dyn ArtifactStore>,
+    search_pages: SearchPageRequests,
+}
+
+#[derive(Default)]
+struct SearchPageRequests {
+    inner: Mutex<SearchPageRequestsInner>,
+}
+
+#[derive(Default)]
+struct SearchPageRequestsInner {
+    active: HashMap<String, CancellationToken>,
+    cancelled: HashSet<String>,
+    cancelled_order: VecDeque<String>,
+}
+
+impl SearchPageRequests {
+    fn start(&self, request_id: &str) -> CancellationToken {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let token = CancellationToken::new();
+        if inner.cancelled.remove(request_id) {
+            inner
+                .cancelled_order
+                .retain(|candidate| candidate != request_id);
+            token.cancel();
+        }
+        if let Some(previous) = inner.active.insert(request_id.to_owned(), token.clone()) {
+            previous.cancel();
+        }
+        token
+    }
+
+    fn cancel(&self, request_id: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(token) = inner.active.get(request_id) {
+            token.cancel();
+            return true;
+        }
+        if inner.cancelled.insert(request_id.to_owned()) {
+            inner.cancelled_order.push_back(request_id.to_owned());
+        }
+        while inner.cancelled_order.len() > 256 {
+            if let Some(oldest) = inner.cancelled_order.pop_front() {
+                inner.cancelled.remove(&oldest);
+            }
+        }
+        true
+    }
+
+    fn finish(&self, request_id: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        inner.active.remove(request_id);
+        inner.cancelled.remove(request_id);
+        inner
+            .cancelled_order
+            .retain(|candidate| candidate != request_id);
+    }
 }
 
 impl AppState {
@@ -72,6 +130,7 @@ impl AppState {
             classic_import,
             download_root_picker,
             artifact_store,
+            search_pages: SearchPageRequests::default(),
         }
     }
 }
@@ -623,12 +682,44 @@ pub async fn search_page_get(
     state: State<'_, AppState>,
     query_id: String,
     page: u32,
+    request_id: String,
 ) -> Result<ApiResult<GalleryPage>, ApiError> {
+    let request_id = request_id.trim().to_owned();
+    if request_id.is_empty() || request_id.len() > 200 {
+        return Ok(ApiResult::failure(
+            ApplicationError::from(ValidationError::new(
+                "requestId",
+                "must contain between 1 and 200 bytes",
+            ))
+            .into(),
+        ));
+    }
+    let cancellation = state.search_pages.start(&request_id);
     let service = state.service.clone();
-    Ok(run_application_blocking("search_page_get", move || {
-        service.search_page_get(query_id, page)
+    let result = run_application_blocking("search_page_get", move || {
+        service.search_page_get_cancellable(query_id, page, &cancellation)
     })
-    .await)
+    .await;
+    state.search_pages.finish(&request_id);
+    Ok(result)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn search_page_cancel(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<ApiResult<bool>, ApiError> {
+    let request_id = request_id.trim();
+    if request_id.is_empty() || request_id.len() > 200 {
+        return Ok(ApiResult::failure(
+            ApplicationError::from(ValidationError::new(
+                "requestId",
+                "must contain between 1 and 200 bytes",
+            ))
+            .into(),
+        ));
+    }
+    Ok(ApiResult::success(state.search_pages.cancel(request_id)))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -804,5 +895,24 @@ mod tests {
             }
             ApiResult::Success(()) => panic!("validation error unexpectedly succeeded"),
         }
+    }
+
+    #[test]
+    fn search_page_cancellation_is_replayed_when_cancel_arrives_before_start() {
+        let requests = SearchPageRequests::default();
+        assert!(requests.cancel("request-before-start"));
+        let token = requests.start("request-before-start");
+        assert!(token.is_cancelled());
+        requests.finish("request-before-start");
+    }
+
+    #[test]
+    fn search_page_cancellation_reaches_an_active_request() {
+        let requests = SearchPageRequests::default();
+        let token = requests.start("request-active");
+        assert!(!token.is_cancelled());
+        assert!(requests.cancel("request-active"));
+        assert!(token.is_cancelled());
+        requests.finish("request-active");
     }
 }

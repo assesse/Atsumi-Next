@@ -211,7 +211,8 @@ export default function App() {
   const exploreRestoreFrame = useRef<number | null>(null);
   if (!explorePageSession.current) {
     explorePageSession.current = new ExplorePageSession({
-      fetchPage: (queryId, page) => backend.searchPageGet(queryId, page),
+      fetchPage: (queryId, page, requestId) => backend.searchPageGet(queryId, page, requestId),
+      cancelPage: (requestId) => backend.searchPageCancel(requestId),
       warmPage: (page) => {
         const releases = page.items.map((item, index) => thumbnailClient.subscribe({
           key: {

@@ -19,13 +19,15 @@ type FailedPrefetch = {
 };
 
 type InFlightPage = {
+  requestId: string;
   priority: ExplorePagePriority;
   foregroundIntent?: number;
   promise: Promise<ExplorePageLoadResult>;
 };
 
 export type ExplorePageSessionOptions = {
-  fetchPage: (queryId: string, page: number) => Promise<ApiResult<GalleryPage>>;
+  fetchPage: (queryId: string, page: number, requestId: string) => Promise<ApiResult<GalleryPage>>;
+  cancelPage?: (requestId: string) => void | Promise<unknown>;
   warmPage?: (page: GalleryPage, priority: Exclude<ExplorePagePriority, "foreground">) => void | (() => void);
   promotePage?: (queryId: string, page: number) => void;
   maxSettledPages?: number;
@@ -36,11 +38,13 @@ export type ExplorePageSessionOptions = {
 export class ExplorePageSession {
   private readonly fetchPage: ExplorePageSessionOptions["fetchPage"];
   private readonly warmPage?: ExplorePageSessionOptions["warmPage"];
+  private readonly cancelPage?: ExplorePageSessionOptions["cancelPage"];
   private readonly promotePage?: ExplorePageSessionOptions["promotePage"];
   private readonly maxSettledPages: number;
   private readonly now: () => number;
   private generation = 0;
   private foregroundIntent = 0;
+  private requestSequence = 0;
   private queryId: string | null = null;
   private currentPage = 0;
   private totalPages = 0;
@@ -52,6 +56,7 @@ export class ExplorePageSession {
   constructor(options: ExplorePageSessionOptions) {
     this.fetchPage = options.fetchPage;
     this.warmPage = options.warmPage;
+    this.cancelPage = options.cancelPage;
     this.promotePage = options.promotePage;
     this.maxSettledPages = options.maxSettledPages ?? 5;
     this.now = options.now ?? Date.now;
@@ -153,6 +158,7 @@ export class ExplorePageSession {
     }
 
     const request: InFlightPage = {
+      requestId: `explore-page-${this.generation}-${++this.requestSequence}`,
       priority,
       ...(priority === "foreground" ? { foregroundIntent } : {}),
       promise: Promise.resolve({ status: "stale" }),
@@ -172,7 +178,7 @@ export class ExplorePageSession {
     try {
       // Record the in-flight entry before an immediately resolving fetch can
       // settle it, so concurrent callers always coalesce.
-      result = await Promise.resolve().then(() => this.fetchPage(queryId, pageNumber));
+      result = await Promise.resolve().then(() => this.fetchPage(queryId, pageNumber, request.requestId));
     } catch {
       result = {
         ok: false,
@@ -276,6 +282,11 @@ export class ExplorePageSession {
 
   private reset(): void {
     for (const entry of this.pages.values()) entry.releaseWarmup?.();
+    if (this.cancelPage) {
+      for (const request of this.inFlight.values()) {
+        void Promise.resolve(this.cancelPage(request.requestId)).catch(() => undefined);
+      }
+    }
     this.queryId = null;
     this.currentPage = 0;
     this.totalPages = 0;

@@ -296,6 +296,40 @@ impl ApplicationService {
         Ok(result)
     }
 
+    pub fn search_page_get_cancellable(
+        &self,
+        query_id: String,
+        page: u32,
+        cancellation: &crate::thumbnail::CancellationToken,
+    ) -> Result<GalleryPage, ApplicationError> {
+        let query_id = query_id.trim();
+        if query_id.is_empty() {
+            return Err(ValidationError::new("queryId", "must not be empty").into());
+        }
+        if query_id.len() > 200 {
+            return Err(ValidationError::new("queryId", "must be at most 200 bytes").into());
+        }
+        if page == 0 {
+            return Err(ValidationError::new("page", "must be one-based").into());
+        }
+
+        let result = self
+            .search_repository()?
+            .search_page_get_cancellable(query_id, page, cancellation)?
+            .ok_or_else(|| ApplicationError::QueryNotFound(query_id.to_owned()))?;
+        let is_out_of_range = if result.total_pages == 0 {
+            page != 1
+        } else {
+            page > result.total_pages
+        };
+        if is_out_of_range {
+            return Err(
+                ValidationError::new("page", "must not exceed the search result range").into(),
+            );
+        }
+        Ok(result)
+    }
+
     pub fn gallery_detail_get(&self, gallery_id: i64) -> Result<GalleryDetail, ApplicationError> {
         let gallery_id = GalleryId::new(gallery_id)?;
         self.search_repository()?

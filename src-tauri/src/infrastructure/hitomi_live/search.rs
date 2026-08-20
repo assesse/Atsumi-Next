@@ -21,7 +21,7 @@ use crate::{
     thumbnail::CancellationToken,
 };
 
-use super::{unpoison, HitomiLiveAdapter};
+use super::{check_cancelled, unpoison, HitomiLiveAdapter};
 
 const AUTO_FIND_CANDIDATE_LIMIT: u32 = 50_000;
 
@@ -177,17 +177,35 @@ impl HitomiLiveAdapter {
         snapshot: &QuerySnapshot,
         page: u32,
     ) -> Result<GalleryPage, SourceContractError> {
+        self.query_page_with_cancellation(snapshot, page, None)
+    }
+
+    fn query_page_with_cancellation(
+        &self,
+        snapshot: &QuerySnapshot,
+        page: u32,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<GalleryPage, SourceContractError> {
         if page == 0 {
             return Err(SourceContractError::validation("page", "must be one-based"));
+        }
+        if let Some(cancellation) = cancellation {
+            check_cancelled(cancellation)?;
         }
         let page_size = snapshot.request.page_size as usize;
         let wanted = page as usize * page_size;
         let mut progress = unpoison(snapshot.progress.lock());
         while progress.matches.len() < wanted && progress.cursor < snapshot.candidate_ids.len() {
+            if let Some(cancellation) = cancellation {
+                check_cancelled(cancellation)?;
+            }
             let rank = progress.cursor;
             let id = snapshot.candidate_ids[rank];
-            match self.fetch_metadata(id) {
+            match self.fetch_metadata_with_cancellation(id, cancellation) {
                 Ok(metadata) => {
+                    if let Some(cancellation) = cancellation {
+                        check_cancelled(cancellation)?;
+                    }
                     if metadata_matches(&metadata, &snapshot.residual_terms) {
                         progress.matches.push(gallery_summary(
                             &metadata,
@@ -252,6 +270,22 @@ impl SearchRepository for HitomiLiveAdapter {
         snapshot
             .map(|snapshot| {
                 self.query_page(&snapshot, page)
+                    .map_err(RepositoryError::Source)
+            })
+            .transpose()
+    }
+
+    fn search_page_get_cancellable(
+        &self,
+        query_id: &str,
+        page: u32,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<GalleryPage>, RepositoryError> {
+        check_cancelled(cancellation)?;
+        let snapshot = unpoison(self.queries.lock()).get(query_id);
+        snapshot
+            .map(|snapshot| {
+                self.query_page_with_cancellation(&snapshot, page, Some(cancellation))
                     .map_err(RepositoryError::Source)
             })
             .transpose()
