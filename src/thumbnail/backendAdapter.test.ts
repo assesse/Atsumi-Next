@@ -151,6 +151,42 @@ describe("BackendThumbnailAdapter", () => {
     adapter.dispose();
   });
 
+  it("settles cancellation and drops a late completion instead of replaying it from the buffer", async () => {
+    let completionHandler: ((event: ThumbnailCompletionEvent) => void) | undefined;
+    const transport = {
+      on: vi.fn(async (_event, handler) => {
+        completionHandler = handler;
+        return () => undefined;
+      }),
+      thumbnailRequest: vi.fn(async () => ({
+        ok: true,
+        data: { requestId: "cancelled-request", key: { kind: "galleryCover", galleryId: 4_051_038 } },
+      } as const)),
+      thumbnailCancel: vi.fn(async () => ({ ok: true, data: true } as const)),
+      thumbnailReprioritize: vi.fn(async () => ({ ok: true, data: true } as const)),
+    } as unknown as BackendClient;
+    const createObjectURL = vi.fn(() => "blob:https://atsumi.local/non-stale");
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectURL });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    const adapter = new BackendThumbnailAdapter(transport);
+
+    const first = adapter.resolve(request);
+    await vi.waitFor(() => expect(transport.thumbnailRequest).toHaveBeenCalledOnce());
+    adapter.cancel(request);
+    await vi.waitFor(() => expect(transport.thumbnailCancel).toHaveBeenCalledWith("cancelled-request"));
+    await expect(first).rejects.toMatchObject({ name: "THUMBNAIL_cancelled" });
+    completionHandler?.(readyEvent("cancelled-request"));
+
+    const second = adapter.resolve(request);
+    await vi.waitFor(() => expect(transport.thumbnailRequest).toHaveBeenCalledTimes(2));
+    await Promise.resolve();
+    expect(createObjectURL).not.toHaveBeenCalled();
+    completionHandler?.(readyEvent("cancelled-request"));
+    await expect(second).resolves.toMatchObject({ kind: "image", url: "blob:https://atsumi.local/non-stale" });
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    adapter.dispose();
+  });
+
   it("keeps the expected early completion while unrelated buffered events are evicted", async () => {
     let completeToken: ((result: ApiResult<ThumbnailRequestToken>) => void) | undefined;
     let completionHandler: ((event: ThumbnailCompletionEvent) => void) | undefined;

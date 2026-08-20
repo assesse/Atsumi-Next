@@ -29,6 +29,8 @@ type GalleryThumbnailProps = Omit<HTMLAttributes<HTMLElement>, "children"> & {
   /** Use a span when this media is nested in a button. */
   as?: "div" | "span";
   sizing?: "container" | "intrinsic";
+  /** Reserve this ratio before the coordinator returns intrinsic image dimensions. */
+  expectedAspectRatio?: { readonly width: number; readonly height: number };
   client?: ThumbnailClient;
   children?: ReactNode;
 };
@@ -75,7 +77,17 @@ const greatestCommonDivisor = (left: number, right: number): number => {
   return a || 1;
 };
 
-const intrinsicAspectRatio = (asset: ThumbnailAsset | null): string => {
+const intrinsicAspectRatio = (
+  asset: ThumbnailAsset | null,
+  expectedAspectRatio?: { readonly width: number; readonly height: number },
+): string => {
+  if (
+    expectedAspectRatio
+    && Number.isFinite(expectedAspectRatio.width)
+    && expectedAspectRatio.width > 0
+    && Number.isFinite(expectedAspectRatio.height)
+    && expectedAspectRatio.height > 0
+  ) return `${expectedAspectRatio.width} / ${expectedAspectRatio.height}`;
   if (asset?.kind === "image") return `${asset.width} / ${asset.height}`;
   if (asset?.kind === "sprite") {
     const width = asset.sheetWidth * asset.rows;
@@ -180,6 +192,7 @@ export function GalleryThumbnail({
   alt,
   as = "div",
   sizing = "container",
+  expectedAspectRatio,
   client: clientOverride,
   className,
   style,
@@ -206,13 +219,20 @@ export function GalleryThumbnail({
     if (priority === "critical" || typeof IntersectionObserver !== "function") return undefined;
     const element = elementRef.current;
     if (!element) return undefined;
+    const viewportRoot = element.closest<HTMLElement>(".gallery-viewport");
+    if (!viewportRoot) {
+      // Dialogs and isolated embeds do not have the Explore scroller. They
+      // should resolve normally rather than silently using the window root.
+      setActivatedIdentity(identity);
+      return undefined;
+    }
     const observer = new IntersectionObserver((entries) => {
       const visible = entries.some((entry) => entry.isIntersecting);
       setActivatedIdentity((current) => visible
         ? identity
         : current === identity ? null : current);
     }, {
-      root: null,
+      root: viewportRoot,
       rootMargin: nearViewportMargin,
       threshold: 0.01,
     });
@@ -247,7 +267,7 @@ export function GalleryThumbnail({
     [client, request],
   );
   const intrinsicStyle = sizing === "intrinsic"
-    ? { aspectRatio: intrinsicAspectRatio(asset) }
+    ? { aspectRatio: intrinsicAspectRatio(asset, expectedAspectRatio) }
     : undefined;
   const Element = as;
 

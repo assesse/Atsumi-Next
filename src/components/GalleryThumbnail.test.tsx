@@ -57,6 +57,41 @@ describe("GalleryThumbnail", () => {
     container.remove();
   });
 
+  it("reserves a supplied expected ratio before and after asynchronous resolution", async () => {
+    let finish: ((asset: { kind: "image"; url: string; width: number; height: number }) => void) | undefined;
+    const pending = new Promise<{ kind: "image"; url: string; width: number; height: number }>((resolve) => {
+      finish = resolve;
+    });
+    const client = new ThumbnailClient({ resolve: () => pending });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => root.render(
+      <GalleryThumbnail
+        thumbnailKey={coverKey}
+        consumer="explore"
+        priority="visible"
+        client={client}
+        sizing="intrinsic"
+        expectedAspectRatio={{ width: 720, height: 1080 }}
+        alt="비율 예약 표지"
+      />,
+    ));
+
+    const media = container.querySelector<HTMLElement>(".gallery-thumbnail");
+    expect(media).toHaveStyle({ aspectRatio: "720 / 1080" });
+    // The decoded handle intentionally has different dimensions: the expected
+    // ratio must reserve the layout through both states.
+    finish?.({ kind: "image", url: "https://images.example.test/reserved.jpg", width: 1000, height: 1000 });
+    await act(async () => { await pending; });
+    expect(media).toHaveStyle({ aspectRatio: "720 / 1080" });
+
+    await act(async () => root.unmount());
+    client.dispose();
+    container.remove();
+  });
+
   it("clips a 3x2 fixture sheet to a square cell without stretching the cell", async () => {
     const gallery = { ...mockGalleries[0]!, coverIndex: 1 };
     const pageKey = sourcePageThumbnailKey(gallery, 5);
@@ -146,11 +181,14 @@ describe("GalleryThumbnail", () => {
     const observe = vi.fn();
     const disconnect = vi.fn();
     class TestIntersectionObserver {
-      readonly root = null;
+      static lastRoot: Element | Document | null = null;
+      readonly root: Element | Document | null;
       readonly rootMargin = "600px 0px";
       readonly thresholds = [0.01];
 
-      constructor(callback: IntersectionObserverCallback) {
+      constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        this.root = options?.root ?? null;
+        TestIntersectionObserver.lastRoot = this.root;
         triggerIntersection = (visible) => callback(
           [{ isIntersecting: visible } as IntersectionObserverEntry],
           this as unknown as IntersectionObserver,
@@ -170,17 +208,20 @@ describe("GalleryThumbnail", () => {
     const root = createRoot(container);
 
     await act(async () => root.render(
-      <GalleryThumbnail
-        thumbnailKey={coverKey}
-        consumer="explore"
-        priority="prefetch"
-        client={client}
-        alt="화면 밖 표지"
-      />,
+      <div className="gallery-viewport">
+        <GalleryThumbnail
+          thumbnailKey={coverKey}
+          consumer="explore"
+          priority="prefetch"
+          client={client}
+          alt="화면 밖 표지"
+        />
+      </div>,
     ));
 
     expect(resolve).not.toHaveBeenCalled();
     expect(observe).toHaveBeenCalledWith(container.querySelector(".gallery-thumbnail"));
+    expect(TestIntersectionObserver.lastRoot).toBe(container.querySelector(".gallery-viewport"));
     expect(container.querySelector(".gallery-thumbnail")).toHaveAttribute("data-thumbnail-state", "deferred");
     expect(container.querySelector(".gallery-thumbnail")).toHaveAttribute("data-thumbnail-priority", "prefetch");
 
@@ -202,9 +243,13 @@ describe("GalleryThumbnail", () => {
     });
     expect(container.querySelector(".gallery-thumbnail")).toHaveAttribute("data-thumbnail-state", "deferred");
     expect(container.querySelector(".gallery-thumbnail")).toHaveAttribute("data-thumbnail-priority", "prefetch");
-    expect(client.getSnapshot(coverKey)).toEqual({ status: "idle" });
+    expect(client.getSnapshot(coverKey)).toEqual({
+      status: "resolved",
+      asset: { kind: "missing", reason: "fixture" },
+    });
 
     await act(async () => root.unmount());
+    client.dispose();
     expect(disconnect).toHaveBeenCalledOnce();
     container.remove();
   });

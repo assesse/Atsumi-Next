@@ -63,9 +63,12 @@ describe("ThumbnailClient", () => {
     expect(second).toHaveBeenCalled();
     unsubscribeFirst();
     unsubscribeSecond();
+    client.dispose();
   });
 
-  it("cancels orphaned loading work and releases a late display handle", async () => {
+  it("gives orphaned loading work a 400ms grace period, then cancels and releases a late handle", async () => {
+    vi.useFakeTimers();
+    try {
     let finish: ((asset: ThumbnailAsset) => void) | undefined;
     const pending = new Promise<ThumbnailAsset>((resolve) => { finish = resolve; });
     const cancel = vi.fn();
@@ -75,7 +78,11 @@ describe("ThumbnailClient", () => {
 
     const unsubscribe = client.subscribe(request, vi.fn());
     unsubscribe();
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(399);
+
+    expect(cancel).not.toHaveBeenCalled();
+    expect(client.getSnapshot(coverKey).status).toBe("loading");
+    await vi.advanceTimersByTimeAsync(1);
 
     expect(cancel).toHaveBeenCalledOnce();
     expect(cancel).toHaveBeenCalledWith(request);
@@ -93,9 +100,46 @@ describe("ThumbnailClient", () => {
 
     expect(release).toHaveBeenCalledWith(request, lateAsset);
     expect(client.getSnapshot(coverKey)).toEqual({ status: "idle" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("releases resolved Blob/display resources after the final subscriber leaves", async () => {
+  it("reuses in-flight work when a subscriber returns during the orphan grace period", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish: ((asset: ThumbnailAsset) => void) | undefined;
+      const pending = new Promise<ThumbnailAsset>((resolve) => { finish = resolve; });
+      const resolve = vi.fn(() => pending);
+      const cancel = vi.fn();
+      const client = new ThumbnailClient({ resolve, cancel });
+      const request: ThumbnailRequest = { key: coverKey, consumer: "explore", priority: "prefetch" };
+
+      const unsubscribe = client.subscribe(request, vi.fn());
+      unsubscribe();
+      await vi.advanceTimersByTimeAsync(399);
+      const returningUnsubscribe = client.subscribe({ ...request, priority: "visible" }, vi.fn());
+      await vi.advanceTimersByTimeAsync(1);
+      expect(resolve).toHaveBeenCalledOnce();
+      expect(cancel).not.toHaveBeenCalled();
+
+      finish?.({ kind: "missing", reason: "returned during grace" });
+      await pending;
+      await Promise.resolve();
+      expect(client.getSnapshot(coverKey)).toEqual({
+        status: "resolved",
+        asset: { kind: "missing", reason: "returned during grace" },
+      });
+      returningUnsubscribe();
+      client.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains a resolved display asset for a returning subscriber, then releases it after its TTL", async () => {
+    vi.useFakeTimers();
+    try {
     const asset: ThumbnailAsset = {
       kind: "image",
       url: "blob:https://app.local/thumbnail",
@@ -103,16 +147,68 @@ describe("ThumbnailClient", () => {
       height: 512,
     };
     const release = vi.fn();
-    const client = new ThumbnailClient({ resolve: () => asset, release });
+    const resolve = vi.fn(() => asset);
+    const client = new ThumbnailClient({ resolve, release });
     const request: ThumbnailRequest = { key: coverKey, consumer: "detail", priority: "critical" };
 
     const unsubscribe = client.subscribe(request, vi.fn());
     expect(client.getSnapshot(coverKey)).toEqual({ status: "resolved", asset });
     unsubscribe();
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(release).not.toHaveBeenCalled();
+    const returningListener = vi.fn();
+    const unsubscribeReturning = client.subscribe(request, returningListener);
+    expect(client.getSnapshot(coverKey)).toEqual({ status: "resolved", asset });
+    expect(resolve).toHaveBeenCalledOnce();
+    unsubscribeReturning();
+    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(120_000);
 
     expect(release).toHaveBeenCalledWith(request, asset);
     expect(client.getSnapshot(coverKey)).toEqual({ status: "idle" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("evicts only retained assets when the bounded display cache is full", async () => {
+    vi.useFakeTimers();
+    try {
+      const release = vi.fn();
+      const client = new ThumbnailClient({
+        resolve: ({ key }) => ({
+          kind: "image" as const,
+          url: `blob:https://app.local/${key.kind === "gallery-cover" ? key.galleryId : "other"}`,
+          width: 20,
+          height: 30,
+        }),
+        release,
+      });
+      const activeRequest: ThumbnailRequest = {
+        key: { ...coverKey, galleryId: galleryId(9_999_999) },
+        consumer: "detail",
+        priority: "critical",
+      };
+      const activeUnsubscribe = client.subscribe(activeRequest, vi.fn());
+      for (let index = 0; index < 257; index += 1) {
+        const request: ThumbnailRequest = {
+          key: { ...coverKey, galleryId: galleryId(index + 1) },
+          consumer: "explore",
+          priority: "prefetch",
+        };
+        const unsubscribe = client.subscribe(request, vi.fn());
+        unsubscribe();
+      }
+      await vi.advanceTimersByTimeAsync(400);
+
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(client.getSnapshot(activeRequest.key)).toMatchObject({ status: "resolved" });
+      activeUnsubscribe();
+      client.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("turns malformed adapter output into a shared error state", () => {
@@ -161,7 +257,7 @@ describe("ThumbnailClient", () => {
       expect(resolve).toHaveBeenCalledTimes(2);
       expect(client.getSnapshot(coverKey)).toEqual({ status: "resolved", asset });
       unsubscribe();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
     } finally {
       vi.useRealTimers();
     }
@@ -181,7 +277,7 @@ describe("ThumbnailClient", () => {
       await Promise.resolve();
       expect(resolve).toHaveBeenCalledTimes(1);
       unsubscribe();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
       await vi.advanceTimersByTimeAsync(3_000);
 
       expect(resolve).toHaveBeenCalledTimes(1);
@@ -214,7 +310,7 @@ describe("ThumbnailClient", () => {
       expect(client.getSnapshot(coverKey)).toEqual({ status: "loading" });
 
       unsubscribe();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
       expect(cancel).toHaveBeenCalledOnce();
       expect(cancel).toHaveBeenCalledWith(request);
 
@@ -269,7 +365,7 @@ describe("ThumbnailClient", () => {
       expect(resolve).toHaveBeenCalledTimes(2);
       unsubscribeCritical();
       unsubscribePrefetch();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
     } finally {
       vi.useRealTimers();
     }
@@ -298,7 +394,7 @@ describe("ThumbnailClient", () => {
       });
       unsubscribeCritical();
       unsubscribePrefetch();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
     } finally {
       vi.useRealTimers();
     }
@@ -343,7 +439,7 @@ describe("ThumbnailClient", () => {
       });
 
       unsubscribe();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
     } finally {
       vi.useRealTimers();
     }

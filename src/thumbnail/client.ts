@@ -54,9 +54,12 @@ export type ThumbnailSnapshot =
 type Entry = {
   identity: string;
   active: boolean;
-  cleanupVersion: number;
   resolutionVersion: number;
   retryTimer?: ReturnType<typeof setTimeout>;
+  orphanTimer?: ReturnType<typeof setTimeout>;
+  retainedTimer?: ReturnType<typeof setTimeout>;
+  retained: boolean;
+  retainedLastUsed: number;
   retryableError: boolean;
   priorityRetryTriggered: boolean;
   displayFailureRetries: number;
@@ -67,6 +70,11 @@ type Entry = {
 
 const idleSnapshot: ThumbnailSnapshot = { status: "idle" };
 const RETRYABLE_ERROR_DELAY_MS = 3_000;
+/** Leave a short window for scroll/React reconciliation churn before cancelling work. */
+const ORPHAN_GRACE_MS = 400;
+/** Keep a decoded display handle briefly so a revisited card need not recreate it. */
+const RETAINED_ASSET_TTL_MS = 120_000;
+const RETAINED_ASSET_CAPACITY = 256;
 const priorityRank: Record<ThumbnailPriority, number> = {
   prefetch: 0,
   visible: 1,
@@ -129,6 +137,7 @@ const thumbnailErrorCode = (error: unknown): string | undefined =>
  */
 export class ThumbnailClient {
   private readonly entries = new Map<string, Entry>();
+  private nextRetainedSequence = 0;
 
   constructor(private readonly adapter: ThumbnailCoordinatorAdapter) {}
 
@@ -143,8 +152,9 @@ export class ThumbnailClient {
       entry = {
         identity,
         active: true,
-        cleanupVersion: 0,
         resolutionVersion: 0,
+        retained: false,
+        retainedLastUsed: 0,
         retryableError: false,
         priorityRetryTriggered: false,
         displayFailureRetries: 0,
@@ -156,7 +166,14 @@ export class ThumbnailClient {
       entry.listeners.add(listener);
       this.resolve(entry);
     } else {
-      entry.cleanupVersion += 1;
+      this.clearOrphanTimer(entry);
+      this.clearRetainedTimer(entry);
+      if (entry.retained) {
+        entry.retained = false;
+        // There is no in-flight work to promote; keep the latest consumer for
+        // a later display-failure/release lifecycle callback.
+        entry.request = request;
+      }
       entry.listeners.add(listener);
       if (priorityRank[request.priority] > priorityRank[entry.request.priority]) {
         entry.request = request;
@@ -181,7 +198,7 @@ export class ThumbnailClient {
     }
     return () => {
       entry?.listeners.delete(listener);
-      if (entry?.listeners.size === 0) this.scheduleCleanup(entry);
+      if (entry?.listeners.size === 0) this.scheduleOrphanCleanup(entry);
     };
   }
 
@@ -218,23 +235,30 @@ export class ThumbnailClient {
     for (const listener of entry.listeners) listener();
   }
 
-  private scheduleCleanup(entry: Entry): void {
-    const cleanupVersion = ++entry.cleanupVersion;
-    queueMicrotask(() => {
+  private scheduleOrphanCleanup(entry: Entry): void {
+    if (!entry.active || entry.listeners.size > 0 || entry.orphanTimer !== undefined) return;
+    entry.orphanTimer = setTimeout(() => {
+      entry.orphanTimer = undefined;
       if (
         !entry.active
         || entry.listeners.size > 0
-        || cleanupVersion !== entry.cleanupVersion
         || this.entries.get(entry.identity) !== entry
       ) return;
-      this.cleanup(entry);
-    });
+      if (entry.snapshot.status === "resolved") {
+        this.retain(entry);
+      } else {
+        this.cleanup(entry);
+      }
+    }, ORPHAN_GRACE_MS);
   }
 
   private cleanup(entry: Entry): void {
     if (!entry.active) return;
     entry.active = false;
     this.clearRetryTimer(entry);
+    this.clearOrphanTimer(entry);
+    this.clearRetainedTimer(entry);
+    entry.retained = false;
     if (this.entries.get(entry.identity) === entry) this.entries.delete(entry.identity);
     if (entry.snapshot.status === "loading") {
       this.callLifecycleHook(() => this.adapter.cancel?.(entry.request));
@@ -260,6 +284,59 @@ export class ThumbnailClient {
     if (entry.retryTimer === undefined) return;
     clearTimeout(entry.retryTimer);
     entry.retryTimer = undefined;
+  }
+
+  private clearOrphanTimer(entry: Entry): void {
+    if (entry.orphanTimer === undefined) return;
+    clearTimeout(entry.orphanTimer);
+    entry.orphanTimer = undefined;
+  }
+
+  private clearRetainedTimer(entry: Entry): void {
+    if (entry.retainedTimer === undefined) return;
+    clearTimeout(entry.retainedTimer);
+    entry.retainedTimer = undefined;
+  }
+
+  private retain(entry: Entry): void {
+    if (
+      !entry.active
+      || entry.listeners.size > 0
+      || entry.snapshot.status !== "resolved"
+      || this.entries.get(entry.identity) !== entry
+    ) return;
+    entry.retained = true;
+    entry.retainedLastUsed = ++this.nextRetainedSequence;
+    entry.retainedTimer = setTimeout(() => {
+      entry.retainedTimer = undefined;
+      if (
+        entry.active
+        && entry.retained
+        && entry.listeners.size === 0
+        && this.entries.get(entry.identity) === entry
+      ) this.cleanup(entry);
+    }, RETAINED_ASSET_TTL_MS);
+    this.evictRetainedEntries();
+  }
+
+  private evictRetainedEntries(): void {
+    while (this.retainedEntryCount() > RETAINED_ASSET_CAPACITY) {
+      let oldest: Entry | undefined;
+      for (const entry of this.entries.values()) {
+        if (!entry.active || !entry.retained || entry.listeners.size > 0) continue;
+        if (!oldest || entry.retainedLastUsed < oldest.retainedLastUsed) oldest = entry;
+      }
+      if (!oldest) return;
+      this.cleanup(oldest);
+    }
+  }
+
+  private retainedEntryCount(): number {
+    let count = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.active && entry.retained && entry.listeners.size === 0) count += 1;
+    }
+    return count;
   }
 
   private scheduleRetry(entry: Entry): void {

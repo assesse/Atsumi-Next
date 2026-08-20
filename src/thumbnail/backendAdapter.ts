@@ -83,6 +83,7 @@ export class BackendThumbnailAdapter implements ThumbnailCoordinatorAdapter {
   private readonly pendingByIdentity = new Map<string, PendingResolution>();
   private readonly pendingByRequestId = new Map<string, PendingResolution>();
   private readonly bufferedCompletions = new Map<string, ThumbnailCompletionEvent>();
+  private readonly cancelledRequestIds = new Set<string>();
   private readonly displayUrls = new Map<string, string>();
   private readonly listenerReady: Promise<void>;
   private unlisten?: () => void;
@@ -116,6 +117,7 @@ export class BackendThumbnailAdapter implements ThumbnailCoordinatorAdapter {
         if (pending.requestId) {
           this.pendingByRequestId.delete(pending.requestId);
           this.bufferedCompletions.delete(pending.requestId);
+          this.rememberCancelledRequestId(pending.requestId);
           void this.backend.thumbnailCancel(pending.requestId).catch(() => undefined);
         }
         pending.earlyCompletions.clear();
@@ -144,7 +146,12 @@ export class BackendThumbnailAdapter implements ThumbnailCoordinatorAdapter {
     pending.earlyCompletions.clear();
     this.pendingByIdentity.delete(identity);
     if (pending.requestId) {
+      this.rememberCancelledRequestId(pending.requestId);
       void this.backend.thumbnailCancel(pending.requestId).catch(() => undefined);
+    }
+    if (!pending.settled) {
+      pending.settled = true;
+      pending.reject(errorFrom("Thumbnail request was cancelled", "THUMBNAIL_cancelled", true));
     }
   }
 
@@ -180,10 +187,16 @@ export class BackendThumbnailAdapter implements ThumbnailCoordinatorAdapter {
       window.clearTimeout(pending.timeoutId);
       pending.earlyCompletions.clear();
       if (pending.requestId) void this.backend.thumbnailCancel(pending.requestId).catch(() => undefined);
+      if (pending.requestId) this.rememberCancelledRequestId(pending.requestId);
+      if (!pending.settled) {
+        pending.settled = true;
+        pending.reject(errorFrom("Thumbnail adapter is disposed", "THUMBNAIL_cancelled", true));
+      }
     }
     this.pendingByIdentity.clear();
     this.pendingByRequestId.clear();
     this.bufferedCompletions.clear();
+    this.cancelledRequestIds.clear();
   }
 
   private async start(pending: PendingResolution, identity: string): Promise<void> {
@@ -198,6 +211,7 @@ export class BackendThumbnailAdapter implements ThumbnailCoordinatorAdapter {
       if (pending.cancelled) {
         this.pendingByRequestId.delete(result.data.requestId);
         this.bufferedCompletions.delete(result.data.requestId);
+        this.rememberCancelledRequestId(result.data.requestId);
         void this.backend.thumbnailCancel(result.data.requestId).catch(() => undefined);
         return;
       }
@@ -226,6 +240,7 @@ export class BackendThumbnailAdapter implements ThumbnailCoordinatorAdapter {
   }
 
   private complete(event: ThumbnailCompletionEvent): void {
+    if (this.cancelledRequestIds.delete(event.requestId)) return;
     const pending = this.pendingByRequestId.get(event.requestId);
     if (!pending) {
       const handshaking = this.pendingByIdentity.get(backendKeyIdentity(event.key));
@@ -276,6 +291,15 @@ export class BackendThumbnailAdapter implements ThumbnailCoordinatorAdapter {
       pending.resolve(asset);
     } catch (error) {
       pending.reject(error instanceof Error ? error : errorFrom("Thumbnail payload could not be displayed"));
+    }
+  }
+
+  private rememberCancelledRequestId(requestId: string): void {
+    this.cancelledRequestIds.delete(requestId);
+    this.cancelledRequestIds.add(requestId);
+    while (this.cancelledRequestIds.size > 256) {
+      const oldest = this.cancelledRequestIds.values().next().value as string | undefined;
+      if (oldest) this.cancelledRequestIds.delete(oldest);
     }
   }
 }
