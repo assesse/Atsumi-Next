@@ -1,11 +1,12 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::domain::{
-    AutoFindExclusionResult, AutoFindSnapshot, DownloadEntry, DownloadEntryId,
-    DownloadJobDescriptor, DownloadJobProjection, DownloadListRequest, DownloadPage, FavoriteKey,
-    FavoriteMutationResult, FavoriteRecord, FixtureDownloadJobStep, GalleryDetail, GalleryId,
-    GalleryPage, JobRef, SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsPatch,
-    SettingsSnapshot, ValidationError, WindowPlacement, WindowPlacementSnapshot,
+    download_root_for_display, plan_artifact_relative_directory, AutoFindExclusionResult,
+    AutoFindSnapshot, DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
+    DownloadListRequest, DownloadPage, FavoriteKey, FavoriteMutationResult, FavoriteRecord,
+    FixtureDownloadJobStep, Gallery, GalleryDetail, GalleryId, GalleryMetadata, GalleryPage,
+    JobRef, SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot,
+    ValidationError, WindowPlacement, WindowPlacementSnapshot,
 };
 
 use super::{
@@ -69,7 +70,9 @@ impl ApplicationService {
     }
 
     pub fn settings_get(&self) -> Result<SettingsSnapshot, ApplicationError> {
-        self.repository.settings_get().map_err(Into::into)
+        let mut snapshot = self.repository.settings_get()?;
+        snapshot.download_root = download_root_for_display(&snapshot.download_root);
+        Ok(snapshot)
     }
 
     pub fn settings_update(
@@ -85,11 +88,24 @@ impl ApplicationService {
             .repository
             .settings_compare_and_set(&next, expected_revision)?
         {
-            return Ok(next);
+            let mut displayed = next;
+            displayed.download_root = download_root_for_display(&displayed.download_root);
+            return Ok(displayed);
         }
 
         let actual = self.repository.settings_get()?.revision;
         Err(revision_conflict("settings", expected_revision, actual))
+    }
+
+    pub fn folder_name_template_preview(&self, template: &str) -> Result<String, ApplicationError> {
+        let gallery = Gallery::new(
+            GalleryId::new(4_113_714)?,
+            0,
+            GalleryMetadata::new("작품 제목", Some("작가".into()), Some("그룹".into()), 1)?,
+        );
+        Ok(plan_artifact_relative_directory(template, &gallery)?
+            .as_str()
+            .to_owned())
     }
 
     pub fn window_placement_get(&self) -> Result<WindowPlacementSnapshot, ApplicationError> {

@@ -13,12 +13,12 @@ use crate::{
         DownloadSupervisor, DuplicateSupervisor, InternalDuplicateSupervisor, ReconcileReport,
     },
     domain::{
-        AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot, ClassicImportApplyRequest,
-        ClassicImportApplyResult, ClassicImportDryRunRequest, ClassicImportReport,
-        ClassicImportRollbackRequest, DownloadChangedEvent, DownloadEntry, DownloadListRequest,
-        DownloadPage, DuplicateDecisionRequest, DuplicateReview, DuplicateScanRun,
-        DuplicateSnapshot, FavoriteKey, FavoriteMutationResult, FavoriteRecord, GalleryDetail,
-        GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot,
+        download_root_for_display, AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot,
+        ClassicImportApplyRequest, ClassicImportApplyResult, ClassicImportDryRunRequest,
+        ClassicImportReport, ClassicImportRollbackRequest, DownloadChangedEvent, DownloadEntry,
+        DownloadListRequest, DownloadPage, DuplicateDecisionRequest, DuplicateReview,
+        DuplicateScanRun, DuplicateSnapshot, FavoriteKey, FavoriteMutationResult, FavoriteRecord,
+        GalleryDetail, GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot,
         InternalRemovalApplyRequest, InternalRemovalPlan, InternalRemovalPlanRequest,
         InternalRemovalResult, InternalRemovalUndoRequest, InternalScanRun, JobRef,
         SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot,
@@ -144,11 +144,14 @@ pub async fn classic_import_pick_folder(
         Ok(Ok(selected)) => {
             let selected = selected
                 .map(|path| {
-                    path.into_os_string().into_string().map_err(|_| {
-                        ApplicationError::ClassicImportInvalid(
-                            "The selected folder path cannot be represented safely".into(),
-                        )
-                    })
+                    path.into_os_string()
+                        .into_string()
+                        .map(|path| download_root_for_display(&path))
+                        .map_err(|_| {
+                            ApplicationError::ClassicImportInvalid(
+                                "The selected folder path cannot be represented safely".into(),
+                            )
+                        })
                 })
                 .transpose();
             Ok(selected.into())
@@ -388,6 +391,14 @@ pub async fn settings_get(
     state: State<'_, AppState>,
 ) -> Result<ApiResult<SettingsSnapshot>, ApiError> {
     Ok(state.service.settings_get().into())
+}
+
+#[tauri::command]
+pub async fn folder_name_template_preview(
+    state: State<'_, AppState>,
+    template: String,
+) -> Result<ApiResult<String>, ApiError> {
+    Ok(state.service.folder_name_template_preview(&template).into())
 }
 
 #[tauri::command(rename_all = "camelCase")]

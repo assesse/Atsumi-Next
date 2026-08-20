@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ApiError, SettingsPatch, SettingsSnapshot } from "../api/contracts";
+import type { ApiError, ApiResult, SettingsPatch, SettingsSnapshot } from "../api/contracts";
 import { FluentIcon } from "./FluentIcon";
 
 type SettingsDialogProps = {
@@ -11,22 +11,13 @@ type SettingsDialogProps = {
   onSave: (patch: SettingsPatch) => Promise<boolean>;
   onClassicImport: () => void;
   onPreviewLayout: (layout: { maxColumns: number; previewWidth: number } | null) => void;
+  onPreviewFolderName: (template: string) => Promise<ApiResult<string>>;
 };
 
 const sections = ["일반", "저장 공간"];
 const DEFAULT_FOLDER_NAME_TEMPLATE = "[{artist}] {title} [{group}] {id}";
 
-const previewFolderName = (template: string) => template
-  .replaceAll("{artist}", "작가")
-  .replaceAll("{title}", "작품 제목")
-  .replaceAll("{group}", "그룹")
-  .replaceAll("{id}", "4113714")
-  .replace(/[<>:\"/\\|?*\u0000-\u001f\u007f-\u009f]/g, "_")
-  .replace(/\s+/g, " ")
-  .trim()
-  .replace(/[ .]+$/g, "");
-
-export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onClassicImport, onPreviewLayout }: SettingsDialogProps) {
+export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onClassicImport, onPreviewLayout, onPreviewFolderName }: SettingsDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
@@ -35,6 +26,9 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
   const [activeSection, setActiveSection] = useState("일반");
   const [draft, setDraft] = useState<SettingsSnapshot>(settings);
   const [saving, setSaving] = useState(false);
+  const [folderPreview, setFolderPreview] = useState("");
+  const [folderPreviewError, setFolderPreviewError] = useState("");
+  const folderPreviewRequest = useRef(0);
 
   useEffect(() => {
     if (open && !wasOpen.current) {
@@ -56,6 +50,28 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
     }
     wasOpen.current = open;
   }, [open, onPreviewLayout, settings]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const request = ++folderPreviewRequest.current;
+    const timer = window.setTimeout(() => {
+      void onPreviewFolderName(draft.folderNameTemplate).then((result) => {
+        if (folderPreviewRequest.current !== request) return;
+        if (result.ok) {
+          setFolderPreview(result.data);
+          setFolderPreviewError("");
+        } else {
+          setFolderPreview("");
+          setFolderPreviewError(result.error.message);
+        }
+      }).catch(() => {
+        if (folderPreviewRequest.current !== request) return;
+        setFolderPreview("");
+        setFolderPreviewError("미리보기를 만들 수 없습니다.");
+      });
+    }, 125);
+    return () => window.clearTimeout(timer);
+  }, [draft.folderNameTemplate, onPreviewFolderName, open]);
 
   const patch = <K extends keyof SettingsSnapshot>(key: K, value: SettingsSnapshot[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -144,8 +160,9 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                 <div className="setting-row">
                   <div>
                     <strong>갤러리 폴더 이름</strong>
-                    <span>{"{artist}, {title}, {group}, {id}를 사용할 수 있으며 {id}는 필수입니다."}</span>
-                    <span aria-live="polite">미리보기: {previewFolderName(draft.folderNameTemplate) || "(유효한 이름 없음)"}</span>
+                    <span>{"사용가능 인자 : {artist}, {title}, {group}, {id}"}</span>
+                    <span aria-live="polite">미리보기 : {folderPreview || "(확인 중)"}</span>
+                    {folderPreviewError ? <span className="setting-validation-error" role="alert">{folderPreviewError}</span> : null}
                   </div>
                   <div>
                     <input

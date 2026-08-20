@@ -65,6 +65,8 @@ const sortOptions: Array<{ value: SearchSort; label: string }> = [
   { value: "random", label: "무작위" },
 ];
 
+const previewFolderNameTemplate = (template: string) => backend.folderNameTemplatePreview(template);
+
 const activeDownloadStates: ReadonlySet<DownloadState> = new Set([
   "queued",
   "resolving_metadata",
@@ -1684,6 +1686,7 @@ export default function App() {
         onSave={saveSettingsPatch}
         onClassicImport={() => setClassicImportOpen(true)}
         onPreviewLayout={setSettingsPreview}
+        onPreviewFolderName={previewFolderNameTemplate}
       />
 
       <ClassicImportDialog

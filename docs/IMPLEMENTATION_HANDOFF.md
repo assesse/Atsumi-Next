@@ -123,6 +123,7 @@
 - schema v16 `download_candidate_diagnostics_and_artifact_root_snapshot`: page candidate 형식/status/content-type/retryability와 artifact 최초 root snapshot을 추가하고 root를 immutable하게 고정했다.
 - download/thumbnail image pipeline은 pinned pure-Rust `avif-rust 0.0.6`/`bin-rs 0.0.10`으로 bounded AVIF를 experimental 지원한다. JXL은 diagnostic만 남기고 fallback 뒤 non-retryable `IMAGE_FORMAT_UNSUPPORTED`다.
 - schema v17 `auto_find_history_cutoff_evidence`: 설정/run history mode, verified owned artist, 작가별 cutoff evidence와 truncation을 추가했다. 현재 literal은 `source=verified_owned_artifact`, `policyVersion=1`; cutoff 뒤 50,000 candidate limit이며 과거 250-page 정책은 폐기됐다.
+- Windows download root 표시 경계는 well-formed `\\?\D:\...`와 `\\?\UNC\...`만 일반 drive/UNC로 바꾼다. 폴더 선택 뒤 canonical root를 설정에 그대로 저장하던 유입 경로를 차단했으며, 기존 artifact `root_snapshot`과 파일은 그대로 둔다. 폴더 template 미리보기는 실제 Rust planner command를 사용한다.
 - 데이터 호환성: DB schema는 17이다. v15~v17은 additive하고 기존 `relative_directory`를 다시 계산하지 않으며 manifest schema 1과 HashProfile 1을 재해석하지 않는다.
 
 ## 4. Contracts and versions

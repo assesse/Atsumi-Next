@@ -314,6 +314,7 @@ pub fn run() -> tauri::Result<()> {
         .invoke_handler(tauri::generate_handler![
             interface::commands::settings_get,
             interface::commands::settings_update,
+            interface::commands::folder_name_template_preview,
             interface::commands::window_placement_get,
             interface::commands::window_placement_update,
             interface::commands::search_submit,

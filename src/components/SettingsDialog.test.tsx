@@ -29,6 +29,10 @@ describe("SettingsDialog operational boundaries", () => {
     document.body.append(container);
     const root = createRoot(container);
     const onSave = vi.fn(async () => false);
+    const onPreviewFolderName = vi.fn(async () => ({
+      ok: true,
+      data: "[작가] 작품 제목 [그룹] 4113714",
+    } as const));
 
     try {
       await act(async () => root.render(
@@ -41,8 +45,12 @@ describe("SettingsDialog operational boundaries", () => {
           onSave={onSave}
           onClassicImport={vi.fn()}
           onPreviewLayout={vi.fn()}
+          onPreviewFolderName={onPreviewFolderName}
         />,
       ));
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, 140));
+      });
 
       const sectionLabels = [...container.querySelectorAll<HTMLButtonElement>(".settings-nav button")]
         .map((button) => button.textContent);
@@ -57,7 +65,11 @@ describe("SettingsDialog operational boundaries", () => {
       expect(template?.value).toBe("[{artist}] {title} [{group}] {id}");
       const historyMode = container.querySelector<HTMLSelectElement>('[aria-label="Auto Find 기록 기준"]');
       expect(historyMode?.value).toBe("include_all_history");
-      expect(container.textContent).toContain("미리보기: [작가] 작품 제목 [그룹] 4113714");
+      expect(container.textContent).toContain("사용가능 인자 : {artist}, {title}, {group}, {id}");
+      expect(container.textContent).toContain("미리보기 : [작가] 작품 제목 [그룹] 4113714");
+      expect(container.textContent).not.toContain("{id}는 필수입니다");
+      expect(container.textContent).not.toContain("사용할 수 있으며");
+      expect(onPreviewFolderName).toHaveBeenCalledTimes(1);
       await act(async () => {
         if (!template) throw new Error("template input missing");
         template.value = "{title} {id}";

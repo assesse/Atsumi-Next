@@ -8,6 +8,48 @@ pub const DEFAULT_CACHE_LIMIT_GB: u32 = 10;
 pub const DEFAULT_CONCURRENT_IMAGE_REQUESTS: u32 = 5;
 pub const DEFAULT_REQUEST_START_INTERVAL_MS: u64 = 25;
 
+/// Converts only well-formed Windows verbatim filesystem paths to the form a
+/// user normally reads and edits. Device paths and malformed prefixes are
+/// deliberately left unchanged.
+pub fn windows_path_for_display(value: &str) -> String {
+    const VERBATIM_PREFIX: &str = "\\\\?\\";
+    const VERBATIM_UNC_PREFIX: &str = "\\\\?\\UNC\\";
+
+    if let Some(rest) = value.strip_prefix(VERBATIM_UNC_PREFIX) {
+        let mut components = rest.split('\\');
+        if components.next().is_some_and(|server| !server.is_empty())
+            && components.next().is_some_and(|share| !share.is_empty())
+        {
+            return format!(r"\\{rest}");
+        }
+        return value.to_owned();
+    }
+
+    if let Some(rest) = value.strip_prefix(VERBATIM_PREFIX) {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+        {
+            return rest.to_owned();
+        }
+    }
+
+    value.to_owned()
+}
+
+pub fn download_root_for_display(value: &str) -> String {
+    #[cfg(windows)]
+    {
+        windows_path_for_display(value)
+    }
+    #[cfg(not(windows))]
+    {
+        value.to_owned()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoFindHistoryMode {
@@ -105,6 +147,10 @@ impl SettingsSnapshot {
             next.auto_find_history_mode = value;
         }
 
+        // Windows canonicalization is still used at filesystem boundaries,
+        // but settings remain human-readable and editable.
+        next.download_root = download_root_for_display(&next.download_root);
+
         next.revision = self
             .revision
             .checked_add(1)
@@ -146,5 +192,43 @@ impl SettingsSnapshot {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_display_paths_remove_only_safe_verbatim_prefixes() {
+        assert_eq!(windows_path_for_display(r"\\?\D:\AD"), r"D:\AD");
+        assert_eq!(
+            windows_path_for_display(r"\\?\UNC\server\share\AD"),
+            r"\\server\share\AD"
+        );
+        assert_eq!(windows_path_for_display(r"D:\AD"), r"D:\AD");
+        assert_eq!(
+            windows_path_for_display(r"\\server\share\AD"),
+            r"\\server\share\AD"
+        );
+        assert_eq!(
+            windows_path_for_display(r"\\.\PhysicalDrive0"),
+            r"\\.\PhysicalDrive0"
+        );
+        assert_eq!(
+            windows_path_for_display(r"\\?\UNC\server"),
+            r"\\?\UNC\server"
+        );
+        assert_eq!(windows_path_for_display(r"\\?\D:AD"), r"\\?\D:AD");
+        assert_eq!(
+            windows_path_for_display(r"\\?\Volume{1234}\AD"),
+            r"\\?\Volume{1234}\AD"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_download_roots_are_not_rewritten() {
+        assert_eq!(download_root_for_display(r"\\?\D:\AD"), r"\\?\D:\AD");
     }
 }

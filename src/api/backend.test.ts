@@ -53,6 +53,23 @@ describe("browser backend settings contract", () => {
       });
     }
   });
+
+  it("keeps browser settings paths human-readable and uses fixed Rust-preview fixtures", async () => {
+    const current = await backend.settingsGet();
+    if (!current.ok) throw new Error(current.error.message);
+    const updated = await backend.settingsUpdate(
+      { downloadRoot: "\\\\?\\D:\\AD" },
+      current.data.revision,
+    );
+    expect(updated).toMatchObject({ ok: true, data: { downloadRoot: "D:\\AD" } });
+    const loaded = await backend.settingsGet();
+    expect(loaded).toMatchObject({ ok: true, data: { downloadRoot: "D:\\AD" } });
+
+    await expect(backend.folderNameTemplatePreview("[{artist}] {title} [{group}] {id}"))
+      .resolves.toEqual({ ok: true, data: "[작가] 작품 제목 [그룹] 4113714" });
+    await expect(backend.folderNameTemplatePreview("{title}:<{artist}>* [{group}] {id}"))
+      .resolves.toEqual({ ok: true, data: "작품 제목__작가__ [그룹] 4113714" });
+  });
 });
 
 describe("browser backend Classic import contract", () => {

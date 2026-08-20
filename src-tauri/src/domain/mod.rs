@@ -59,7 +59,10 @@ pub use search::{
     GalleryDetail, GalleryPage, GallerySummary, Language, SearchRequest, SearchSort,
     SearchSubmission,
 };
-pub use settings::{AutoFindHistoryMode, SettingsPatch, SettingsSnapshot};
+pub use settings::{
+    download_root_for_display, windows_path_for_display, AutoFindHistoryMode, SettingsPatch,
+    SettingsSnapshot,
+};
 pub use window_placement::{WindowPlacement, WindowPlacementSnapshot};
 
 use thiserror::Error;

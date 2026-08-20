@@ -389,6 +389,107 @@ fn default_settings_match_the_approved_foundation_values() {
 }
 
 #[test]
+fn folder_name_preview_uses_the_production_artifact_planner() {
+    let repository = Arc::new(SqliteRepository::open_in_memory().expect("create repository"));
+    let service = ApplicationService::new(repository);
+
+    assert_eq!(
+        service
+            .folder_name_template_preview("[{artist}] {title} [{group}] {id}")
+            .expect("preview default template"),
+        "[작가] 작품 제목 [그룹] 4113714"
+    );
+    assert_eq!(
+        service
+            .folder_name_template_preview("{title}:<{artist}>* [{group}] {id}")
+            .expect("preview sanitized template"),
+        "작품 제목__작가__ [그룹] 4113714"
+    );
+    assert!(service.folder_name_template_preview("{title}").is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn settings_display_normalization_does_not_move_or_rewrite_existing_artifacts() {
+    let temporary = tempfile::tempdir().expect("create temporary directory");
+    let download_root = temporary.path().join("downloads");
+    let artifact_directory = download_root.join("gallery-77");
+    std::fs::create_dir_all(&artifact_directory).expect("create artifact fixture");
+    let sentinel = artifact_directory.join("001.webp");
+    std::fs::write(&sentinel, b"keep existing artifact bytes").expect("write artifact fixture");
+    let canonical_root = download_root
+        .canonicalize()
+        .expect("canonicalize Windows download root");
+    let canonical_text = canonical_root.to_string_lossy().into_owned();
+    assert!(canonical_text.starts_with(r"\\?\"));
+
+    let repository = Arc::new(SqliteRepository::open_in_memory().expect("create repository"));
+    {
+        let connection = repository.connection().expect("lock repository");
+        connection
+            .execute(
+                "UPDATE settings SET download_root = ?1 WHERE singleton = 1",
+                [&canonical_text],
+            )
+            .expect("seed legacy verbatim setting");
+        connection
+            .execute(
+                "INSERT INTO galleries (gallery_id, revision, title, source_page_count) VALUES (77, 0, 'Existing artifact', 1)",
+                [],
+            )
+            .expect("insert gallery");
+        connection
+            .execute(
+                "INSERT INTO download_entries (entry_id, gallery_id, revision, state, progress, created_at, updated_at) VALUES ('entry-77', 77, 0, 'completed', 100, 'now', 'now')",
+                [],
+            )
+            .expect("insert download entry");
+        connection
+            .execute(
+                "INSERT INTO download_artifacts (entry_id, gallery_id, revision, relative_directory, expected_page_count, state, manifest_relative_path, hash_profile_version, root_snapshot) VALUES ('entry-77', 77, 0, 'gallery-77', 1, 'complete', 'gallery-77/manifest.json', 1, ?1)",
+                [&canonical_text],
+            )
+            .expect("insert artifact root snapshot");
+    }
+
+    let service = ApplicationService::new(repository.clone());
+    let displayed = service.settings_get().expect("load displayed settings");
+    assert_eq!(displayed.download_root, download_root.to_string_lossy());
+    let updated = service
+        .settings_update(
+            SettingsPatch {
+                max_columns: Some(4),
+                ..SettingsPatch::default()
+            },
+            displayed.revision,
+        )
+        .expect("save unrelated setting");
+    assert_eq!(updated.download_root, download_root.to_string_lossy());
+
+    let connection = repository.connection().expect("lock repository");
+    let stored_setting: String = connection
+        .query_row(
+            "SELECT download_root FROM settings WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read normalized setting");
+    let stored_artifact_root: String = connection
+        .query_row(
+            "SELECT root_snapshot FROM download_artifacts WHERE entry_id = 'entry-77'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read immutable artifact root");
+    assert_eq!(stored_setting, download_root.to_string_lossy());
+    assert_eq!(stored_artifact_root, canonical_text);
+    assert_eq!(
+        std::fs::read(&sentinel).expect("existing artifact remains in place"),
+        b"keep existing artifact bytes"
+    );
+}
+
+#[test]
 fn settings_validation_matches_the_approved_ui_ranges() {
     let limits = SettingsSnapshot {
         revision: 0,

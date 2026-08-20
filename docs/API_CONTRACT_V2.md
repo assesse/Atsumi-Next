@@ -77,6 +77,7 @@ type ApiError = {
 | `classic_import_get` | `{ importId }` | `ClassicImportReport` | 예 |
 | `classic_import_apply` | `{ request }` | `ClassicImportApplyResult` | report와 imported gallery/file/byte 합계; import revision·승인 CAS |
 | `classic_import_rollback` | `{ request }` | `ClassicImportReport` | import revision·journal 기반 |
+| `folder_name_template_preview` | `{ template }` | `string` | 실제 artifact planner의 sample 결과 |
 | `app_minimize_to_tray` | 없음 | `null` | 예 |
 | `app_quit` | 없음 | `null` | shutdown gate 기반 |
 
@@ -110,7 +111,7 @@ type SettingsSnapshot = {
 };
 ```
 
-`settings_update`는 `expectedRevision` CAS를 사용한다. `folderNameTemplate`과 `autoFindHistoryMode`의 변경은 새 artifact/새 Auto Find run부터 적용하고 이미 예약된 artifact path나 실행 중 run을 재해석하지 않는다.
+`settings_update`는 `expectedRevision` CAS를 사용한다. Windows의 `downloadRoot`는 사람이 읽고 편집하는 drive/UNC 형식이며 well-formed `\\?\D:\...`와 `\\?\UNC\...`만 표시 경계에서 일반 형식으로 바꾼다. device path나 malformed prefix는 변환하지 않는다. filesystem containment는 별도로 canonical path를 사용하고 기존 artifact `root_snapshot`은 표시 정규화의 대상이 아니다. `folderNameTemplate`과 `autoFindHistoryMode`의 변경은 새 artifact/새 Auto Find run부터 적용하고 이미 예약된 artifact path나 실행 중 run을 재해석하지 않는다.
 
 ## SearchRequest
 
@@ -333,6 +334,7 @@ type ThumbnailRequest = {
 
 - `completed`는 실제 WebP page 전부의 decode·byte length·SHA-256, source page mapping, schema 1 manifest와 DB snapshot이 일치한 뒤에만 기록한다.
 - `SettingsSnapshot.folderNameTemplate` 기본값은 `[{artist}] {title} [{group}] {id}`이고 `{artist}`, `{title}`, `{group}`, `{id}`만 허용하며 `{id}`가 반드시 포함되어야 한다. 512 bytes 이하이고 Windows 금지/control 문자·reserved device name·trailing dot/space를 제거한다. component는 180 UTF-16 units, download root 아래 관리 경로는 240 UTF-16 units 안에서 gallery ID를 보존한다.
+- `folder_name_template_preview`는 artist=`작가`, title=`작품 제목`, group=`그룹`, id=`4113714`를 실제 `plan_artifact_relative_directory()`에 전달한다. frontend는 sanitizer를 복제하지 않고 약 125ms debounce한 IPC 결과만 표시한다.
 - template은 새 artifact의 최초 예약에만 적용한다. 기존 `relative_directory`와 v16 `root_snapshot`은 immutable이고 resume/reconcile/Review는 저장된 위치를 사용한다. 기존 artifact 자동 rename/move API는 존재하지 않는다.
 - source candidate는 `unknown|webp|jpeg|png|avif|jxl` 형식, HTTP status, content type, retryability를 page attempt diagnostic에 저장한다. WebP/JPEG/PNG는 검증 후 lossless WebP로 저장한다. AVIF는 pinned pure-Rust bounded decoder를 쓰는 experimental 지원이고 JXL은 decoder가 없어 fallback 뒤 `IMAGE_FORMAT_UNSUPPORTED`가 non-retryable이다.
 - `app_reconcile`은 `{ inspectedArtifacts, verifiedArtifacts, resumedJobs, issues[] }`를 반환한다. 각 issue는 `entryId`, stable `code`, 사용자 문구와 `recoverable`을 가진다.

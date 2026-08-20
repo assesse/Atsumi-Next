@@ -13,6 +13,7 @@
 - `folderNameTemplate`은 새 download/import artifact에만 적용된다. 이미 DB에 등록된 `download_artifacts.relative_directory`와 `root_snapshot`은 immutable trigger로 보호된다.
 - 기존 artifact를 새 template에 맞춰 자동 rename/move하는 기능은 없다. 파일만 수동 이동하면 DB·manifest·root snapshot이 달라져 Review 또는 reconcile 오류가 되므로 실행하지 않는다.
 - download root 설정을 바꿔도 기존 artifact 작업은 저장된 `root_snapshot`을 사용한다. 기존 root를 분리·이동하려면 별도의 revisioned migration/relocation 설계와 rollback이 먼저 필요하다.
+- Windows `canonicalize()`가 만든 `\\?\` prefix는 내부 containment와 기존 `root_snapshot`에 남을 수 있다. 설정 API와 input만 안전한 drive/UNC 표시 형식으로 바꾸며 기존 snapshot, manifest, 폴더를 일괄 재작성하지 않는다.
 
 ## Auto Find 범위
 

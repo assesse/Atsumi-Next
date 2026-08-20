@@ -198,6 +198,7 @@ type JobEvent = {
 - 각 page는 bounded HTTP body read, `.part` 64KiB chunk write, flush/sync, decode/WebP 검증, SHA-256 후 atomic rename 순서를 따른다.
 - 검증된 원본 WebP는 byte를 보존하고 JPEG/PNG/AVIF는 RGBA lossless WebP로 변환한다. AVIF는 pinned `avif-rust 0.0.6`/`bin-rs 0.0.10`과 dimension/allocation 제한을 사용하는 experimental 경로다. JPEG XL은 현재 decode하지 않고 후보 diagnostic 뒤 fallback을 계속하며 최종 실패는 non-retryable `IMAGE_FORMAT_UNSUPPORTED`다. alpha는 보존하며, 변환 입력의 animation은 첫 frame 정책이다. 이 정책과 writer/app version은 manifest에 기록한다.
 - 새 artifact의 상대 폴더는 backend가 `folder_name_template`을 검증·sanitize해 최초 예약한다. `{id}`는 필수이고 기존 `relative_directory`와 최초 `root_snapshot`은 schema v15/v16 trigger로 immutable이다. 설정 변경은 이후 새 artifact에만 적용되며 자동 rename/move가 없다.
+- Windows 설정 projection은 well-formed verbatim drive/UNC prefix를 사람이 읽는 형식으로 바꾸지만 artifact store는 작업마다 root를 canonicalize해 containment를 검증한다. `folder_name_template_preview`도 production planner를 그대로 사용하므로 UI와 실제 예약 규칙이 갈라지지 않는다.
 - manifest schema 1은 gallery snapshot, source page mapping, relative path, byte length, SHA-256, storage format, exclusion/quarantine, 완료 시각과 HashProfile version을 가진다.
 - 모든 page 파일과 DB checkpoint를 다시 검증하고 manifest temp write/sync/atomic replace를 마친 뒤에만 DB artifact/job/entry를 `completed`로 바꾼다.
 - startup/manual reconcile은 pending quarantine saga를 먼저 마무리하고, 완료 artifact의 파일·hash·manifest를 검사한 뒤 interrupted job을 verified checkpoint부터 재개한다.

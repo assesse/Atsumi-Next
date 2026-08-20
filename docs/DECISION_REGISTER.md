@@ -74,6 +74,7 @@
 | D-154 | AVIF는 `avif-rust=0.0.6`, `bin-rs=0.0.10`의 순수 Rust bounded decoder로 실험 지원한다. JPEG XL은 형식 diagnostic만 보존하고 decoder가 없으므로 fallback 뒤 `IMAGE_FORMAT_UNSUPPORTED`로 종료한다. | 2026-08-20 source recovery 구현 |
 | D-155 | Auto Find history mode는 run 시작 시 snapshot한다. `newer_than_oldest_downloaded` cutoff는 검증 소유 artifact만 근거로 하고 `source=verified_owned_artifact`, `policyVersion=1`을 영속한다. 증거가 없으면 cutoff하지 않는다. | 2026-08-20 schema v17 안전 경계 |
 | D-156 | Auto Find는 Nozomi ID에 cutoff를 먼저 적용한 뒤 최대 50,000 candidate를 처리하고 초과 시 `candidate_limit_after_cutoff`를 기록한다. 기존 작가당 250-page 상한은 폐기한다. | 2026-08-20 Auto Find source 정책 |
+| D-157 | Windows 설정의 download root는 사람이 읽는 drive/UNC 형식으로 저장·표시하고 filesystem 경계는 canonical path를 별도로 사용한다. 기존 artifact `root_snapshot`은 바꾸지 않으며 폴더 이름 미리보기는 실제 Rust planner를 호출한다. | 2026-08-20 사용자 지시 및 경로 안정화 |
 
 ## 제안
 

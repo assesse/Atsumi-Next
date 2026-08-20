@@ -78,6 +78,7 @@ export interface BackendClient {
   readonly runtime: "tauri" | "browser-mock";
   settingsGet(): Promise<ApiResult<SettingsSnapshot>>;
   settingsUpdate(patch: SettingsPatch, expectedRevision: number): Promise<ApiResult<SettingsSnapshot>>;
+  folderNameTemplatePreview(template: string): Promise<ApiResult<string>>;
   windowPlacementGet(): Promise<ApiResult<WindowPlacementSnapshot>>;
   windowPlacementUpdate(
     placement: WindowPlacement,
@@ -142,6 +143,24 @@ const defaultSettings: SettingsSnapshot = {
   requestStartIntervalMs: 25,
 };
 
+const windowsPathForDisplay = (value: string): string => {
+  const uncPrefix = "\\\\?\\UNC\\";
+  if (value.startsWith(uncPrefix)) {
+    const rest = value.slice(uncPrefix.length);
+    const [server, share] = rest.split("\\");
+    return server && share ? `\\\\${rest}` : value;
+  }
+  const verbatimPrefix = "\\\\?\\";
+  if (!value.startsWith(verbatimPrefix)) return value;
+  const rest = value.slice(verbatimPrefix.length);
+  return /^[A-Za-z]:\\/.test(rest) ? rest : value;
+};
+
+const browserFolderPreviewFixtures = new Map<string, string>([
+  ["[{artist}] {title} [{group}] {id}", "[작가] 작품 제목 [그룹] 4113714"],
+  ["{title}:<{artist}>* [{group}] {id}", "작품 제목__작가__ [그룹] 4113714"],
+]);
+
 const BROWSER_SETTINGS_STORAGE_KEY = "atsumi.browser.settings.v1";
 
 const readPersistedBrowserSettings = (): SettingsSnapshot => {
@@ -153,6 +172,7 @@ const readPersistedBrowserSettings = (): SettingsSnapshot => {
     return {
       ...defaultSettings,
       ...parsed,
+      downloadRoot: windowsPathForDisplay(parsed.downloadRoot ?? defaultSettings.downloadRoot),
       autoFindHistoryMode: parsed.autoFindHistoryMode === "newer_than_oldest_downloaded"
         ? "newer_than_oldest_downloaded"
         : "include_all_history",
@@ -527,6 +547,7 @@ class BrowserMockBackend implements BackendClient {
   async settingsUpdate(patch: SettingsPatch, expectedRevision: number): Promise<ApiResult<SettingsSnapshot>> {
     if (expectedRevision !== this.settings.revision) return conflict("설정");
     const next = { ...this.settings, ...patch };
+    next.downloadRoot = windowsPathForDisplay(next.downloadRoot);
     const invalid =
       validateFolderNameTemplate(next.folderNameTemplate) ??
       (next.autoFindHistoryMode !== "include_all_history" && next.autoFindHistoryMode !== "newer_than_oldest_downloaded"
@@ -542,6 +563,18 @@ class BrowserMockBackend implements BackendClient {
     persistBrowserSettings(this.settings);
     this.emit("settings:changed", { ...this.settings });
     return ok({ ...this.settings });
+  }
+
+  async folderNameTemplatePreview(template: string): Promise<ApiResult<string>> {
+    const invalid = validateFolderNameTemplate(template);
+    if (invalid) return invalid;
+    const preview = browserFolderPreviewFixtures.get(template);
+    return preview === undefined
+      ? validationError(
+        "folderNameTemplate",
+        "브라우저 검토 모드에는 이 템플릿의 Rust 미리보기 fixture가 없습니다.",
+      )
+      : ok(preview);
   }
 
   async windowPlacementGet(): Promise<ApiResult<WindowPlacementSnapshot>> {
@@ -1770,6 +1803,10 @@ class TauriBackend implements BackendClient {
 
   settingsUpdate(patch: SettingsPatch, expectedRevision: number): Promise<ApiResult<SettingsSnapshot>> {
     return invoke("settings_update", { patch, expectedRevision });
+  }
+
+  folderNameTemplatePreview(template: string): Promise<ApiResult<string>> {
+    return invoke("folder_name_template_preview", { template });
   }
 
   windowPlacementGet(): Promise<ApiResult<WindowPlacementSnapshot>> {
