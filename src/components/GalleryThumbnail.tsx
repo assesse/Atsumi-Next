@@ -8,6 +8,7 @@ import {
   type CSSProperties,
   type HTMLAttributes,
   type ReactNode,
+  type Ref,
 } from "react";
 import {
   ThumbnailClient,
@@ -31,6 +32,7 @@ type GalleryThumbnailProps = Omit<HTMLAttributes<HTMLElement>, "children"> & {
   sizing?: "container" | "intrinsic";
   /** Reserve this ratio before the coordinator returns intrinsic image dimensions. */
   expectedAspectRatio?: { readonly width: number; readonly height: number };
+  rootRef?: Ref<HTMLElement>;
   client?: ThumbnailClient;
   children?: ReactNode;
 };
@@ -48,6 +50,11 @@ const nearViewportMargin = "600px 0px";
 
 const loadingForPriority = (priority: ThumbnailPriority): "eager" | "lazy" =>
   priority === "prefetch" ? "lazy" : "eager";
+
+const assignRef = <T,>(ref: Ref<T> | undefined, value: T | null): void => {
+  if (typeof ref === "function") ref(value);
+  else if (ref) (ref as { current: T | null }).current = value;
+};
 
 const thumbnailFailureLabel = (code: string | undefined): string => {
   switch (code) {
@@ -193,6 +200,7 @@ export function GalleryThumbnail({
   as = "div",
   sizing = "container",
   expectedAspectRatio,
+  rootRef,
   client: clientOverride,
   className,
   style,
@@ -202,6 +210,10 @@ export function GalleryThumbnail({
   const client = useThumbnailClient(clientOverride);
   const identity = thumbnailKeyIdentity(thumbnailKey);
   const elementRef = useRef<HTMLElement | null>(null);
+  const setElementRef = useCallback((element: HTMLElement | null) => {
+    elementRef.current = element;
+    assignRef(rootRef, element);
+  }, [rootRef]);
   const hasIntersectionObserver = typeof IntersectionObserver === "function";
   const [activatedIdentity, setActivatedIdentity] = useState<string | null>(() =>
     priority === "critical" || !hasIntersectionObserver ? identity : null,
@@ -274,9 +286,7 @@ export function GalleryThumbnail({
   return (
     <Element
       {...elementProps}
-      ref={(element) => {
-        elementRef.current = element;
-      }}
+      ref={setElementRef}
       className={[
         className,
         "gallery-thumbnail",

@@ -705,6 +705,7 @@ h2 {
 .gallery-grid {
   display: grid;
   grid-template-columns: 1fr;
+  align-items: start;
   gap: 12px;
 }
 
@@ -746,22 +747,24 @@ h2 {
   position: relative;
   display: grid;
   grid-template-columns: minmax(112px, var(--preview-width)) minmax(0, 1fr);
+  align-self: start;
+  block-size: var(--gallery-card-height, auto);
+  min-height: 0;
+  overflow: hidden;
   align-items: stretch;
   min-width: 0;
-  overflow: hidden;
   color: #16242b;
   user-select: none;
   background: var(--card-surface);
-  border: 1px solid var(--card-border);
+  border: 0;
   border-radius: 8px;
-  box-shadow: 0 1px 2px rgba(19, 47, 54, 0.035);
-  transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+  box-shadow: inset 0 0 0 1px var(--card-border), 0 1px 2px rgba(19, 47, 54, 0.035);
+  transition: background-color 120ms ease, box-shadow 120ms ease;
 }
 
 .gallery-card:hover {
-  border-color: var(--card-border-hover);
   background: #fdfefe;
-  box-shadow: 0 4px 12px rgba(19, 47, 54, 0.08);
+  box-shadow: inset 0 0 0 1px var(--card-border-hover), 0 4px 12px rgba(19, 47, 54, 0.08);
 }
 
 .gallery-card:focus-visible {
@@ -771,13 +774,11 @@ h2 {
 
 .gallery-card.is-selected {
   background: #f7fbfc;
-  border-color: var(--primary-strong);
-  box-shadow: inset 0 0 0 1px var(--primary-strong);
+  box-shadow: inset 0 0 0 2px var(--primary-strong);
 }
 
 .gallery-card.is-selected:hover {
-  border-color: var(--primary-strong);
-  box-shadow: inset 0 0 0 1px var(--primary-strong), 0 4px 12px rgba(19, 47, 54, 0.08);
+  box-shadow: inset 0 0 0 2px var(--primary-strong), 0 4px 12px rgba(19, 47, 54, 0.08);
 }
 
 .selection-indicator {
@@ -836,6 +837,7 @@ h2 {
   align-self: start;
   width: 100%;
   min-width: 0;
+  min-height: 0;
   aspect-ratio: 1 / 1;
   overflow: hidden;
   background-color: #d8e4e2;
@@ -991,8 +993,11 @@ h2 {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   align-self: stretch;
+  block-size: 100%;
+  max-block-size: 100%;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   padding: 12px;
   container: gallery-card-content / inline-size;
 }
@@ -1099,13 +1104,13 @@ h2 {
 }
 
 .tag-list {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-content: flex-start;
   gap: 4px 6px;
   min-width: 0;
   min-height: 0;
-  height: 100%;
   margin-top: 8px;
   overflow: hidden;
 }
@@ -1117,6 +1122,7 @@ h2 {
   max-width: min(150px, 100%);
   height: 24px;
   min-height: 24px;
+  gap: 4px;
   padding: 0 8px;
   overflow: hidden;
   color: #566b71;
@@ -1134,15 +1140,23 @@ h2 {
   background: #e8f0ee;
 }
 
-.tag::before {
-  display: none;
+.tag-namespace,
+.tag-favorite {
   flex: 0 0 auto;
-  width: auto;
-  height: auto;
-  margin-right: 4px;
   font-size: 11px;
   font-weight: 700;
   line-height: 16px;
+}
+
+.tag-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-favorite {
+  color: var(--favorite);
 }
 
 .tag.female {
@@ -1150,11 +1164,8 @@ h2 {
   background: #f3f7f6;
 }
 
-.tag.female::before {
-  display: inline;
-  content: "F";
+.tag.female .tag-namespace {
   color: var(--female);
-  background: transparent;
 }
 
 .tag.male {
@@ -1162,27 +1173,41 @@ h2 {
   background: #f3f7f6;
 }
 
-.tag.male::before {
-  display: inline;
-  content: "M";
+.tag.male .tag-namespace {
   color: var(--male);
-  background: transparent;
 }
 
 .tag.favorite {
-  color: var(--favorite);
+  color: #76501e;
   background: #fff7eb;
-}
-
-.tag.favorite::before {
-  display: inline;
-  content: "\2605";
-  color: var(--favorite);
-  background: transparent;
+  box-shadow: inset 0 0 0 1px #edb36f;
 }
 
 .tag.female.favorite {
-  color: var(--favorite);
+  color: #76501e;
+}
+
+.tag-overflow {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 24px;
+  min-height: 24px;
+  padding: 0 8px;
+  color: #566b71;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  background: #eef4f2;
+  border-radius: 999px;
+}
+
+.tag-overflow-measure {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .meta-bottom {
@@ -1970,6 +1995,10 @@ dialog::backdrop {
 .setting-row span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.setting-row .setting-validation-error {
+  color: var(--danger);
 }
 
 .setting-row input:not([type="range"]) {

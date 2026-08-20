@@ -7,7 +7,7 @@ import { mockGalleries } from "../data/mockGalleries";
 import { applyDownloadChanged } from "../state/downloadProjection";
 import { browserFixtureThumbnailAdapter, ThumbnailClient } from "../thumbnail";
 import { GalleryCard } from "./GalleryCard";
-import { fitTagChipCount, splitGalleryTitle } from "./galleryCardLayout";
+import { fitTagChips, sortGalleryTags, splitGalleryTitle } from "./galleryCardLayout";
 
 const defaultThumbnailClient = new ThumbnailClient(browserFixtureThumbnailAdapter);
 
@@ -290,21 +290,93 @@ describe("GalleryCard event projection", () => {
     container.remove();
   });
 
-  it("fits measured tags by rows instead of using a fixed tag count", () => {
-    expect(fitTagChipCount(
-      [{ width: 80, height: 24 }, { width: 100, height: 24 }, { width: 90, height: 24 }, { width: 120, height: 24 }],
-      190,
-      52,
+  it("reserves measured +N space without returning to a fixed tag count", () => {
+    const overflow = [
+      { width: 25, height: 24 },
+      { width: 32, height: 24 },
+      { width: 39, height: 24 },
+    ];
+    expect(fitTagChips(
+      Array.from({ length: 3 }, () => ({ width: 40, height: 24 })),
+      overflow,
+      140,
+      24,
       6,
       4,
-    )).toBe(3);
-    expect(fitTagChipCount(
-      [{ width: 80, height: 24 }, { width: 100, height: 24 }, { width: 90, height: 24 }, { width: 120, height: 24 }],
+    )).toEqual({ visibleCount: 3, hiddenCount: 0, showOverflow: false });
+    expect(fitTagChips(
+      Array.from({ length: 4 }, () => ({ width: 45, height: 24 })),
+      overflow,
       190,
       24,
       6,
       4,
-    )).toBe(2);
+    )).toEqual({ visibleCount: 3, hiddenCount: 1, showOverflow: true });
+    expect(fitTagChips(
+      Array.from({ length: 4 }, () => ({ width: 50, height: 24 })),
+      overflow,
+      180,
+      24,
+      6,
+      4,
+    )).toEqual({ visibleCount: 2, hiddenCount: 2, showOverflow: true });
+    expect(fitTagChips(
+      Array.from({ length: 10 }, () => ({ width: 30, height: 24 })),
+      overflow,
+      70,
+      24,
+      6,
+      4,
+    )).toEqual({ visibleCount: 1, hiddenCount: 9, showOverflow: true });
+    expect(fitTagChips(
+      Array.from({ length: 11 }, () => ({ width: 30, height: 24 })),
+      overflow,
+      70,
+      24,
+      6,
+      4,
+    )).toEqual({ visibleCount: 1, hiddenCount: 10, showOverflow: true });
+    expect(fitTagChips(
+      Array.from({ length: 101 }, () => ({ width: 30, height: 24 })),
+      overflow,
+      70,
+      24,
+      6,
+      4,
+    )).toEqual({ visibleCount: 0, hiddenCount: 101, showOverflow: true });
+    expect(fitTagChips([], overflow, 100, 24, 6, 4))
+      .toEqual({ visibleCount: 0, hiddenCount: 0, showOverflow: false });
+    expect(fitTagChips(
+      [{ width: 80, height: 30 }],
+      [{ width: 25, height: 24 }],
+      60,
+      24,
+      6,
+      4,
+    )).toEqual({ visibleCount: 0, hiddenCount: 1, showOverflow: true });
+    expect(fitTagChips(
+      [{ width: 80, height: 30 }],
+      [{ width: 25, height: 30 }],
+      60,
+      24,
+      6,
+      4,
+    )).toEqual({ visibleCount: 0, hiddenCount: 1, showOverflow: false });
+  });
+
+  it("sorts display tags by favorite then Female, Male and neutral without mutating input", () => {
+    const input = ["neutral-1", "male:a", "female:a", "female:b", "male:b", "neutral-2"];
+    const original = [...input];
+    const sorted = sortGalleryTags(input, new Set(["female:b", "male:a", "neutral-2"]));
+    expect(sorted.map((tag) => tag.value)).toEqual([
+      "female:b",
+      "male:a",
+      "neutral-2",
+      "female:a",
+      "male:b",
+      "neutral-1",
+    ]);
+    expect(input).toEqual(original);
   });
 
   it("splits a pipe title for display while preserving the canonical title", () => {
@@ -677,6 +749,200 @@ describe("GalleryCard event projection", () => {
     expect(callbacks.onOpenDetail).not.toHaveBeenCalled();
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  it("keeps Female and Male markers when favorite stars are shown and reorders immediately", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery: Gallery = {
+      ...mockGalleries[0]!,
+      tags: ["neutral-1", "male:a", "female:a", "female:b", "male:b", "neutral-2"],
+    };
+    const render = (favorites: ReadonlySet<string>) => root.render(
+      <GalleryCard
+        gallery={gallery}
+        view="explore"
+        selected={false}
+        selectionContext={false}
+        favoriteMetadata={favorites}
+        {...callbacks}
+      />,
+    );
+
+    await act(async () => render(new Set(["female:b", "male:a", "neutral-2"])));
+    const tagValues = () => [...container.querySelectorAll<HTMLButtonElement>(".tag")]
+      .map((tag) => tag.querySelector(".tag-label")?.textContent);
+    expect(tagValues()).toEqual(["b", "a", "neutral-2", "a", "b", "neutral-1"]);
+
+    const favoriteFemale = container.querySelector<HTMLButtonElement>('.tag[aria-label^="b, Female 태그, 즐겨찾기"]');
+    const favoriteMale = container.querySelector<HTMLButtonElement>('.tag[aria-label^="a, Male 태그, 즐겨찾기"]');
+    const favoriteNeutral = container.querySelector<HTMLButtonElement>('.tag[aria-label^="neutral-2, 중립 태그, 즐겨찾기"]');
+    const normalFemale = container.querySelector<HTMLButtonElement>('.tag[aria-label^="a, Female 태그, 좌클릭"]');
+    expect(favoriteFemale?.querySelector(".tag-namespace")).toHaveTextContent("F");
+    expect(favoriteFemale?.querySelector(".tag-favorite")).toHaveTextContent("★");
+    expect(favoriteMale?.querySelector(".tag-namespace")).toHaveTextContent("M");
+    expect(favoriteMale?.querySelector(".tag-favorite")).toHaveTextContent("★");
+    expect(favoriteNeutral?.querySelector(".tag-namespace")).toBeNull();
+    expect(favoriteNeutral?.querySelector(".tag-favorite")).toHaveTextContent("★");
+    expect(normalFemale?.querySelector(".tag-namespace")).toHaveTextContent("F");
+    expect(normalFemale?.querySelector(".tag-favorite")).toBeNull();
+
+    await act(async () => {
+      favoriteFemale?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    });
+    expect(callbacks.onMetadataFavorite).toHaveBeenCalledWith("female:b");
+
+    await act(async () => render(new Set(["female:a"])));
+    expect(tagValues().slice(0, 3)).toEqual(["a", "b", "a"]);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("locks the outer card height to the measured cover for 160, 220, 280 and 360px", async () => {
+    let measuredHeight = 160;
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const height = this.classList.contains("cover") || this.classList.contains("gallery-card")
+        ? measuredHeight
+        : 0;
+      return {
+        x: 0,
+        y: 0,
+        width: height,
+        height,
+        top: 0,
+        right: height,
+        bottom: height,
+        left: 0,
+        toJSON: () => ({}),
+      };
+    });
+
+    try {
+      for (const [height, tagCount] of [[160, 3], [220, 30], [280, 3], [360, 30]] as const) {
+        measuredHeight = height;
+        const container = document.createElement("div");
+        document.body.append(container);
+        const root = createRoot(container);
+        const gallery: Gallery = {
+          ...mockGalleries[0]!,
+          tags: Array.from({ length: tagCount }, (_, index) => `tag-${index + 1}`),
+        };
+        await act(async () => root.render(
+          <GalleryCard
+            gallery={gallery}
+            view="explore"
+            selected={false}
+            selectionContext={false}
+            favoriteMetadata={new Set()}
+            {...callbacks}
+          />,
+        ));
+        const card = container.querySelector<HTMLElement>(".gallery-card");
+        const cover = container.querySelector<HTMLElement>(".cover");
+        expect(card?.style.getPropertyValue("--gallery-card-height")).toBe(`${height}px`);
+        expect(Math.abs((card?.getBoundingClientRect().height ?? 0)
+          - (cover?.getBoundingClientRect().height ?? 0))).toBeLessThanOrEqual(1);
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it("renders the measured maximum tags plus a non-interactive +N and recalculates on resize", async () => {
+    let availableWidth = 175;
+    let resolveFonts: (() => void) | undefined;
+    const fontReady = new Promise<void>((resolve) => { resolveFonts = resolve; });
+    const originalFonts = Object.getOwnPropertyDescriptor(document, "fonts");
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: { ready: fontReady },
+    });
+    const observed: Array<{ target: Element; callback: ResizeObserverCallback }> = [];
+    const originalResizeObserver = globalThis.ResizeObserver;
+    class ControlledResizeObserver implements ResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) { observed.push({ target, callback: this.callback }); }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver = ControlledResizeObserver;
+    const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("tag-list") ? availableWidth : 300;
+    });
+    const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("tag-list") ? 24 : 220;
+    });
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const chipWidth = this.classList.contains("tag")
+        ? 45
+        : this.classList.contains("tag-overflow") ? 25 : 220;
+      const chipHeight = this.classList.contains("tag") || this.classList.contains("tag-overflow") ? 24 : 220;
+      return {
+        x: 0,
+        y: 0,
+        width: chipWidth,
+        height: chipHeight,
+        top: 0,
+        right: chipWidth,
+        bottom: chipHeight,
+        left: 0,
+        toJSON: () => ({}),
+      };
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery: Gallery = {
+      ...mockGalleries[0]!,
+      tags: ["tag-1", "tag-2", "tag-3", "tag-4"],
+    };
+
+    try {
+      await act(async () => root.render(
+        <GalleryCard
+          gallery={gallery}
+          view="explore"
+          selected={false}
+          selectionContext={false}
+          favoriteMetadata={new Set()}
+          {...callbacks}
+        />,
+      ));
+      expect(container.querySelectorAll(".tag")).toHaveLength(3);
+      expect(container.querySelector(".tag-overflow:not(.tag-overflow-measure)")).toHaveTextContent("+1");
+      expect(container.querySelector(".tag-overflow:not(.tag-overflow-measure)"))
+        .toHaveAccessibleName("추가 태그 1개");
+      expect(container.querySelector(".tag-overflow:not(.tag-overflow-measure)")).not.toHaveAttribute("tabindex");
+      expect([...container.querySelectorAll(".tag-label")].map((label) => label.textContent))
+        .not.toContain("tag-4");
+
+      availableWidth = 100;
+      const contentObserver = observed.find(({ target }) => target.classList.contains("card-content"));
+      await act(async () => contentObserver?.callback([], {} as ResizeObserver));
+      expect(container.querySelectorAll(".tag")).toHaveLength(1);
+      expect(container.querySelector(".tag-overflow:not(.tag-overflow-measure)")).toHaveTextContent("+3");
+
+      availableWidth = 175;
+      await act(async () => { resolveFonts?.(); await fontReady; });
+      expect(container.querySelectorAll(".tag")).toHaveLength(3);
+      expect(container.querySelector(".tag-overflow:not(.tag-overflow-measure)")).toHaveTextContent("+1");
+
+      await act(async () => contentObserver?.callback([], {} as ResizeObserver));
+      expect(container.querySelector(".tag-overflow:not(.tag-overflow-measure)")).toHaveTextContent("+1");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      rect.mockRestore();
+      height.mockRestore();
+      width.mockRestore();
+      globalThis.ResizeObserver = originalResizeObserver;
+      if (originalFonts) Object.defineProperty(document, "fonts", originalFonts);
+      else Reflect.deleteProperty(document, "fonts");
+    }
   });
 
   it("keeps series and character metadata out of compact cards", async () => {

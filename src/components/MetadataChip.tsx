@@ -54,6 +54,14 @@ export const MetadataChip = forwardRef<HTMLButtonElement, MetadataChipProps>(fun
   const visibleLabel = label ?? (rest.length ? rest.join(":") : namespace).replaceAll("_", " ");
   const namespaceClass = ["female", "male", "artist", "group"].includes(namespace) ? namespace : "";
   const classes = [kind, namespaceClass, favorite ? "favorite" : ""].filter(Boolean).join(" ");
+  const tagNamespaceLabel = namespace === "female"
+    ? "Female 태그"
+    : namespace === "male"
+      ? "Male 태그"
+      : "중립 태그";
+  const accessibleLabel = kind === "tag"
+    ? `${visibleLabel}, ${tagNamespaceLabel}${favorite ? ", 즐겨찾기" : ""}, 좌클릭 검색, 우클릭 즐겨찾기 변경`
+    : `${visibleLabel}${favorite ? ", 즐겨찾기" : ""}, 좌클릭 검색, 우클릭 즐겨찾기 변경`;
 
   const handleContextMenu = (event: MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -66,7 +74,8 @@ export const MetadataChip = forwardRef<HTMLButtonElement, MetadataChipProps>(fun
       type="button"
       ref={ref}
       className={classes}
-      title={`${visibleLabel} · 좌클릭 검색 / 우클릭 즐겨찾기`}
+      aria-label={accessibleLabel}
+      title={kind === "tag" ? accessibleLabel : `${visibleLabel} · 좌클릭 검색 / 우클릭 즐겨찾기`}
       onClickCapture={onClickCapture}
       onClick={(event) => {
         event.stopPropagation();
@@ -76,7 +85,11 @@ export const MetadataChip = forwardRef<HTMLButtonElement, MetadataChipProps>(fun
     >
       {kind === "byline" && namespace === "artist" ? <MetadataIcon kind="artist" /> : null}
       {kind === "byline" && namespace === "group" ? <MetadataIcon kind="group" /> : null}
-      {visibleLabel}
+      {kind === "tag" && (namespace === "female" || namespace === "male") ? (
+        <span className="tag-namespace" aria-hidden="true">{namespace === "female" ? "F" : "M"}</span>
+      ) : null}
+      <span className={kind === "tag" ? "tag-label" : undefined}>{visibleLabel}</span>
+      {kind === "tag" && favorite ? <span className="tag-favorite" aria-hidden="true">★</span> : null}
     </button>
   );
 });

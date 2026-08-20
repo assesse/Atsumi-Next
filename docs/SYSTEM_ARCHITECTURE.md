@@ -162,7 +162,8 @@ type JobEvent = {
 ## 앨범 카드 projection
 
 - Explore/Auto Find/Downloads는 점수·날짜를 제거한 가로 밀도형 카드를 공유한다. title/subtitle, artist/group, language, tags, page count와 gallery ID라는 정보 종류는 유지하되 화면별 상태 action과 선택 규칙만 projection한다.
-- image는 source가 제공한 width/height 비율을 사용하고 preview width를 가용 content rect에 맞춘다. `ResizeObserver`, `document.fonts.ready`와 실제 chip width/height 측정으로 열 수·폰트·폭 변경 뒤 다시 배치한다.
+- image는 source가 제공한 width/height 비율을 사용하고 preview width를 가용 content rect에 맞춘다. cover root의 `ResizeObserver`가 측정 높이를 card CSS property에 직접 기록하므로 content는 외곽 높이에 기여하지 않는다. `document.fonts.ready`와 content resize는 태그 측정만 무효화한다.
+- 표시 태그는 favorite 우선, Female→Male→중립, 같은 bucket 원래 순서의 stable projection이다. 남은 고정 영역에 실제 chip과 자릿수별 overflow chip을 함께 측정해 가능한 최대 태그를 보이고 나머지는 비상호작용 `+N`으로 표시한다. F/M과 favorite star는 서로 대체하지 않는다.
 
 ## Thumbnail coordinator
 

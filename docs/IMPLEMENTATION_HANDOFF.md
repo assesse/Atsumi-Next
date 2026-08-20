@@ -114,9 +114,9 @@
 
 ### Milestone I — post-completion 안정화 (adaptive card·cache/cancel·schema v15~v17)
 
-- `GalleryCard.tsx`와 `galleryCardLayout.ts`: 포스터형 대신 가로 밀도형을 유지하고 점수·날짜를 제거했다. source image width/height, 실제 chip rect, font ready와 `ResizeObserver`를 사용해 열/폭 변경에서도 비율·여백·metadata 배치를 다시 계산한다.
-- `design/card-adaptive-layout-review.html`은 preview 160/220/280/360px와 1/2/3/4열, 짧고 긴 제목, pipe 번역, 명시 subtitle, 작가/그룹, 3/10/25+ 태그, 한중일, F/M favorite, download/duplicate 상태를 한 matrix에서 비교한다. 열/preview를 다시 넓히면 전체 원본 태그 DOM을 재생성한 뒤 다시 측정하므로 앞선 좁은 상태에서 숨긴 태그가 계속 누락되지 않는다.
-- matrix의 태그 결과는 “160px=1줄”처럼 고정하지 않는다. 160/220/280/360px 모두 제목 16px(내용 폭 300px 이상은 18px), byline 14px, 태그/meta 12px를 유지하고, 이미지 예약 높이에서 제목·byline·meta를 뺀 실제 높이에 24px chip이 들어가는 만큼만 원본 순서로 남긴다. 그래서 같은 preview라도 열 수·창 폭·제목 길이에 따라 0줄부터 여러 줄까지 달라지며, 숨긴 chip은 DOM·Tab 순서에서 제거된다. pipe 제목은 첫 segment를 주 제목, 나머지와 중복 제거한 명시 subtitle을 한 secondary line으로 표시하고 canonical title은 tooltip/accessible name에 보존한다.
+- `GalleryCard.tsx`와 `galleryCardLayout.ts`: 포스터형 대신 가로 밀도형을 유지하고 점수·날짜를 제거했다. cover root를 `ResizeObserver`로 측정해 card CSS height를 직접 고정하므로 content와 태그가 외곽을 늘리지 않는다. 160/220/280/360px에서 card/cover 차이 1px 이하를 component test로 고정했다.
+- `design/card-adaptive-layout-review.html`은 preview 160/220/280/360px와 1/2/3/4열, 짧고 긴 제목, pipe 번역, 명시 subtitle, 작가/그룹, 3/10/25+ 태그, 한중일, F/M/중립 favorite, download/duplicate 상태를 한 matrix에서 비교한다. 열/preview를 다시 넓히면 전체 원본 tag element를 다시 드러낸 뒤 재측정하므로 앞선 좁은 상태에서 숨긴 태그가 계속 누락되지 않는다.
+- matrix의 태그 결과는 “160px=1줄”이나 고정 개수로 정하지 않는다. 제목·byline·meta를 뺀 실제 높이에 24px chip과 자릿수별 `+N`을 함께 측정해 가능한 최대 개수를 표시한다. `+N`이 들어오려면 tag를 더 줄일 수 있고, `+N`만 들어가거나 overflow 자체가 숨는 극단도 순수 함수로 고정했다. 표시 순서는 favorite 우선, Female→Male→중립, 같은 bucket 원래 순서이며 canonical `gallery.tags`는 바꾸지 않는다. F/M marker와 주황 star는 별도 span이라 favorite에도 namespace가 남는다. 숨긴 chip은 DOM·Tab 순서에서 제거된다. pipe 제목은 첫 segment를 주 제목, 나머지와 중복 제거한 명시 subtitle을 한 secondary line으로 표시하고 canonical title은 tooltip/accessible name에 보존한다.
 - `thumbnail/client.ts`: 마지막 구독 해제 뒤 400ms orphan grace와 resolved asset 120초/최대 256개 retention을 추가했다. 빠른 viewport 왕복은 동일 request/blob을 재사용하고 최종 eviction에서만 URL을 revoke한다. Rust coordinator 기본 cache 512 entries/64MiB/30분, retryable/permanent negative TTL 3초/5분은 유지된다.
 - `ExplorePageSession`, frontend/backend adapter와 `search_page_cancel`: query별 settled page 최대 5개·현재 ±2·인접 prefetch·page별 scroll을 구현했다. query reset은 모든 requestId를 취소하고 backend는 active token뿐 아니라 최대 256개의 cancel-before-start tombstone으로 실제 source 작업을 막는다.
 - schema v15 `artifact_folder_template_and_immutable_path`: 새 artifact folder template, `{id}` 필수, Windows path sanitization과 기존 relative path immutable trigger를 추가했다. 기존 artifact 자동 rename/move는 없다.
@@ -181,7 +181,7 @@
 - opt-in 실제 Hitomi smoke: sandbox 밖 읽기 전용 실행에서 Recent search와 첫 metadata/page 계약 1/1 통과했다. `pnpm audit --prod --audit-level high`도 2026-08-16 registry advisory 기준 알려진 취약점 0건이다. `cargo-audit`은 이 PC에 설치되어 있지 않아 별도 RustSec CLI audit은 수행하지 않았다.
 - 숨김 launcher check는 typecheck와 `tauri-cli 2.11.4` 확인을 통과했고 `.runtime/launcher-check.log`에 사용자 profile/project 절대 경로를 남기지 않았다.
 - 최종 release `src-tauri/target/release/atsumi-next.exe`를 실제 Windows GUI로 실행했고 `Atsumi Next` main window가 생성되어 responsive 상태임을 확인했다. 사용자가 현재 열린 창에서 실제 검색·다운로드 폴더 선택·viewer open의 대화형 동작을 검토할 수 있다.
-- 2026-08-20 최종 전체 검증: `tools/verify.ps1` 성공 — frontend 21 files 130/130, Rust lib 137/137(일반 suite에서 opt-in live 1개 제외), startup 2/2, typecheck·Vite production build·fmt/check/clippy·Tauri release `--no-bundle`·whitespace를 통과했다. 로그는 `.runtime/verification/verify-20260820-193449.log`에 있다.
+- 2026-08-20 UI·경로 안정화 전체 검증: `tools/verify.ps1` 성공 — frontend 21 files 135/135, Rust lib 140/140(일반 suite에서 opt-in live 1개 제외), startup 2/2, typecheck·Vite production build·fmt/check/clippy·Tauri release `--no-bundle`·whitespace를 통과했다. 로그는 `.runtime/verification/verify-20260820-211217.log`에 있다.
 - opt-in full download live 증거: gallery `4113714`의 metadata 18 pages, download/store/reopen 검증 18/18, 선택 형식 WebP 18개, 선택 payload 합계 12,396,942 bytes. 이는 단일 gallery 증거이며 AVIF/JXL 전체 corpus 보증은 아니다.
 
 ## 7. Known limitations and blockers
@@ -232,7 +232,7 @@
 ## 10. Git delivery
 
 - 현재 작업 branch: `agent/phase-3-foundation`
-- 이 인계 갱신을 시작한 코드 기준 HEAD: `38fa2c0` (`fix(explore): cancel obsolete page loads`)
+- 이번 UI·경로 안정화를 시작한 원격 코드 기준 HEAD: `88b4f6e3fdcb0f24c4c74390b1ed9085c390f4fb`
 - 안정화 commit 순서: `bff5cee` adaptive card, `e781e70` thumbnail churn retention, `1f969d5` Explore cache/prefetch, `8297b2b` safe artifact folder templates, `c64c3b6` unsupported gallery recovery/diagnostics, `aacda1c` Auto Find history cutoff, `38fa2c0` actual Explore cancellation.
-- 원격/PR 상태는 GitHub에서 다시 확인해야 하는 외부 상태다. 이 문서·CI 갱신 작업은 commit, push, PR 수정, merge, release/tag 생성을 수행하지 않았다.
-- 다음 Git 전달자는 `git diff --check`, 전체 verify와 `git status`를 확인하고 문서가 실제 code HEAD와 함께 같은 branch에 commit되는지 검토한다. force push나 `main` 직접 push를 전제로 하지 않는다.
+- 이번 UI·경로 안정화는 설정/경로와 카드/태그의 두 논리적 commit으로 같은 branch에 push하고 기존 Draft PR #1의 본문과 검사 상태를 갱신한다. force push, `main` 직접 push, merge, Draft 해제, release/tag 생성은 하지 않는다.
+- 전달자는 `git diff --check`, 전체 verify, push 뒤 원격 branch SHA와 Draft PR 상태, 최종 clean worktree를 함께 확인한다.

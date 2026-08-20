@@ -36,4 +36,4 @@
 
 ## 완료 증거의 경계
 
-최신 전체 검증은 `tools/verify.ps1`로 실행했고 `.runtime/verification/verify-20260820-193449.log`에 있다. frontend 21 files/130 tests, Rust library 137 passed/1 opt-in live ignored, startup 2 passed, typecheck/build/fmt/check/clippy/whitespace와 Tauri release `--no-bundle`이 성공했다. live gallery smoke는 일반 CI에서 의도적으로 opt-in이며 위 단일 gallery 결과를 별도 증거로 기록한다.
+최신 전체 검증은 `tools/verify.ps1`로 실행했고 `.runtime/verification/verify-20260820-211217.log`에 있다. frontend 21 files/135 tests, Rust library 140 passed/1 opt-in live ignored, startup 2 passed, typecheck/build/fmt/check/clippy/whitespace와 Tauri release `--no-bundle`이 성공했다. live gallery smoke는 일반 CI에서 의도적으로 opt-in이며 위 단일 gallery 결과를 별도 증거로 기록한다.

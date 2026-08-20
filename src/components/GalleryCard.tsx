@@ -19,7 +19,7 @@ import {
 import { GalleryThumbnail } from "./GalleryThumbnail";
 import { GalleryStatusIcon } from "./GalleryStatusIcon";
 import { MetadataChip } from "./MetadataChip";
-import { fitTagChipCount, splitGalleryTitle } from "./galleryCardLayout";
+import { fitTagChips, sortGalleryTags, splitGalleryTitle, type TagFitResult } from "./galleryCardLayout";
 
 type GalleryCardProps = {
   gallery: Gallery;
@@ -82,13 +82,25 @@ function GalleryCardComponent({
   const { primary: displayTitle, secondary: subtitle } = splitGalleryTitle(gallery.title, gallery.subtitle);
   const thumbnailKey = galleryCoverThumbnailKey(gallery);
   const thumbnailConsumer = thumbnailConsumerForView(view);
-  const tagLayoutKey = `${gallery.title}\u0000${gallery.subtitle ?? ""}\u0000${gallery.tags.join("\u0001")}`;
-  const [tagLayout, setTagLayout] = useState<{ key: string; count: number } | null>(null);
+  const sortedTags = sortGalleryTags(gallery.tags, favoriteMetadata);
+  const tagLayoutKey = `${gallery.title}\u0000${gallery.subtitle ?? ""}\u0000${sortedTags
+    .map((tag) => `${tag.namespace}:${Number(tag.favorite)}:${tag.value}`)
+    .join("\u0001")}`;
+  const [tagLayout, setTagLayout] = useState<{ key: string; result: TagFitResult } | null>(null);
+  const currentTagLayout = tagLayout?.key === tagLayoutKey
+    ? tagLayout.result
+    : { visibleCount: sortedTags.length, hiddenCount: 0, showOverflow: false };
+  const visibleTags = sortedTags.slice(0, currentTagLayout.visibleCount);
+  const hiddenTags = sortedTags.slice(currentTagLayout.visibleCount);
+  const overflowDigitCount = String(Math.max(1, sortedTags.length)).length;
+  const cardRef = useRef<HTMLElement>(null);
+  const coverRef = useRef<HTMLElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const tagListRef = useRef<HTMLDivElement>(null);
   const tagChipRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const visibleTagCount = tagLayout?.key === tagLayoutKey ? tagLayout.count : gallery.tags.length;
-  const visibleTags = gallery.tags.slice(0, visibleTagCount);
+  const overflowMeasureRefs = useRef<Array<HTMLSpanElement | null>>([]);
+  const lastCoverHeight = useRef(0);
+  const lastContentSize = useRef({ width: 0, height: 0 });
   const hasDuplicateCandidates = duplicateCandidateCount > 0;
   const iconOnlyStatus = hasDuplicateCandidates || download?.state === "downloading" || download?.state === "review_required";
   const cardStatusClass = download?.state === "completed"
@@ -113,29 +125,62 @@ function GalleryCardComponent({
   }, []);
 
   useLayoutEffect(() => {
+    const card = cardRef.current;
+    const cover = coverRef.current;
+    if (!card || !cover) return;
+    const applyCoverHeight = () => {
+      const height = cover.getBoundingClientRect().height;
+      if (!Number.isFinite(height) || height <= 0 || Math.abs(lastCoverHeight.current - height) < 0.5) return;
+      lastCoverHeight.current = height;
+      card.style.setProperty("--gallery-card-height", `${height}px`);
+      invalidateTagLayout();
+    };
+    applyCoverHeight();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(applyCoverHeight);
+    observer.observe(cover);
+    return () => observer.disconnect();
+  }, [invalidateTagLayout]);
+
+  useLayoutEffect(() => {
     const content = contentRef.current;
     const tagList = tagListRef.current;
-    if (!content || !tagList || !gallery.tags.length || tagLayout?.key === tagLayoutKey) return;
+    if (!content || !tagList || !sortedTags.length || tagLayout?.key === tagLayoutKey) return;
 
     const style = getComputedStyle(tagList);
     const gapX = Number.parseFloat(style.columnGap) || 0;
     const gapY = Number.parseFloat(style.rowGap) || 0;
-    if (tagList.clientWidth <= 0 || tagList.clientHeight <= 0) {
-      setTagLayout({ key: tagLayoutKey, count: gallery.tags.length });
-      return;
-    }
-    const measurements = tagChipRefs.current.slice(0, gallery.tags.length).map((chip) => {
+    if (tagList.clientWidth <= 0 || tagList.clientHeight <= 0) return;
+    const measurements = tagChipRefs.current.slice(0, sortedTags.length).map((chip) => {
       const rect = chip?.getBoundingClientRect();
       return { width: rect?.width ?? 0, height: rect?.height ?? 0 };
     });
-    const count = fitTagChipCount(measurements, tagList.clientWidth, tagList.clientHeight, gapX, gapY);
-    setTagLayout({ key: tagLayoutKey, count });
-  }, [gallery.tags.length, tagLayout, tagLayoutKey]);
+    const overflowMeasurements = overflowMeasureRefs.current.slice(0, overflowDigitCount).map((chip) => {
+      const rect = chip?.getBoundingClientRect();
+      return { width: rect?.width ?? 0, height: rect?.height ?? 0 };
+    });
+    if (measurements.some(({ width, height }) => width <= 0 || height <= 0)
+      || overflowMeasurements.some(({ width, height }) => width <= 0 || height <= 0)) return;
+    const result = fitTagChips(
+      measurements,
+      overflowMeasurements,
+      tagList.clientWidth,
+      tagList.clientHeight,
+      gapX,
+      gapY,
+    );
+    setTagLayout({ key: tagLayoutKey, result });
+  }, [overflowDigitCount, sortedTags.length, tagLayout, tagLayoutKey]);
 
   useLayoutEffect(() => {
     const content = contentRef.current;
     if (!content || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(invalidateTagLayout);
+    const observer = new ResizeObserver(() => {
+      const next = { width: content.clientWidth, height: content.clientHeight };
+      if (next.width === lastContentSize.current.width && next.height === lastContentSize.current.height) return;
+      lastContentSize.current = next;
+      invalidateTagLayout();
+    });
     observer.observe(content);
     let disposed = false;
     document.fonts?.ready.then(() => {
@@ -176,6 +221,7 @@ function GalleryCardComponent({
   return (
     <article
       className={`gallery-card${selected ? " is-selected" : ""}${gallery.favorite ? " is-favorite" : ""}${cardStatusClass}`}
+      ref={cardRef}
       data-gallery-id={gallery.id}
       style={{ "--download-progress": `${progress}%` } as CSSProperties}
       role="listitem"
@@ -227,6 +273,7 @@ function GalleryCardComponent({
         expectedAspectRatio={gallery.thumbnailWidth !== undefined && gallery.thumbnailHeight !== undefined
           ? { width: gallery.thumbnailWidth, height: gallery.thumbnailHeight }
           : undefined}
+        rootRef={coverRef}
         alt={`${gallery.title} 표지`}
       >
         {download ? <span className="status-wash" aria-hidden="true" /> : null}
@@ -300,18 +347,38 @@ function GalleryCardComponent({
             </>
           ) : null}
         </div>
-        <div ref={tagListRef} className="tag-list" aria-label={`태그: ${gallery.tags.join(", ")}`}>
+        <div ref={tagListRef} className="tag-list" aria-label={`태그: ${sortedTags.map((tag) => tag.value).join(", ")}`}>
           {visibleTags.map((tag, index) => (
             <MetadataChip
-              key={tag}
+              key={`${tag.value}\u0000${index}`}
               ref={(chip) => { tagChipRefs.current[index] = chip; }}
-              value={tag}
-              favorite={favoriteMetadata.has(tag)}
+              value={tag.value}
+              favorite={tag.favorite}
               kind="tag"
               onClickCapture={selectFromInteractiveTarget}
               onSearch={onMetadataSearch}
               onToggleFavorite={onMetadataFavorite}
             />
+          ))}
+          {currentTagLayout.showOverflow ? (
+            <span
+              className="tag-overflow"
+              role="note"
+              aria-label={`추가 태그 ${currentTagLayout.hiddenCount}개`}
+              title={hiddenTags.map((tag) => tag.value).join(", ")}
+            >
+              +{currentTagLayout.hiddenCount}
+            </span>
+          ) : null}
+          {Array.from({ length: overflowDigitCount }, (_, index) => (
+            <span
+              key={`overflow-measure-${index + 1}`}
+              ref={(chip) => { overflowMeasureRefs.current[index] = chip; }}
+              className="tag-overflow tag-overflow-measure"
+              aria-hidden="true"
+            >
+              +{"8".repeat(index + 1)}
+            </span>
           ))}
         </div>
         <div className="meta-bottom">

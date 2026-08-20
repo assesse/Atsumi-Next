@@ -9,8 +9,9 @@
 | 시작 Recent·명시적 검색 | 구현 | 입력 change는 local draft이고 제출만 원격 요청·이력을 만든다. |
 | Explore page cache | 구현 | query별 settled page 최대 5개, 현재 page ±2 창, 인접 page prefetch, page별 scroll 복원. |
 | 오래된 검색 취소 | 구현 | reset/query 교체가 `requestId`별 `search_page_cancel`을 호출하며 cancel-before-start와 active 취소를 backend 테스트로 고정했다. 늦은 완료도 현재 query를 덮지 않는다. |
-| 가로 밀도형 앨범 카드 | 구현 | 점수·날짜를 표시하지 않는다. 실제 chip 크기, font 준비와 container resize를 다시 측정하고 이미지 고유 비율을 보존한다. 페이지 수·gallery ID와 기존 metadata 종류는 유지한다. |
-| 반응형 열·카드 폭 | 구현 | preview 폭을 가용 내용에 맞게 제한하고 1~4열 resize에서 텍스트·chip·이미지가 넘치거나 찌그러지지 않도록 테스트했다. |
+| 가로 밀도형 앨범 카드 | 구현 | 점수·날짜를 표시하지 않는다. `ResizeObserver`가 실제 cover를 측정해 카드 높이를 직접 고정하므로 제목·상태·태그 수가 외곽 높이를 늘리지 않는다. 페이지 수·gallery ID와 기존 metadata 종류는 유지한다. |
+| 높이 제한 adaptive 태그 | 구현 | 고정 개수가 아니라 남은 card-content에 실제 chip과 자릿수별 `+N` 폭을 함께 측정한다. favorite 우선/Female→Male→중립 stable sort이며 namespace marker와 favorite star를 분리한다. |
+| 반응형 열·카드 폭 | 구현 | preview 폭을 가용 내용에 맞게 제한하고 1~4열 및 160/220/280/360px resize에서 card와 cover 높이 차이가 1px 이내이며 chip·텍스트·이미지가 외곽을 늘리거나 찌그러뜨리지 않도록 테스트했다. |
 | 중국어 badge | 구현 | 로컬 `cn.svg`와 텍스트 `CN` fallback을 사용하며 런타임 네트워크 의존성이 없다. |
 | 전역 thumbnail coordinator | 구현 | Explore, Downloads, Detail, gallery/internal Review가 하나의 coordinator와 `galleryCover`/`galleryPage`/`artifactPage` key를 공유한다. |
 | viewport 왕복 retention | 구현 | 마지막 구독 해제 뒤 400ms orphan grace, 완료 display asset 120초·최대 256개 보존. Rust cache는 512 entries/64MiB/30분이고 retryable/permanent negative TTL은 3초/5분이다. |
