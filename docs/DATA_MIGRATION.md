@@ -4,13 +4,13 @@
 
 새 버전의 영속 데이터 기준은 SQLite 하나로 통합한다. 파일 시스템은 artifact의 실제 존재를 증명하며, DB와 불일치하면 reconciliation job이 해결한다.
 
-## 현재 구현 schema (v17)
+## 현재 구현 schema (v18)
 
 | 테이블 | 책임 |
 |---|---|
 | `settings` | versioned 사용자 설정; v15 folder template, v17 Auto Find history mode 포함 |
 | `window_placement` | 창 위치·크기 revision snapshot |
-| `galleries` | 정규화된 gallery metadata snapshot |
+| `galleries` | 정규화된 gallery metadata snapshot, v18 source revision 문자열 identity와 작은 내부 revision |
 | `download_entries` | 사용자가 관리하는 다운로드 항목 |
 | `download_jobs` | 영속 job과 현재 단계 |
 | `download_attempts` | job attempt와 종료 상태·오류 기록 |
@@ -39,13 +39,10 @@
 | `internal_duplicate_groups`·`internal_duplicate_group_pages` | immutable source page 기반 synchronized scene row와 근거 |
 | `internal_removal_plans` | group revision과 파일 수·byte 합계를 고정한 만료형 격리 계획 |
 | `page_quarantine_records` | page별 원본·격리 상대 경로와 crash-safe move/restore saga |
-| `classic_import_runs` | Classic read-only inventory, fingerprint, revisioned report와 apply/rollback 상태 |
-| `classic_import_artifact_copies` | 첫 write 전 기록하는 Next 복사 목적지와 copy/격리 상태 |
-| `classic_import_changes` | 이 import가 새로 만든 DB 변경의 역순 rollback journal |
-| `classic_import_legacy_hashes` | 신뢰 판정에 사용하지 않는 Classic hash row 수 provenance |
+| `classic_import_runs`·`classic_import_artifact_copies`·`classic_import_changes`·`classic_import_legacy_hashes` | v14에서 생성된 역사적 호환 table. runtime command·repository·UI가 접근하지 않으며 기존 DB를 파괴적으로 다시 쓰지 않기 위해 DDL만 보존 |
 | `schema_migrations` | migration 적용 이력 |
 
-아래 테이블은 Phase 7 이후 검토할 계획 schema다.
+아래 테이블은 향후 검토할 계획 schema다.
 
 | 계획 테이블 | 책임 |
 |---|---|
@@ -58,7 +55,7 @@
 
 - migration 이름은 `favorites_search_history_and_auto_find`다.
 - 즐겨찾기는 `(namespace, value)`가 primary key이며 값은 application 경계에서 trim·소문자·공백 정규화한다. 별도의 frontend memory 목록을 canonical source로 사용하지 않는다.
-- 검색 이력은 성공한 non-empty 제출만 SHA-256 fingerprint로 합치며 text, include/exclude tags, language, sort, page size를 함께 보존한다. Classic 검색 기록은 Phase 7 read-only dry-run에 포함되고 사용자가 승인한 신규 row만 적용·rollback journal로 추적한다.
+- 검색 이력은 성공한 non-empty 제출만 SHA-256 fingerprint로 합치며 text, include/exclude tags, language, sort, page size를 함께 보존한다.
 - Auto Find는 동시에 하나의 `running` row만 허용한다. run·후보·전역 gallery 제외는 재시작 뒤에도 유지되고, snapshot은 최신 run의 후보 중 현재 download entry 또는 명시적 제외가 없는 항목만 반환한다.
 - startup에서 남은 `running` run은 파일이나 후보를 삭제하지 않고 `failed/AUTO_FIND_INTERRUPTED`로 종결한다. 부분 후보는 증거로 보존된다.
 - `auto_find_candidates`는 원격 source의 당시 metadata snapshot이다. 실제 다운로드 artifact나 schema v12 duplicate decision의 canonical record를 대신하지 않으며 snapshot 조회 시 해당 canonical 제외 상태를 결합한다.
@@ -92,11 +89,8 @@
 ### v14 추가 규칙
 
 - migration 이름은 `classic_read_only_import_and_rollback`이다.
-- dry-run 원본 절대 경로와 전체 plan은 local Next SQLite에만 저장한다. frontend 보고서는 folder label과 source fingerprint만 받으며 기본 로그에는 경로가 없다.
-- artifact copy 목적지는 첫 파일 write 전에 기록한다. apply/rollback이 중단되면 startup recovery가 Next 부분 폴더를 import 전용 quarantine으로 이동하고 상태를 수렴시킨다.
-- DB apply는 실제 WebP·SHA·manifest 검증 뒤 한 transaction이며, rollback journal은 이 import가 새로 삽입한 favorite/history/exclusion/hidden/pair/series/artifact만 역순 제거한다. 기존 row는 `INSERT OR IGNORE`와 change journal로 보존한다.
-- Classic hash DB는 `READ_ONLY + query_only`로 열고 row 수만 provenance로 저장한다. Next HashProfile duplicate blocking에는 사용하지 않는다.
-- v1~v13 의미와 manifest/HashProfile version을 바꾸지 않는 additive migration이며 기존 DB는 migration 전 일관 backup을 만든다.
+- 이 migration과 네 table은 이미 적용된 DB의 version/name/checksum 연속성을 위해 그대로 둔다. 현재 runtime에는 관련 command, repository, source adapter, UI가 없고 새 row를 생성하거나 기존 row를 해석하지 않는다.
+- table drop이나 과거 migration 편집으로 기존 DB를 재작성하지 않는다. v1~v13 의미와 manifest/HashProfile version을 바꾸지 않는 additive migration이라는 역사적 사실만 유지한다.
 
 ### v15 추가 규칙
 
@@ -119,43 +113,21 @@
 - `owned_gallery_artists`는 completed/quarantined entry와 complete/quarantined artifact가 모두 있는 경우만 소유 증거로 인정한다. legacy backfill은 저장된 `galleries.primary_artist`만 사용하며 추가 artist를 추측하지 않는다.
 - `auto_find_run_cutoffs`는 `source='verified_owned_artifact'`, `policy_version=1` CHECK를 가지며 작가별 optional oldest ID와 qualified count를 저장한다. 증거가 없으면 cutoff가 없다.
 - `auto_find_run_truncations`는 `reason='candidate_limit_after_cutoff'`, eligible count와 limit을 저장한다. 현재 application limit은 cutoff 적용 뒤 50,000 candidate다.
-- v14→latest migration 회귀 테스트는 v15/v16/v17의 순서, legacy relative directory 보존, `root_snapshot` backfill과 두 경로의 immutability를 검증한다.
+- v14→latest migration 회귀 테스트는 v15/v16/v17/v18의 순서, 역사적 v14 table 보존, legacy relative directory 보존, `root_snapshot` backfill과 두 경로의 immutability를 검증한다.
 
-## Classic 입력원
+### v18 추가 규칙
 
-- `AtsumiData/state.json`
-- `AtsumiData/state.json.bak`
-- browser localStorage export
-- `AtsumiData/atsumi_cache.sqlite`
-- 다운로드 폴더의 `.atsumi-download.json`
-- 다운로드 폴더의 `.atsumi-page-selection.json`
-- 실제 `NNN.webp` 파일
-- quarantine 폴더
+- migration 이름은 `gallery_source_revision_identity`다.
+- `galleries.source_revision TEXT`를 nullable additive column으로 추가한다. 값이 있으면 1~512 bytes여야 한다.
+- remote source의 unsigned fingerprint는 이 문자열 identity에 저장한다. signed SQLite `galleries.revision`은 내부 snapshot revision으로만 사용하므로 `u64`→`i64` 변환 오버플로가 없다.
+- 기존 row의 source identity는 추측하지 않고 `NULL`로 둔다. 다음 실제 metadata 계획에서 identity를 저장하며 identity가 달라질 때만 내부 revision을 증가시킨다.
 
-localStorage 값은 Classic 원본을 수정하지 않고 사용자가 별도로 둔 `classic-local-storage-export.json`, `atsumi-localstorage-export.json`, `localStorage-export.json`만 선택적으로 병합한다. 파일이 없으면 state/manifest 기반 안전 항목만 보고한다.
+## 유지보수 데이터 초기화
 
-## 이전 순서
-
-1. 사용자가 Classic data root와 선택적 download root를 명시적으로 고른다.
-2. state, manifest, 실제 numbered file, quarantine과 hash DB를 읽기 전용으로 inventory하고 source fingerprint를 만든다.
-3. gallery ID로 state와 폴더를 연결하고 충돌·eligible 항목·copy byte 수를 보고한다.
-4. 사용자가 모든 acknowledgement 경고와 최종 적용 문구를 승인한다.
-5. apply 직전에 source fingerprint를 다시 확인한다.
-6. eligible page만 다시 SHA/length/decode하고 Next에 WebP로 복사·manifest 검증한다.
-7. favorites, 검색 이력, 제외, 숨김, 오탐 pair, resolvable 연작과 완료 artifact를 한 SQLite transaction으로 등록한다.
-8. rollback은 Next copy를 격리하고 이 import가 새로 만든 DB row만 제거한다.
-
-## 구현된 충돌 정책
-
-| 충돌 | 기본 처리 |
-|---|---|
-| UI는 완료, 폴더 없음 | `missing_artifacts`, 사용자에게 재연결/재다운로드 제안 |
-| 폴더는 있음, UI 목록 없음 | manifest가 유효하면 import 후보 |
-| manifest ID와 Classic state folder mapping 불일치 | blocking, 자동 추측·등록 금지 |
-| 파일 수와 expected pages 불일치 | `incomplete`, 자동 완료 금지 |
-| hash DB만 존재 | artifact 확인 전 duplicate blocking에 사용하지 않음 |
-| 숨김 ID의 파일 존재 | 숨김은 유지하되 파일 처리 여부를 보고 |
-| 같은 ID 여러 폴더 | 자동 병합하지 않고 충돌 목록에 표시 |
+- thumbnail cache clear는 완료된 재생성 가능 cache만 제거한다. DB artifact/page와 실제 파일에는 쓰지 않는다.
+- exploration reset은 정확한 확인 literal을 받은 뒤 `favorites`, `search_history`, `auto_find_runs`와 그 candidate/cutoff/truncation, `auto_find_exclusions`만 한 transaction에서 삭제한다.
+- active Auto Find run이 있으면 transaction 전에 `OPERATION_ACTIVE`로 거부한다. 따라서 일부만 지워진 상태가 생기지 않는다.
+- download entry/job/attempt/page, gallery/artifact, duplicate 판정, quarantine, manifest와 실제 파일은 초기화 대상이 아니다.
 
 ## 폴더 구조
 
@@ -175,17 +147,8 @@ D:\Atsumi\.atsumi-quarantine\<record-id>\[artist] Gallery title [group] 4051027\
 
 ## rollback
 
-- Next는 Classic 원본 DB와 state를 수정하지 않는다.
-- import 시 모든 파일 작업은 dry-run report를 먼저 만든다.
-- 실제 Classic 다운로드 파일은 import를 위해 이동하지 않는다. 검증된 Next 복사본만 만든다.
-- rollback은 해당 import가 기록한 Next artifact 폴더만 import 전용 quarantine으로 이동하고, journal에 기록된 새 DB row만 제거한다. 격리본과 Classic 원본을 자동 삭제하지 않는다.
-- Next가 생성한 새 manifest는 schema와 writer version을 가진다.
-- schema v15~v17 downgrade는 지원하지 않는다. 오래된 binary는 future-schema를 쓰기 전에 거부하며 실제 downgrade는 migration 전 backup과 호환 binary를 함께 복원해야 한다.
-
-## 승인 필요
-
-1. Next 첫 실행에서 Classic 데이터를 자동 발견만 할지, import 안내를 바로 열지
-2. Classic localStorage export를 Classic 코드에 최소 변경으로 추가해도 되는지
-3. 완료 폴더인데 manifest가 없는 기존 자료를 얼마나 적극적으로 가져올지
+- Next가 생성한 manifest는 schema와 writer version을 가진다.
+- schema v15~v18 downgrade는 지원하지 않는다. 오래된 binary는 future-schema를 쓰기 전에 거부하며 실제 downgrade는 migration 전 backup과 호환 binary를 함께 복원해야 한다.
+- 운영 DB에 과거 migration table/column을 수동 삭제하거나 migration history를 편집하지 않는다. 복구는 migration 전 일관 backup과 호환 binary를 함께 사용한다.
 
 quarantine에는 자동 보존 만료가 없다. 사용자가 명시적으로 복원하거나, 별도 재확인을 거친 비우기 기능을 실행하기 전까지 파일을 유지한다.

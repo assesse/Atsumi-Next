@@ -7,7 +7,7 @@ pub use coordinator::{
     ThumbnailReceiveTimeout, ThumbnailRequestHandle,
 };
 pub use model::{
-    ResolvedThumbnail, ThumbnailCacheStatus, ThumbnailCompletionEventDto,
+    ResolvedThumbnail, ThumbnailCacheClearDto, ThumbnailCacheStatus, ThumbnailCompletionEventDto,
     ThumbnailCompletionOutcomeDto, ThumbnailConsumer, ThumbnailDeliveryDto, ThumbnailFailureCode,
     ThumbnailFailureDto, ThumbnailInvalidationDto, ThumbnailKey, ThumbnailKeyError,
     ThumbnailPriority, ThumbnailRequestDto, ThumbnailRequestTokenDto, ThumbnailResult,

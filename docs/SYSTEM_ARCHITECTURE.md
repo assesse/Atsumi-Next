@@ -134,7 +134,7 @@ type JobEvent = {
 
 ## 데이터 소유권
 
-- SQLite(schema v17): 설정, Gallery snapshot, 다운로드, immutable artifact 위치, job/page attempt 진단, 판정, 제외, 즐겨찾기, 검색 이력과 Auto Find run/후보/cutoff/truncation의 canonical source
+- SQLite(schema v18): 설정, source revision identity가 분리된 Gallery snapshot, 다운로드, immutable artifact 위치, job/page attempt 진단, 판정, 제외, 즐겨찾기, 검색 이력과 Auto Find run/후보/cutoff/truncation의 canonical source
 - 실제 폴더: 다운로드 artifact
 - 폴더 manifest: 이식성과 복구를 위한 파생 metadata
 - thumbnail cache: 언제든 재생성 가능한 cache
@@ -162,8 +162,10 @@ type JobEvent = {
 ## 앨범 카드 projection
 
 - Explore/Auto Find/Downloads는 점수·날짜를 제거한 가로 밀도형 카드를 공유한다. title/subtitle, artist/group, language, tags, page count와 gallery ID라는 정보 종류는 유지하되 화면별 상태 action과 선택 규칙만 projection한다.
-- image는 source가 제공한 width/height 비율을 사용하고 preview width를 가용 content rect에 맞춘다. cover root의 `ResizeObserver`가 측정 높이를 card CSS property에 직접 기록하므로 content는 외곽 높이에 기여하지 않는다. `document.fonts.ready`와 content resize는 태그 측정만 무효화한다.
-- 표시 태그는 favorite 우선, Female→Male→중립, 같은 bucket 원래 순서의 stable projection이다. 남은 고정 영역에 실제 chip과 자릿수별 overflow chip을 함께 측정해 가능한 최대 태그를 보이고 나머지는 비상호작용 `+N`으로 표시한다. F/M과 favorite star는 서로 대체하지 않는다.
+- preview width는 shared preset 160/190/220/250/280/320/360px 중 하나이며 기본은 220px이다. 예전 임의 저장값은 고정 compatibility cutover로 정규화하고 새 update는 preset 이외 값을 거부한다.
+- 각 `GalleryGrid`는 직접 자식 카드의 `offsetTop`, cover width와 metadata intrinsic width/height를 관찰한다. 같은 시각적 행은 계산된 최대 cover 높이를 `--gallery-card-height`로 공유하며 독립 grid와 불완전 마지막 행은 서로 영향을 주지 않는다. content는 이 외곽 높이에 기여하지 않는다.
+- image는 source 비율을 보존해 중립 frame 안에 `contain`/center로 표시한다. 1:2·3:4·1:1·4:3·2:3 같은 혼합 비율에서도 stretch/crop으로 행 높이를 맞추지 않는다.
+- 일곱 preset은 title/body/tag/footer typography, padding/gap과 tag line 예산 2/2/3/4/5/6/7을 함께 정의한다. 표시 태그는 favorite 우선, Female→Male→중립, 같은 bucket 원래 순서의 stable projection이고 초과는 비상호작용 `+N`으로 표시한다.
 
 ## Thumbnail coordinator
 
@@ -195,7 +197,7 @@ type JobEvent = {
 ## Download artifact pipeline
 
 - queue commit 뒤 bounded gallery worker가 자동 시작하며, source metadata와 이미지 I/O 중에는 SQLite transaction을 잡지 않는다.
-- 원본 `source_page_number`와 source revision을 immutable identity로 사용한다. source payload의 identity가 계획과 다르면 저장 전에 거부한다.
+- 원본 `source_page_number`와 source revision을 immutable identity로 사용한다. source payload의 identity가 계획과 다르면 저장 전에 거부한다. v18은 remote source revision을 최대 512 bytes 문자열로 저장하고 SQLite signed integer revision은 내부 snapshot CAS에만 사용해 unsigned fingerprint overflow를 차단한다.
 - 각 page는 bounded HTTP body read, `.part` 64KiB chunk write, flush/sync, decode/WebP 검증, SHA-256 후 atomic rename 순서를 따른다.
 - 검증된 원본 WebP는 byte를 보존하고 JPEG/PNG/AVIF는 RGBA lossless WebP로 변환한다. AVIF는 pinned `avif-rust 0.0.6`/`bin-rs 0.0.10`과 dimension/allocation 제한을 사용하는 experimental 경로다. JPEG XL은 현재 decode하지 않고 후보 diagnostic 뒤 fallback을 계속하며 최종 실패는 non-retryable `IMAGE_FORMAT_UNSUPPORTED`다. alpha는 보존하며, 변환 입력의 animation은 첫 frame 정책이다. 이 정책과 writer/app version은 manifest에 기록한다.
 - 새 artifact의 상대 폴더는 backend가 `folder_name_template`을 검증·sanitize해 최초 예약한다. `{id}`는 필수이고 기존 `relative_directory`와 최초 `root_snapshot`은 schema v15/v16 trigger로 immutable이다. 설정 변경은 이후 새 artifact에만 적용되며 자동 rename/move가 없다.
@@ -232,13 +234,12 @@ type JobEvent = {
 - 자동 만료·자동 영구 삭제는 하지 않는다.
 - 다운로드 root 밖으로 해석되는 경로는 거부한다.
 
-## Classic read-only import
+## 유지보수 초기화
 
-- `FilesystemClassicSource`는 사용자가 고른 root를 canonicalize하고 symlink를 따라 inventory하지 않는다. bounded JSON/image read와 image dimension/allocation 제한을 적용하며 Classic hash DB는 SQLite read-only/query-only로 연다.
-- dry-run은 source fingerprint와 typed plan을 Next SQLite에 저장한다. UI는 절대 source path가 없는 revisioned report만 받고 warning acknowledgement와 최종 승인을 별도로 수집한다.
-- Classic page는 apply 때 SHA/length/decode를 다시 확인하고 기존 `ArtifactStore`를 통해 WebP·SHA·atomic manifest 규칙을 그대로 사용한다. Classic 폴더를 Next managed root로 간주하지 않는다.
-- filesystem write 전에 import copy destination을 기록한다. DB apply는 모든 copy 검증 뒤 transaction으로 완료하며, rollback journal에는 이 import가 새로 삽입한 row만 기록한다.
-- startup recovery는 중단된 apply를 failed→rolling_back으로 전환하고 추적된 부분 Next 폴더를 import 전용 quarantine으로 옮긴다. 원본과 격리 목적지가 동시에 존재하면 overwrite/delete하지 않고 중단한다.
+- cache clear는 process-wide `ThumbnailCoordinator`의 완료 success/negative cache와 frontend의 비활성 retention만 비운다. active work/subscriber는 건드리지 않는다.
+- 탐색 데이터 초기화는 `RESET_EXPLORATION_DATA` 확인 literal과 `AutoFindSupervisor` 비실행 상태를 요구한다. repository가 favorites, search history, Auto Find run/candidate/cutoff/truncation/exclusion을 한 immediate transaction에서 제거한다.
+- download entry/job/attempt/page, gallery, artifact, duplicate, quarantine와 실제 파일은 초기화 repository가 참조하지 않는다. UI도 이 범위를 명시하며 다운로드 일괄 삭제 control을 제공하지 않는다.
+- v14의 역사적 migration table은 기존 DB에 남을 수 있으나 composition root, command handler와 repository port가 없으므로 runtime data flow에 참여하지 않는다.
 
 ## 테스트 경계
 

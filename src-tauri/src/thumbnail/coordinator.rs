@@ -14,11 +14,11 @@ use std::{
 use thiserror::Error;
 
 use super::{
-    CancellationToken, ResolvedThumbnail, ThumbnailCacheStatus, ThumbnailCompletionEventDto,
-    ThumbnailDeliveryDto, ThumbnailFailureCode, ThumbnailFailureDto, ThumbnailInvalidationDto,
-    ThumbnailKey, ThumbnailKeyError, ThumbnailPriority, ThumbnailRequestDto,
-    ThumbnailRequestTokenDto, ThumbnailResolveError, ThumbnailResolver, ThumbnailResult,
-    ThumbnailRuntimeConfigDto, ThumbnailWorkerStatsDto,
+    CancellationToken, ResolvedThumbnail, ThumbnailCacheClearDto, ThumbnailCacheStatus,
+    ThumbnailCompletionEventDto, ThumbnailDeliveryDto, ThumbnailFailureCode, ThumbnailFailureDto,
+    ThumbnailInvalidationDto, ThumbnailKey, ThumbnailKeyError, ThumbnailPriority,
+    ThumbnailRequestDto, ThumbnailRequestTokenDto, ThumbnailResolveError, ThumbnailResolver,
+    ThumbnailResult, ThumbnailRuntimeConfigDto, ThumbnailWorkerStatsDto,
 };
 
 #[derive(Debug, Clone)]
@@ -458,6 +458,25 @@ impl ThumbnailCoordinator {
             success_cache_removed,
             negative_cache_removed,
         })
+    }
+
+    /// Clears only completed positive/negative cache entries. Queued/running
+    /// work and current subscribers are intentionally left untouched.
+    pub fn clear_cache(&self) -> ThumbnailCacheClearDto {
+        let mut state = self
+            .core
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let result = ThumbnailCacheClearDto {
+            success_entries_removed: state.success_cache.len(),
+            success_bytes_removed: state.success_cache_bytes,
+            negative_entries_removed: state.negative_cache.len(),
+        };
+        state.success_cache.clear();
+        state.success_cache_bytes = 0;
+        state.negative_cache.clear();
+        result
     }
 
     /// Raises the priority of queued work for an existing subscriber. Lower

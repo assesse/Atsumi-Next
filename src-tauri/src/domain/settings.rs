@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 
 use super::{validate_folder_name_template, ValidationError, DEFAULT_FOLDER_NAME_TEMPLATE};
@@ -7,6 +9,57 @@ pub const DEFAULT_PREVIEW_WIDTH: u32 = 220;
 pub const DEFAULT_CACHE_LIMIT_GB: u32 = 10;
 pub const DEFAULT_CONCURRENT_IMAGE_REQUESTS: u32 = 5;
 pub const DEFAULT_REQUEST_START_INTERVAL_MS: u64 = 25;
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewPresetDefinition {
+    width: u32,
+    legacy_max: Option<u32>,
+}
+
+static PREVIEW_PRESETS: LazyLock<Vec<PreviewPresetDefinition>> = LazyLock::new(|| {
+    let definitions: Vec<PreviewPresetDefinition> =
+        serde_json::from_str(include_str!("../../../shared/gallery-preview-presets.json"))
+            .expect("shared gallery preview presets must be valid JSON");
+    let widths = definitions
+        .iter()
+        .map(|definition| definition.width)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        widths.len(),
+        7,
+        "exactly seven gallery preview presets are required"
+    );
+    assert!(
+        widths.windows(2).all(|pair| pair[0] < pair[1]),
+        "gallery preview presets must be strictly increasing"
+    );
+    assert!(
+        widths.contains(&DEFAULT_PREVIEW_WIDTH),
+        "default gallery preview width must be a preset"
+    );
+    definitions
+});
+
+static PREVIEW_PRESET_WIDTHS: LazyLock<Vec<u32>> =
+    LazyLock::new(|| PREVIEW_PRESETS.iter().map(|preset| preset.width).collect());
+
+pub fn gallery_preview_preset_widths() -> &'static [u32] {
+    PREVIEW_PRESET_WIDTHS.as_slice()
+}
+
+pub fn normalize_gallery_preview_width(value: u32) -> u32 {
+    PREVIEW_PRESETS
+        .iter()
+        .find(|preset| preset.legacy_max.is_some_and(|maximum| value <= maximum))
+        .or_else(|| PREVIEW_PRESETS.last())
+        .map(|preset| preset.width)
+        .expect("preview preset source of truth is non-empty")
+}
+
+pub fn is_gallery_preview_width(value: u32) -> bool {
+    PREVIEW_PRESET_WIDTHS.contains(&value)
+}
 
 /// Converts only well-formed Windows verbatim filesystem paths to the form a
 /// user normally reads and edits. Device paths and malformed prefixes are
@@ -167,10 +220,10 @@ impl SettingsSnapshot {
                 "must be between 1 and 4",
             ));
         }
-        if !(160..=360).contains(&self.preview_width) {
+        if !is_gallery_preview_width(self.preview_width) {
             return Err(ValidationError::new(
                 "previewWidth",
-                "must be between 160 and 360",
+                "must be one of 160, 190, 220, 250, 280, 320 or 360",
             ));
         }
         if !(1..=30).contains(&self.cache_limit_gb) {
@@ -230,5 +283,18 @@ mod tests {
     #[test]
     fn non_windows_download_roots_are_not_rewritten() {
         assert_eq!(download_root_for_display(r"\\?\D:\AD"), r"\\?\D:\AD");
+    }
+
+    #[test]
+    fn shared_preview_presets_normalize_legacy_values_with_lower_ties() {
+        assert_eq!(
+            gallery_preview_preset_widths(),
+            &[160, 190, 220, 250, 280, 320, 360]
+        );
+        assert_eq!(normalize_gallery_preview_width(221), 220);
+        assert_eq!(normalize_gallery_preview_width(235), 220);
+        assert_eq!(normalize_gallery_preview_width(236), 250);
+        assert_eq!(normalize_gallery_preview_width(305), 280);
+        assert_eq!(normalize_gallery_preview_width(306), 320);
     }
 }

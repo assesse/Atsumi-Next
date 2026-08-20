@@ -1,12 +1,12 @@
 mod artifact;
 mod artifact_path;
 mod auto_find;
-mod classic_import;
 mod download;
 mod duplicate;
 mod gallery;
 mod internal_duplicate;
 mod job;
+mod maintenance;
 mod search;
 mod settings;
 mod window_placement;
@@ -25,14 +25,6 @@ pub use auto_find::{
     AutoFindCandidate, AutoFindCandidateRecord, AutoFindCutoffEvidence, AutoFindExclusionResult,
     AutoFindRun, AutoFindRunState, AutoFindSnapshot, AutoFindTruncation, FavoriteKey,
     FavoriteMutationResult, FavoriteNamespace, FavoriteRecord, SearchHistoryEntry,
-};
-pub use classic_import::{
-    ClassicConflictCode, ClassicConflictSeverity, ClassicImportApplyRequest,
-    ClassicImportApplyResult, ClassicImportConflict, ClassicImportCounts,
-    ClassicImportDryRunRequest, ClassicImportGalleryPlan, ClassicImportPagePlan, ClassicImportPlan,
-    ClassicImportReport, ClassicImportRollbackRequest, ClassicImportState,
-    ClassicLegacyHashSummary, ClassicPairPlan, ClassicSeriesPlan, ClassicSourceRootKind,
-    StoredClassicImport, CLASSIC_IMPORT_SCHEMA_VERSION,
 };
 pub use download::{DownloadEntry, DownloadListRequest, DownloadPage, DownloadReviewKind};
 pub use duplicate::{
@@ -55,12 +47,16 @@ pub use job::{
     DownloadChangedEvent, DownloadJobDescriptor, DownloadJobProjection, FixtureDownloadJobStep,
     JobEvent, JobRef, JobState,
 };
+pub use maintenance::{
+    ExplorationDataResetRequest, ExplorationDataResetResult, EXPLORATION_DATA_RESET_CONFIRMATION,
+};
 pub use search::{
     GalleryDetail, GalleryPage, GallerySummary, Language, SearchRequest, SearchSort,
     SearchSubmission,
 };
 pub use settings::{
-    download_root_for_display, windows_path_for_display, AutoFindHistoryMode, SettingsPatch,
+    download_root_for_display, gallery_preview_preset_widths, is_gallery_preview_width,
+    normalize_gallery_preview_width, windows_path_for_display, AutoFindHistoryMode, SettingsPatch,
     SettingsSnapshot,
 };
 pub use window_placement::{WindowPlacement, WindowPlacementSnapshot};

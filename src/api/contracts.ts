@@ -26,6 +26,24 @@ export type SettingsSnapshot = {
 
 export type SettingsPatch = Partial<Omit<SettingsSnapshot, "revision">>;
 
+export type ThumbnailCacheClearResult = {
+  successEntriesRemoved: number;
+  successBytesRemoved: number;
+  negativeEntriesRemoved: number;
+};
+
+export type ExplorationDataResetRequest = {
+  confirmation: "RESET_EXPLORATION_DATA";
+};
+
+export type ExplorationDataResetResult = {
+  favoritesRemoved: number;
+  searchHistoryRemoved: number;
+  autoFindRunsRemoved: number;
+  autoFindCandidatesRemoved: number;
+  autoFindExclusionsRemoved: number;
+};
+
 export type WindowPlacementSnapshot = {
   revision: number;
   x: number | null;
@@ -565,122 +583,4 @@ export type ActivityItem = {
   detail: string;
   severity: "neutral" | "info" | "warning" | "danger" | "success";
   progress?: number;
-};
-
-export type ClassicImportState =
-  | "dry_run"
-  | "applying"
-  | "applied"
-  | "rolling_back"
-  | "rolled_back"
-  | "failed";
-
-export type ClassicConflictSeverity = "info" | "warning" | "blocking";
-
-export type ClassicConflictCode =
-  | "state_missing"
-  | "state_invalid"
-  | "state_completed_folder_missing"
-  | "folder_without_state"
-  | "manifest_missing"
-  | "manifest_invalid"
-  | "manifest_gallery_mismatch"
-  | "expected_page_count_mismatch"
-  | "missing_page"
-  | "duplicate_gallery_folder"
-  | "hash_only"
-  | "hidden_gallery_has_files"
-  | "existing_next_gallery"
-  | "existing_destination"
-  | "classic_source_changed"
-  | "legacy_hash_mismatch"
-  | "series_member_unavailable"
-  | "inventory_limit_reached";
-
-export type ClassicImportConflict = {
-  conflictId: string;
-  code: ClassicConflictCode;
-  severity: ClassicConflictSeverity;
-  galleryId?: GalleryId;
-  message: string;
-  requiresAcknowledgement: boolean;
-};
-
-export type ClassicImportPagePlan = {
-  sourcePage: number;
-  rootKind: "data" | "downloads";
-  relativePath: string;
-  byteLength: number;
-  sha256: string;
-  excluded: boolean;
-};
-
-export type ClassicImportGalleryPlan = {
-  galleryId: GalleryId;
-  title: string;
-  artist?: string;
-  group?: string;
-  sourceFolder: string;
-  relativeDirectory?: string;
-  expectedPages: number;
-  pages: ClassicImportPagePlan[];
-  plannedBytes: number;
-  eligible: boolean;
-  conflictIds: string[];
-};
-
-export type ClassicImportCounts = {
-  favorites: number;
-  searchHistory: number;
-  exclusions: number;
-  hiddenGalleries: number;
-  pairExclusions: number;
-  seriesGroups: number;
-  galleriesDiscovered: number;
-  galleriesEligible: number;
-  pageFiles: number;
-  legacyHashRows: number;
-  plannedCopyBytes: number;
-  conflicts: number;
-};
-
-export type ClassicImportReport = {
-  importId: string;
-  revision: number;
-  state: ClassicImportState;
-  dataRootLabel: string;
-  downloadRootLabel?: string;
-  sourceFingerprint: string;
-  counts: ClassicImportCounts;
-  conflicts: ClassicImportConflict[];
-  galleries: ClassicImportGalleryPlan[];
-  canApply: boolean;
-  createdAt: string;
-  appliedAt?: string;
-  rolledBackAt?: string;
-  errorCode?: string;
-  errorMessage?: string;
-};
-
-export type ClassicImportDryRunRequest = {
-  dataRoot: string;
-  downloadRoot?: string;
-};
-
-export type ClassicImportApplyRequest = {
-  importId: string;
-  expectedRevision: number;
-  acceptedConflictIds: string[];
-};
-
-export type ClassicImportRollbackRequest = {
-  importId: string;
-  expectedRevision: number;
-};
-
-export type ClassicImportApplyResult = {
-  report: ClassicImportReport;
-  importedGalleryIds: GalleryId[];
-  copiedFiles: number;
-  copiedBytes: number;
 };

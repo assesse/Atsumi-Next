@@ -1,6 +1,6 @@
 # 전달 계획
 
-2026-08-20 현재 Phase 0~7 구현과 안정화가 완료됐다. 이 문서의 `완료`는 아래 gate와 실제 검증 증거를 통과했다는 뜻이며, 외부 source 전체 호환성이나 자동 영구 삭제처럼 구현하지 않은 범위를 포함하지 않는다.
+2026-08-21 현재 production 기능과 schema v18 안정화를 기준으로 한다. 이 문서의 `완료`는 아래 gate와 실제 검증 증거를 통과했다는 뜻이며, 외부 source 전체 호환성이나 자동 영구 삭제처럼 구현하지 않은 범위를 포함하지 않는다.
 
 ## 공통 completion gate
 
@@ -12,7 +12,7 @@
 4. 취소는 표시만 바꾸지 않고 background 작업에 도달하며 늦은 완료가 최신 상태를 덮지 않는다.
 5. migration은 additive하고 적용 전 backup, 순서/idempotency, future-schema write 거부 테스트가 있다.
 6. fixture 기반 자동 검증과 별도의 opt-in live 증거를 구분한다.
-7. Classic 원본과 사용자가 이미 가진 artifact를 추측해서 이동·이름 변경·삭제하지 않는다.
+7. 사용자가 이미 가진 artifact를 추측해서 이동·이름 변경·삭제하지 않는다.
 
 ## Phase 3 — production 수직 다운로드
 
@@ -69,35 +69,37 @@ Gate:
 - apply/undo는 artifact 내부 quarantine, manifest atomic replace와 SQLite saga로 crash 후 수렴한다.
 - 모호한 원본/격리 위치는 overwrite/delete하지 않는다.
 
-## Phase 7 — Classic read-only import와 rollback
+## Phase 7 — 운영 안정화와 복구
 
 상태: 완료.
 
 Gate:
 
-- 사용자가 고른 Classic data/download root만 read-only inventory하고 source fingerprint와 typed conflict를 보고한다.
-- 승인된 eligible page는 apply 직전 다시 검증해 Next에 copy하고, 실제 WebP/manifest 확인 뒤 한 transaction으로 등록한다.
-- legacy hash는 provenance일 뿐 현재 HashProfile 판정에 쓰지 않는다.
-- rollback은 해당 import가 새로 만든 Next row/copy만 다루며 Classic 원본을 수정·이동·삭제하지 않는다.
+- cache와 탐색 데이터 초기화는 typed 범위·명시적 확인·단일 transaction을 사용하고 다운로드 DB/파일을 보존한다.
+- migration 전 일관 backup, future-schema 거부와 과거 migration 불변을 유지한다.
+- artifact 경로 변경·격리·복원은 저장된 root/path와 revision 또는 saga를 사용한다.
+- 과거 데이터 이전 기능의 active UI/API/runtime 경로는 제거하고 역사적 v14 migration/table만 기존 DB 호환을 위해 보존한다.
 
-## v15~v17 안정화 gate
+## v15~v18 안정화 gate
 
 - v15: 새 artifact용 folder template과 기존 relative path immutability. `{id}` 필수와 Windows path 한도를 테스트했다. 기존 artifact 자동 rename은 없다.
 - v16: page candidate diagnostic과 immutable artifact root snapshot. v15 legacy path/root backfill을 보존한다.
-- v17: Auto Find history mode, verified-owned artist/cutoff evidence와 truncation. v14→latest migration이 15/16/17 순서와 immutability를 검증한다.
+- v17: Auto Find history mode, verified-owned artist/cutoff evidence와 truncation.
+- v18: remote source revision 문자열 identity와 작은 SQLite 내부 revision을 분리한다. `u64::MAX` 회귀 test가 signed integer overflow 없이 다운로드 완료를 검증한다.
+- v14→latest migration은 역사적 v14 table과 15/16/17/18 순서, legacy path/root immutability를 함께 검증한다.
 - Explore: query별 settled cache 최대 5, 현재 page ±2, 인접 prefetch, page scroll restore. `search_page_cancel`은 active token과 최대 256 cancel-before-start tombstone으로 실제 backend 작업을 취소한다.
-- UI: 가로 밀도형 adaptive card는 점수·날짜를 제거하고 원본 이미지 비율과 실제 chip 측정을 유지한다.
+- UI: 가로 밀도형 adaptive card는 점수·날짜를 제거한다. 160/190/220/250/280/320/360px preset, 행별 최대 intrinsic cover 높이, preset typography와 2/2/3/4/5/6/7줄 태그 예산을 공유한다.
 
 ## 현재 검증 증거
 
-`tools/verify.ps1`의 최신 성공 로그는 `.runtime/verification/verify-20260820-193449.log`다. 아래 test/type/build/fmt/check/clippy/whitespace와 Tauri release `--no-bundle` gate를 통과했다.
+`tools/verify.ps1 -SkipInstall`의 최신 성공 로그는 `.runtime/verification/verify-20260821-011639.log`다. 아래 test/type/build/fmt/check/clippy/whitespace와 Tauri release `--no-bundle` gate를 통과했다.
 
-- frontend: 21 files, 130 tests
-- Rust library: 137 passed, opt-in live 1 ignored
+- frontend: 23 files, 140 tests
+- Rust library: 140 passed, opt-in live 1 ignored
 - startup binary: 2 passed
 - typecheck, Vite production build, Rust fmt/check/clippy, Tauri release `--no-bundle`, whitespace: 통과
 
-live gallery 4113714의 18/18 WebP·12,396,942 bytes 결과는 일반 fixture CI와 별도 증거다. AVIF 대표 corpus와 JPEG XL decode 완료를 뜻하지 않는다.
+과거 live gallery 4113714의 18/18 WebP·12,396,942 bytes 결과는 일반 fixture CI와 별도 증거다. 이번 2026-08-21 검증은 네트워크 없이 `u64::MAX` source identity 회귀를 포함했으며 AVIF 대표 corpus나 JPEG XL decode 완료를 뜻하지 않는다.
 
 ## 다음 작업
 

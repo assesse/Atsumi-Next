@@ -1233,6 +1233,18 @@ pub const MIGRATIONS: &[Migration] = &[
             ) STRICT;
         "#,
     },
+    Migration {
+        version: 18,
+        name: "gallery_source_revision_identity",
+        sql: r#"
+            ALTER TABLE galleries
+            ADD COLUMN source_revision TEXT
+                CHECK (
+                    source_revision IS NULL
+                    OR length(trim(source_revision)) BETWEEN 1 AND 512
+                );
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1518,7 +1530,15 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v14 to v15");
-        assert_eq!(report.applied_versions, vec![15, 16, 17]);
+        assert_eq!(report.applied_versions, vec![15, 16, 17, 18]);
+        let historical_import_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'classic_import_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(historical_import_tables, 4);
         let template: String = connection
             .query_row("SELECT folder_name_template FROM settings", [], |row| {
                 row.get(0)
@@ -1541,6 +1561,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(root_snapshot, r"C:\legacy-root");
+        let gallery_source_revision: Option<String> = connection
+            .query_row(
+                "SELECT source_revision FROM galleries WHERE gallery_id=42",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(gallery_source_revision, None);
         assert!(connection
             .execute(
                 "UPDATE download_artifacts SET relative_directory='renamed-42' WHERE entry_id='legacy-entry'",
@@ -1596,8 +1624,8 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
-        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16, 17]);
-        assert_eq!(report.current_version, 17);
+        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16, 17, 18]);
+        assert_eq!(report.current_version, 18);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",

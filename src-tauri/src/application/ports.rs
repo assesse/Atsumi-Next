@@ -4,12 +4,12 @@ use crate::domain::{
     DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
     DownloadListRequest, DownloadPage, DuplicateCandidateRecord, DuplicateDecisionApplyOutcome,
     DuplicateDecisionRequest, DuplicatePageHash, DuplicateReview, DuplicateScanRun,
-    DuplicateScanState, DuplicateSnapshot, ExternalRelationEvidence, FavoriteKey,
-    FavoriteMutationResult, FavoriteRecord, FixtureDownloadJobStep, GalleryDetail, GalleryId,
-    GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot, InternalGroupRecord,
-    InternalRemovalPlan, InternalRemovalSelection, InternalScanRun, InternalScanState, JobRef,
-    JobState, PageQuarantineRecord, PageQuarantineSaga, SearchHistoryEntry, SearchRequest,
-    SearchSubmission, SettingsSnapshot, SourcePageNumber, StoredClassicImport,
+    DuplicateScanState, DuplicateSnapshot, ExplorationDataResetResult, ExternalRelationEvidence,
+    FavoriteKey, FavoriteMutationResult, FavoriteRecord, FixtureDownloadJobStep, GalleryDetail,
+    GalleryId, GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot,
+    InternalGroupRecord, InternalRemovalPlan, InternalRemovalSelection, InternalScanRun,
+    InternalScanState, JobRef, JobState, PageQuarantineRecord, PageQuarantineSaga,
+    SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsSnapshot, SourcePageNumber,
     WindowPlacementSnapshot,
 };
 
@@ -196,6 +196,8 @@ pub trait AutomationRepository: Send + Sync {
         gallery_ids: &[GalleryId],
         reason: &str,
     ) -> Result<AutoFindExclusionResult, RepositoryError>;
+
+    fn exploration_data_reset(&self) -> Result<ExplorationDataResetResult, RepositoryError>;
 }
 
 pub trait DuplicateRepository: Send + Sync {
@@ -340,93 +342,6 @@ pub trait InternalDuplicateRepository: Send + Sync {
         &self,
         plan_id: &str,
     ) -> Result<Vec<InternalRemovalSelection>, RepositoryError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClassicImportTransitionOutcome {
-    Applied(Box<StoredClassicImport>),
-    NotFound,
-    RevisionConflict { actual_revision: u64 },
-    InvalidState(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClassicArtifactCopy {
-    pub gallery_id: i64,
-    pub entry_id: String,
-    pub relative_directory: String,
-    pub copied_files: u32,
-    pub copied_bytes: u64,
-}
-
-pub trait ClassicImportRepository: Send + Sync {
-    fn classic_import_save_dry_run(
-        &self,
-        data_root: &str,
-        download_root: Option<&str>,
-        data_root_label: &str,
-        download_root_label: Option<&str>,
-        plan: &crate::domain::ClassicImportPlan,
-    ) -> Result<StoredClassicImport, RepositoryError>;
-
-    fn classic_import_get(
-        &self,
-        import_id: &str,
-    ) -> Result<Option<StoredClassicImport>, RepositoryError>;
-
-    fn classic_import_existing_gallery_ids(
-        &self,
-        gallery_ids: &[i64],
-    ) -> Result<Vec<i64>, RepositoryError>;
-
-    fn classic_import_begin_apply(
-        &self,
-        import_id: &str,
-        expected_revision: u64,
-    ) -> Result<ClassicImportTransitionOutcome, RepositoryError>;
-
-    fn classic_import_copy_mark(
-        &self,
-        import_id: &str,
-        gallery_id: i64,
-        entry_id: &str,
-        relative_directory: &str,
-        copied_files: u32,
-        copied_bytes: u64,
-    ) -> Result<(), RepositoryError>;
-
-    fn classic_import_commit_apply(
-        &self,
-        import_id: &str,
-        expected_revision: u64,
-        bundles: &[ArtifactBundle],
-    ) -> Result<ClassicImportTransitionOutcome, RepositoryError>;
-
-    fn classic_import_begin_rollback(
-        &self,
-        import_id: &str,
-        expected_revision: u64,
-    ) -> Result<ClassicImportTransitionOutcome, RepositoryError>;
-
-    fn classic_import_copied_artifacts(
-        &self,
-        import_id: &str,
-    ) -> Result<Vec<ClassicArtifactCopy>, RepositoryError>;
-
-    fn classic_import_commit_rollback(
-        &self,
-        import_id: &str,
-        expected_revision: u64,
-    ) -> Result<ClassicImportTransitionOutcome, RepositoryError>;
-
-    fn classic_import_fail(
-        &self,
-        import_id: &str,
-        error_code: &str,
-        error_message: &str,
-    ) -> Result<Option<StoredClassicImport>, RepositoryError>;
-
-    fn classic_import_incomplete(&self) -> Result<Vec<StoredClassicImport>, RepositoryError>;
 }
 
 pub trait DownloadRepository: Send + Sync {

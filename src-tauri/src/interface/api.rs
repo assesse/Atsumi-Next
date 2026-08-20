@@ -204,44 +204,6 @@ impl From<ApplicationError> for ApiError {
                 action: Some(ApiAction::Review),
                 details: Some(BTreeMap::from([("reason".into(), json!(reason))])),
             },
-            ApplicationError::ClassicImportNotFound(import_id) => Self {
-                code: "CLASSIC_IMPORT_NOT_FOUND".into(),
-                message: "Classic 가져오기 보고서를 찾을 수 없습니다. dry-run을 다시 실행하세요."
-                    .into(),
-                retryable: false,
-                action: Some(ApiAction::None),
-                details: Some(BTreeMap::from([("importId".into(), json!(import_id))])),
-            },
-            ApplicationError::ClassicImportInvalid(reason) => Self {
-                code: "CLASSIC_IMPORT_INVALID".into(),
-                message: "Classic 가져오기를 안전하게 진행할 수 없습니다.".into(),
-                retryable: false,
-                action: Some(ApiAction::Review),
-                details: Some(BTreeMap::from([("reason".into(), json!(reason))])),
-            },
-            ApplicationError::ClassicImportSourceChanged => Self {
-                code: "CLASSIC_SOURCE_CHANGED".into(),
-                message: "dry-run 이후 Classic 파일이 달라졌습니다. 보고서를 다시 생성하세요."
-                    .into(),
-                retryable: false,
-                action: Some(ApiAction::Review),
-                details: None,
-            },
-            ApplicationError::ClassicImportPlanOutdated => Self {
-                code: "CLASSIC_IMPORT_PLAN_OUTDATED".into(),
-                message: "이 Classic 가져오기 계획은 이전 형식입니다. dry-run을 다시 실행하세요."
-                    .into(),
-                retryable: false,
-                action: Some(ApiAction::Review),
-                details: None,
-            },
-            ApplicationError::ClassicImportConflict(conflict_id) => Self {
-                code: "CLASSIC_IMPORT_CONFLICT".into(),
-                message: "확인이 필요한 Classic 충돌을 모두 검토한 뒤 다시 적용하세요.".into(),
-                retryable: false,
-                action: Some(ApiAction::Review),
-                details: Some(BTreeMap::from([("conflictId".into(), json!(conflict_id))])),
-            },
             ApplicationError::DownloadPipeline(error) => Self {
                 code: error.code.as_str().into(),
                 message: error.message,
@@ -307,6 +269,13 @@ impl From<RepositoryError> for ApiError {
             RepositoryError::Other(_) => Self {
                 code: "DATABASE_ERROR".into(),
                 message: "The local database operation failed; review the application log".into(),
+                retryable: false,
+                action: Some(ApiAction::None),
+                details: None,
+            },
+            RepositoryError::OperationActive(_) => Self {
+                code: "OPERATION_ACTIVE".into(),
+                message: "실행 중인 작업을 완료하거나 취소한 뒤 다시 시도하세요.".into(),
                 retryable: false,
                 action: Some(ApiAction::None),
                 details: None,

@@ -6,25 +6,25 @@
 ## 영구 불변식
 
 1. Classic 원본 저장소와 Classic 사용자 데이터는 수정하지 않는다.
-2. Classic 입력은 read-only snapshot 또는 명시적 export 파일로만 읽는다.
-3. SQLite만 영속 상태의 canonical source로 사용한다.
-4. frontend state와 event는 SQLite snapshot의 projection일 뿐이다.
-5. 실제 파일·manifest·hash가 검증된 artifact만 `completed`가 될 수 있다.
-6. 원본 source page number는 immutable하며 배열 index와 혼용하지 않는다.
-7. Explore·Downloads·Detail·Review는 전역 `ThumbnailCoordinator` 하나를 공유한다.
-8. coordinator 밖에서 화면별 이미지 worker를 만들지 않는다.
-9. 검색·썸네일·다운로드는 공용 HTTP budget과 host cooldown을 공유한다.
-10. raw source URL, cookie, session token과 cache 경로를 frontend에 노출하지 않는다.
-11. download root 밖의 canonical path는 거부한다.
-12. 자동 중복 판정만으로 사용자 파일을 영구 삭제하지 않는다.
-13. 파일 제거는 quarantine과 undo를 우선한다.
-14. quarantine 영구 삭제는 사용자의 명시적 명령으로만 수행한다.
-15. 새 migration 전에는 일관된 DB backup을 만든다.
-16. 지원 버전보다 새로운 DB schema는 아무 변경 전에 거부한다.
-17. 적용된 migration 순서·version·name을 바꾸지 않는다.
-18. 오류 문자열 parsing으로 상태·retry·Review 대상을 결정하지 않는다.
-19. URL query, 사용자 경로와 비밀정보를 로그에 남기지 않는다.
-20. manifest, HashProfile과 parser 형식에는 명시적 version을 둔다.
+2. SQLite만 영속 상태의 canonical source로 사용한다.
+3. frontend state와 event는 SQLite snapshot의 projection일 뿐이다.
+4. 실제 파일·manifest·hash가 검증된 artifact만 `completed`가 될 수 있다.
+5. 원본 source page number와 source revision identity는 immutable하며 배열 index나 DB 내부 revision과 혼용하지 않는다.
+6. Explore·Downloads·Detail·Review는 전역 `ThumbnailCoordinator` 하나를 공유한다.
+7. coordinator 밖에서 화면별 이미지 worker를 만들지 않는다.
+8. 검색·썸네일·다운로드는 공용 HTTP budget과 host cooldown을 공유한다.
+9. raw source URL, cookie, session token과 cache 경로를 frontend에 노출하지 않는다.
+10. download root 밖의 canonical path는 거부한다.
+11. 자동 중복 판정만으로 사용자 파일을 영구 삭제하지 않는다.
+12. 파일 제거는 quarantine과 undo를 우선한다.
+13. quarantine 영구 삭제는 사용자의 명시적 명령으로만 수행한다.
+14. 새 migration 전에는 일관된 DB backup을 만든다.
+15. 지원 버전보다 새로운 DB schema는 아무 변경 전에 거부한다.
+16. 적용된 migration 순서·version·name을 바꾸지 않는다.
+17. 오류 문자열 parsing으로 상태·retry·Review 대상을 결정하지 않는다.
+18. URL query, 사용자 경로와 비밀정보를 로그에 남기지 않는다.
+19. manifest, HashProfile과 parser 형식에는 명시적 version을 둔다.
+20. cache/data reset은 typed 범위와 명시적 확인을 가져야 하며 download entry, artifact, manifest와 사용자 파일을 포괄 삭제하지 않는다.
 
 ## 변경과 검증
 

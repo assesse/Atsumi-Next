@@ -207,6 +207,15 @@ export class ThumbnailClient {
     this.entries.clear();
   }
 
+  /** Clears only inactive, recreatable display handles; visible subscribers stay intact. */
+  clearRetainedCache(): number {
+    const retained = [...this.entries.values()].filter(
+      (entry) => entry.active && entry.retained && entry.listeners.size === 0,
+    );
+    for (const entry of retained) this.cleanup(entry);
+    return retained.length;
+  }
+
   reportDisplayFailure(request: ThumbnailRequest, reason: string): void {
     const entry = this.entries.get(thumbnailKeyIdentity(request.key));
     if (!entry || entry.snapshot.status === "error") return;

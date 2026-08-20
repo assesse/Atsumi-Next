@@ -69,6 +69,14 @@ metadata target이 이벤트를 처리하면 card의 상세 열기와 선택은 
 - 명령 순서는 화면별 primary action 우선순위를 따른다.
 - 선택 개수, 전체 선택, primary action, destructive action을 제공한다.
 
+## Settings maintenance
+
+| 입력 | 동작 | 상태 |
+|---|---|---|
+| 미리보기 cache 비우기 | 비활성 frontend retention과 backend 완료 cache 제거 | 다운로드/현재 화면 보존, 확정 |
+| 화면·네트워크 기본값 복원 | 현재 설정 draft를 기본 preset으로 변경 | 저장 전 취소 가능, download root/template 유지, 확정 |
+| 탐색 데이터 초기화 | 범위 안내 후 확인 dialog, backend transaction 실행 | active Auto Find면 거부, 다운로드 DB/files 보존, 확정 |
+
 ## 미확정 항목
 
 1. card 우클릭과 길게 누르기 중 상세 보기의 주 입력

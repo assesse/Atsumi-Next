@@ -800,58 +800,6 @@ describe("GalleryCard event projection", () => {
     container.remove();
   });
 
-  it("locks the outer card height to the measured cover for 160, 220, 280 and 360px", async () => {
-    let measuredHeight = 160;
-    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-      const height = this.classList.contains("cover") || this.classList.contains("gallery-card")
-        ? measuredHeight
-        : 0;
-      return {
-        x: 0,
-        y: 0,
-        width: height,
-        height,
-        top: 0,
-        right: height,
-        bottom: height,
-        left: 0,
-        toJSON: () => ({}),
-      };
-    });
-
-    try {
-      for (const [height, tagCount] of [[160, 3], [220, 30], [280, 3], [360, 30]] as const) {
-        measuredHeight = height;
-        const container = document.createElement("div");
-        document.body.append(container);
-        const root = createRoot(container);
-        const gallery: Gallery = {
-          ...mockGalleries[0]!,
-          tags: Array.from({ length: tagCount }, (_, index) => `tag-${index + 1}`),
-        };
-        await act(async () => root.render(
-          <GalleryCard
-            gallery={gallery}
-            view="explore"
-            selected={false}
-            selectionContext={false}
-            favoriteMetadata={new Set()}
-            {...callbacks}
-          />,
-        ));
-        const card = container.querySelector<HTMLElement>(".gallery-card");
-        const cover = container.querySelector<HTMLElement>(".cover");
-        expect(card?.style.getPropertyValue("--gallery-card-height")).toBe(`${height}px`);
-        expect(Math.abs((card?.getBoundingClientRect().height ?? 0)
-          - (cover?.getBoundingClientRect().height ?? 0))).toBeLessThanOrEqual(1);
-        await act(async () => root.unmount());
-        container.remove();
-      }
-    } finally {
-      rect.mockRestore();
-    }
-  });
-
   it("renders the measured maximum tags plus a non-interactive +N and recalculates on resize", async () => {
     let availableWidth = 175;
     let resolveFonts: (() => void) | undefined;

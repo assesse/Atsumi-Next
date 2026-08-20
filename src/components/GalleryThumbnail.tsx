@@ -105,6 +105,27 @@ const intrinsicAspectRatio = (
   return "1 / 1";
 };
 
+const intrinsicDimensions = (
+  asset: ThumbnailAsset | null,
+  expectedAspectRatio?: { readonly width: number; readonly height: number },
+): { width: number; height: number } => {
+  if (
+    expectedAspectRatio
+    && Number.isFinite(expectedAspectRatio.width)
+    && expectedAspectRatio.width > 0
+    && Number.isFinite(expectedAspectRatio.height)
+    && expectedAspectRatio.height > 0
+  ) return { width: expectedAspectRatio.width, height: expectedAspectRatio.height };
+  if (asset?.kind === "image") return { width: asset.width, height: asset.height };
+  if (asset?.kind === "sprite") {
+    return {
+      width: asset.sheetWidth / asset.columns,
+      height: asset.sheetHeight / asset.rows,
+    };
+  }
+  return { width: 1, height: 1 };
+};
+
 function SpriteImage({ asset, alt, loading, onError }: {
   asset: ThumbnailSpriteAsset;
   alt: string;
@@ -281,6 +302,7 @@ export function GalleryThumbnail({
   const intrinsicStyle = sizing === "intrinsic"
     ? { aspectRatio: intrinsicAspectRatio(asset, expectedAspectRatio) }
     : undefined;
+  const dimensions = intrinsicDimensions(asset, expectedAspectRatio);
   const Element = as;
 
   return (
@@ -297,6 +319,8 @@ export function GalleryThumbnail({
       data-thumbnail-consumer={consumer}
       data-thumbnail-priority={effectivePriority}
       data-thumbnail-state={state}
+      data-thumbnail-intrinsic-width={dimensions.width}
+      data-thumbnail-intrinsic-height={dimensions.height}
       aria-busy={shouldSubscribe && (snapshot.status === "idle" || snapshot.status === "loading") || undefined}
       style={{
         position: "relative",

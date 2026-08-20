@@ -3,10 +3,11 @@ use std::{collections::BTreeSet, sync::Arc};
 use crate::domain::{
     download_root_for_display, plan_artifact_relative_directory, AutoFindExclusionResult,
     AutoFindSnapshot, DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
-    DownloadListRequest, DownloadPage, FavoriteKey, FavoriteMutationResult, FavoriteRecord,
-    FixtureDownloadJobStep, Gallery, GalleryDetail, GalleryId, GalleryMetadata, GalleryPage,
-    JobRef, SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot,
-    ValidationError, WindowPlacement, WindowPlacementSnapshot,
+    DownloadListRequest, DownloadPage, ExplorationDataResetRequest, ExplorationDataResetResult,
+    FavoriteKey, FavoriteMutationResult, FavoriteRecord, FixtureDownloadJobStep, Gallery,
+    GalleryDetail, GalleryId, GalleryMetadata, GalleryPage, JobRef, SearchHistoryEntry,
+    SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot, ValidationError,
+    WindowPlacement, WindowPlacementSnapshot,
 };
 
 use super::{
@@ -413,6 +414,16 @@ impl ApplicationService {
         gallery_ids.dedup();
         self.automation_repository()?
             .auto_find_exclude(&gallery_ids, reason)
+            .map_err(Into::into)
+    }
+
+    pub fn exploration_data_reset(
+        &self,
+        request: ExplorationDataResetRequest,
+    ) -> Result<ExplorationDataResetResult, ApplicationError> {
+        request.validate()?;
+        self.automation_repository()?
+            .exploration_data_reset()
             .map_err(Into::into)
     }
 

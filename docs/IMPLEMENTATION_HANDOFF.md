@@ -10,14 +10,14 @@
 - 기준 PR: `assesse/Atsumi-Next#1`
 - 작업 시작일: 2026-08-15 (Asia/Seoul)
 - 시작 시 Git 상태: 원격 작업 branch와 동일한 HEAD, Milestone A/B 후보 변경이 working tree에 미커밋 상태
-- 시작 시 구현 상태: SQLite queue/retry/cancel과 전역 thumbnail coordinator는 존재하며, 실제 Hitomi read path는 working tree에 연결 중이다. 실제 artifact download·resume·open, Auto Find, 작품/내부 중복, Classic import는 미완성이다.
+- 시작 시 구현 상태: SQLite queue/retry/cancel과 전역 thumbnail coordinator는 존재하며, 실제 Hitomi read path는 working tree에 연결 중이었다. 이후 구현 이력은 아래 milestone 기록에 남기되 현재 active 범위는 completion 표와 최신 안정화 절을 따른다.
 
 ## 2. Completion status
 
 | 영역 | 상태 | 현재 근거 |
 |---|---|---|
 | startup·single-instance | 완료 | 두 번째 실행은 기존 창을 복원하며, fatal startup은 non-zero exit·사용자 안내·로컬 오류 로그를 남긴다 |
-| DB·migration | 완료 | schema v17, v15 folder/path·v16 candidate/root·v17 Auto Find cutoff evidence additive migration, future-schema 무변경 거부, version backup, WAL·explicit startup recovery 검증 완료 |
+| DB·migration | 완료 | schema v18, v15 folder/path·v16 candidate/root·v17 Auto Find cutoff·v18 source identity additive migration, future-schema 무변경 거부, version backup, WAL·explicit startup recovery 검증 완료 |
 | Hitomi search | 완료 | production live adapter, query serialization, bounded Explore cache·prefetch, requestId별 실제 cancellation과 paging/filter/popular fixture contract 검증 완료 |
 | detail·Related | 완료 | typed galleryinfo detail·Related 5개와 source-page identity를 저장 fixture 통합 테스트로 검증 |
 | thumbnail | 완료 | 전역 coordinator와 live resolver·viewport 구독·400ms orphan grace·120초/256 frontend retention·우선순위·실제 취소·memory/negative cache 검증 완료 |
@@ -28,7 +28,8 @@
 | gallery duplicate | 완료 | verified artifact HashProfile evidence, full scan/cancel/recovery, 실제 source-page Review와 CAS decision history 검증 완료 |
 | internal duplicate | 완료 | verified artifact 내부 exact/2행 이상 visual scene scan, synchronized source-page Review, CAS plan, page quarantine·undo·startup recovery 검증 완료 |
 | quarantine | 완료 | root 내부 atomic move, pending saga, startup 복구, undo와 무자동삭제 검증 |
-| Classic import | 완료 | 사용자 선택 root의 read-only inventory, typed conflict·승인, verified Next copy, journaled apply·Next-only rollback·startup recovery 검증 완료 |
+| 과거 데이터 이전 runtime | 제거 | active frontend/API/Rust source·repository·command를 제거했다. 이미 적용된 v14 migration과 역사적 table은 기존 DB 호환 때문에 불변 보존한다 |
+| 설정 초기화 | 완료 | 완료 thumbnail cache만 제거하고, 명시적 확인 뒤 favorites/history/Auto Find 데이터만 transaction으로 초기화한다. 다운로드 DB/artifact/files는 보존한다 |
 | Windows build·CI | 완료 | 최소 CSP·capability, 공용 `tools/verify.ps1`, Windows CI와 Tauri no-bundle release 검증 완료 |
 
 ## 3. Changes by subsystem
@@ -92,27 +93,23 @@
 - 브라우저 검토 adapter는 동일한 run/plan/revision/quarantine/undo 계약을 결정론적으로 재현한다. production과 browser 모두 자동 영구 삭제 command가 없다.
 - 데이터 호환성: DB schema는 13으로 상승한다. v13은 additive하고 v1~v12 의미, manifest schema 1과 HashProfile 1을 재해석하지 않는다.
 
-### Milestone G — Classic read-only import·rollback
+### 역사적 Milestone G — 제거된 데이터 이전 구현
 
-- `domain/classic_import.rs`, `application/classic_import.rs`: revisioned dry-run/apply/rollback과 typed conflict를 추가했다. apply는 dry-run fingerprint 재검사, 모든 acknowledgement와 명시적 최종 승인을 요구하며 Classic source를 수정하지 않는다.
-- `infrastructure/classic_source.rs`: 사용자가 고른 data/download root만 canonical read-only inventory한다. state와 backup, 선택적 localStorage export, manifest, numbered page, Classic quarantine과 legacy hash DB를 bounded read/decode하고 gallery ID로 연결한다. hash DB는 read-only/query-only이며 현재 HashProfile 판정에는 쓰지 않는다.
-- `FilesystemArtifactStore` 재사용: eligible Classic page는 apply 직전에 byte length·SHA-256·decode를 다시 검사하고 현재 backend folder template으로 새 Next artifact를 예약해 lossless WebP로 복사한다. manifest round-trip 검증 뒤에만 complete artifact bundle을 SQLite에 등록한다. 기존 artifact 위치는 재명명하지 않는다.
-- migration 14와 `classic_import_repository.rs`: run/report/plan, copy destination, change journal과 legacy hash provenance를 additive하게 저장한다. 기존 favorite/history/visibility/series/download row는 덮어쓰지 않으며 rollback은 journal에 기록된 신규 row만 제거한다.
-- filesystem 첫 write 전에 copy destination을 기록한다. 중단된 applying은 startup에서 failed→rolling_back으로 수렴하고 부분 Next 폴더를 `.atsumi-quarantine/classic-import/<import-id>/`로 이동한다. Classic 원본과 격리 copy를 영구 삭제하지 않는다.
-- `ClassicImportDialog.tsx`와 설정 저장 공간: native Windows folder picker, read-only 보증, copy/count 요약, typed 충돌별 acknowledgement, 최종 승인, latest-report reload와 Next-only rollback을 연결했다. browser review adapter도 같은 revision/acknowledgement lifecycle을 재현한다.
-- 데이터 호환성: DB schema는 14로 상승한다. v14는 additive하고 v1~v13 의미, manifest schema 1과 HashProfile 1을 재해석하지 않는다.
+- 2026-08-16에는 v14 table과 active runtime 경로가 존재했다. 2026-08-21 사용자 지시로 관련 dialog, TypeScript contract/adapter, Rust domain/application/source/repository/command와 startup recovery를 전부 제거했다.
+- migration 14의 version, name, SQL과 이미 생성된 네 table은 과거 migration 불변성과 기존 DB 호환을 위해 그대로 둔다. 현재 runtime은 이 table을 읽거나 쓰지 않는다.
+- 이 절은 과거 전달 증거를 설명하는 기록일 뿐 현재 기능이나 API 계약이 아니다.
 
 ### Milestone H — production UI·diagnostics·delivery polish
 
-- `SettingsDialog.tsx`: 실제 동작하는 일반·저장 공간만 설정 navigation에 남겼다. cache/data/전체 파일 삭제는 plan·review·undo가 없으므로 이유와 연결된 disabled control로 고정했고 토스트형 가짜 동작을 제거했다.
+- `SettingsDialog.tsx`: 실제 동작하는 단일 설정 화면만 남겼다. cache clear, 화면·네트워크 draft 기본값, 탐색 데이터 초기화를 별도 control로 제공하고 다운로드 DB/artifact/files 보존 범위를 명시한다.
 - `DetailWorkspace.tsx`: source page를 누르면 전역 `ThumbnailCoordinator`의 같은 `sourcePage` key를 critical priority로 다시 사용하는 확대 dialog가 열린다. Esc·닫기와 opener focus 복원, page count 변경 시 안전한 자동 닫기를 검증했다.
 - `ThumbnailProvider.tsx`, `main.tsx`, `SideRail.tsx`: production composition root가 thumbnail client를 반드시 주입하며 context의 fixture fallback을 제거했다. 패키지 앱은 `Hitomi live`, 명시적 browser review mode만 `Browser fixture`로 표시한다.
-- Settings·Classic import·page preview dialog는 열기 trigger와 close button focus를 관리한다. 기존 Review·내부 Review·종료 dialog의 focus 복원, reduced motion, keyboard/accessible label 계약을 유지한다.
+- Settings·page preview dialog는 열기 trigger와 close button focus를 관리한다. 기존 Review·내부 Review·종료 dialog의 focus 복원, reduced motion, keyboard/accessible label 계약을 유지한다.
 - `interface/api.rs`, `main.rs`, `start_app_hidden.ps1`: DB 내부 detail을 사용자 API message에서 분리하고 stable code만 노출한다. startup/launcher log는 사용자 profile과 전체 URL을 가리며 release GUI launcher는 project/executable 절대 경로를 로그에 남기지 않는다.
 - `THIRD_PARTY_NOTICES.md`: vendored Fluent UI System Icons 1.1.328의 정확한 자산 범위·MIT 고지와 lockfile 기반 dependency provenance를 기록했다. package/Cargo/Tauri version은 모두 `0.1.0`으로 일치하며 미검증 `1.0.0` 표시는 하지 않는다.
-- 데이터 호환성: H 완료 당시 DB schema는 14였고 H 자체는 schema·manifest·HashProfile 의미를 바꾸지 않았다. 이후 Milestone I의 additive v15~v17이 적용됐으며 manifest와 HashProfile은 계속 version 1이다.
+- 데이터 호환성: H 완료 당시 DB schema는 14였고 H 자체는 schema·manifest·HashProfile 의미를 바꾸지 않았다. 이후 Milestone I의 additive v15~v18이 적용됐으며 manifest와 HashProfile은 계속 version 1이다.
 
-### Milestone I — post-completion 안정화 (adaptive card·cache/cancel·schema v15~v17)
+### Milestone I — post-completion 안정화 (adaptive card·cache/cancel·schema v15~v18)
 
 - `GalleryCard.tsx`와 `galleryCardLayout.ts`: 포스터형 대신 가로 밀도형을 유지하고 점수·날짜를 제거했다. cover root를 `ResizeObserver`로 측정해 card CSS height를 직접 고정하므로 content와 태그가 외곽을 늘리지 않는다. 160/220/280/360px에서 card/cover 차이 1px 이하를 component test로 고정했다.
 - `design/card-adaptive-layout-review.html`은 preview 160/220/280/360px와 1/2/3/4열, 짧고 긴 제목, pipe 번역, 명시 subtitle, 작가/그룹, 3/10/25+ 태그, 한중일, F/M/중립 favorite, download/duplicate 상태를 한 matrix에서 비교한다. 열/preview를 다시 넓히면 전체 원본 tag element를 다시 드러낸 뒤 재측정하므로 앞선 좁은 상태에서 숨긴 태그가 계속 누락되지 않는다.
@@ -124,14 +121,16 @@
 - download/thumbnail image pipeline은 pinned pure-Rust `avif-rust 0.0.6`/`bin-rs 0.0.10`으로 bounded AVIF를 experimental 지원한다. JXL은 diagnostic만 남기고 fallback 뒤 non-retryable `IMAGE_FORMAT_UNSUPPORTED`다.
 - schema v17 `auto_find_history_cutoff_evidence`: 설정/run history mode, verified owned artist, 작가별 cutoff evidence와 truncation을 추가했다. 현재 literal은 `source=verified_owned_artifact`, `policyVersion=1`; cutoff 뒤 50,000 candidate limit이며 과거 250-page 정책은 폐기됐다.
 - Windows download root 표시 경계는 well-formed `\\?\D:\...`와 `\\?\UNC\...`만 일반 drive/UNC로 바꾼다. 폴더 선택 뒤 canonical root를 설정에 그대로 저장하던 유입 경로를 차단했으며, 기존 artifact `root_snapshot`과 파일은 그대로 둔다. 폴더 template 미리보기는 실제 Rust planner command를 사용한다.
-- 데이터 호환성: DB schema는 17이다. v15~v17은 additive하고 기존 `relative_directory`를 다시 계산하지 않으며 manifest schema 1과 HashProfile 1을 재해석하지 않는다.
+- schema v18 `gallery_source_revision_identity`: remote source fingerprint를 문자열 identity로 저장하고 signed SQLite 내부 revision과 분리했다. gallery 4113714/4132312에서 발생한 unsigned source revision 변환 오류를 `u64::MAX` 회귀 test로 차단한다.
+- card layout은 일곱 preview preset(160/190/220/250/280/320/360, 기본 220), preset별 typography·2/2/3/4/5/6/7 tag rows, grid별 시각 행 최대 intrinsic cover 높이를 공유한다. 독립 grid와 불완전 마지막 행은 서로 영향을 주지 않는다.
+- 데이터 호환성: DB schema는 18이다. v15~v18은 additive하고 기존 `relative_directory`를 다시 계산하지 않으며 manifest schema 1과 HashProfile 1을 재해석하지 않는다.
 
 ## 4. Contracts and versions
 
 - 앱/package/Tauri version: `0.1.0`
 - Rust MSRV: `1.88.0` (working tree)
-- DB schema version: 17
-- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`, `favorites_search_history_and_auto_find`, `auto_find_visible_metadata`, `artifact_duplicate_evidence_and_decisions`, `internal_scene_review_and_page_quarantine`, `classic_read_only_import_and_rollback`, `artifact_folder_template_and_immutable_path`, `download_candidate_diagnostics_and_artifact_root_snapshot`, `auto_find_history_cutoff_evidence`
+- DB schema version: 18
+- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`, `favorites_search_history_and_auto_find`, `auto_find_visible_metadata`, `artifact_duplicate_evidence_and_decisions`, `internal_scene_review_and_page_quarantine`, `classic_read_only_import_and_rollback`(역사적 DDL만 보존), `artifact_folder_template_and_immutable_path`, `download_candidate_diagnostics_and_artifact_root_snapshot`, `auto_find_history_cutoff_evidence`, `gallery_source_revision_identity`
 - manifest schema version: 1
 - HashProfile version: 1 / algorithm version 1 (artifact SHA-256 + 작품 중복 64-bit coarse dHash·pHash, 1024-bit detail dHash와 content gate)
 - Hitomi parser version: 1
@@ -142,13 +141,13 @@
 
 - SQLite만 영속 상태의 canonical source로 사용한다.
 - 실제 파일·manifest·해시 검증을 모두 통과한 artifact만 `completed`가 될 수 있다.
-- 원본 source page number는 배열 index와 분리하고 변경하지 않는다.
+- 원본 source page number와 source revision identity는 배열 index·SQLite 내부 revision과 분리하고 변경하지 않는다.
 - 모든 화면은 프로세스 전역 `ThumbnailCoordinator` 하나를 공유한다.
 - 검색·썸네일·다운로드는 공용 HTTP budget과 host cooldown을 공유한다.
 - filesystem 경로는 canonical download root 내부만 허용한다.
 - 자동 판정만으로 사용자 파일을 영구 삭제하지 않는다.
 - 현재 quarantine은 undo만 제공하고 영구 purge command는 제공하지 않는다.
-- Classic 저장소와 원본 사용자 데이터는 읽기 전용 입력이다.
+- Classic 저장소와 원본 사용자 데이터에는 active runtime 접근 경로가 없다.
 - 지원 버전보다 새로운 DB schema는 변경 전에 거부한다.
 - 실제 파일 DB migration 전에 timestamp와 version이 포함된 일관된 backup을 만들고 덮어쓰지 않는다.
 - SQLite는 WAL·busy timeout·짧은 transaction을 사용하며 repository open 자체는 job 복구나 독점 잠금을 수행하지 않는다.
@@ -183,6 +182,7 @@
 - 최종 release `src-tauri/target/release/atsumi-next.exe`를 실제 Windows GUI로 실행했고 `Atsumi Next` main window가 생성되어 responsive 상태임을 확인했다. 사용자가 현재 열린 창에서 실제 검색·다운로드 폴더 선택·viewer open의 대화형 동작을 검토할 수 있다.
 - 2026-08-20 UI·경로 안정화 전체 검증: `tools/verify.ps1` 성공 — frontend 21 files 135/135, Rust lib 140/140(일반 suite에서 opt-in live 1개 제외), startup 2/2, typecheck·Vite production build·fmt/check/clippy·Tauri release `--no-bundle`·whitespace를 통과했다. 로그는 `.runtime/verification/verify-20260820-211217.log`에 있다.
 - opt-in full download live 증거: gallery `4113714`의 metadata 18 pages, download/store/reopen 검증 18/18, 선택 형식 WebP 18개, 선택 payload 합계 12,396,942 bytes. 이는 단일 gallery 증거이며 AVIF/JXL 전체 corpus 보증은 아니다.
+- 2026-08-21 카드 행/preset·schema v18 source identity·초기화·runtime 제거 전체 검증: `tools/verify.ps1 -SkipInstall` 성공 — frontend 23 files 140/140, Rust lib 140/140(일반 suite에서 opt-in live 1개 제외), startup 2/2, typecheck·Vite production build·fmt/check/clippy·Tauri release `--no-bundle`·whitespace를 통과했다. 로그는 `.runtime/verification/verify-20260821-011639.log`에 있다.
 
 ## 7. Known limitations and blockers
 
@@ -190,7 +190,7 @@
 
 - Auto Find는 history cutoff를 Nozomi ID에 먼저 적용한 뒤 작가당 최대 50,000 candidate를 처리한다. 초과는 `candidate_limit_after_cutoff`로 영속하므로 무제한 전체 조회로 표현하지 않는다.
 - E-Hentai relation evidence는 사용자가 명시적인 적법 session을 제공하지 않아 production에서 비활성이다. 작품 중복 검사는 session 없이 local artifact evidence만으로 정상 동작한다. 향후 활성화할 때 cookie/session은 process memory의 redacted provider 입력으로만 취급하고 DB·manifest·로그에는 쓰지 않아야 한다.
-- Classic localStorage는 Classic 코드를 수정하거나 WebView profile을 직접 읽지 않는다. 사용자가 별도로 둔 세 가지 명시적 export filename만 선택적으로 병합하므로 export 파일이 없으면 state.json에 없는 localStorage-only 값은 가져오지 못한다.
+- 과거 데이터 이전 UI/API/runtime은 제거됐다. v14 migration table은 기존 DB 호환을 위해 남지만 새 데이터 이전 수단으로 사용할 수 없다.
 - page quarantine은 undo를 제공하지만 영구 purge는 의도적으로 제공하지 않는다. 공간 회수 UI는 자동 삭제 없이 별도 사용자 승인 정책으로만 추가해야 한다.
 - artifact decode는 WebP/JPEG/PNG와 experimental AVIF를 지원한다. AVIF decoder는 정확히 고정한 순수 Rust crate와 bounded allocation을 사용하지만 대표 live corpus 검증은 남아 있다. JPEG XL은 아직 지원하지 않고 fallback 뒤 `IMAGE_FORMAT_UNSUPPORTED`로 종료한다.
 - 새 folder template은 기존 artifact에 소급 적용되지 않는다. 기존 `relative_directory`/`root_snapshot` 자동 rename·move 기능이 없으며 수동 파일 이동도 manifest/DB 불일치를 만든다.
@@ -213,7 +213,7 @@
 - `duplicate:changed` event로 후보나 판정 이력을 구성하지 않는다. 서로 다른 run의 늦은 snapshot이 최신 run을 덮지 않도록 startedAt/revision/token 경계를 유지한다.
 - Review에 live `galleryPage`를 사용하지 않는다. 판정 evidence는 반드시 root-bound verified `artifactPage(entryId, sourcePage)`와 immutable source page 번호를 사용한다.
 - 내부 visual duplicate를 한 page match만으로 생성하지 않는다. 최소 2행 monotonic scene block, plan revision/byte snapshot과 page quarantine saga를 함께 유지한다.
-- Classic 경로를 Next managed root로 취급하거나 Classic 파일을 move/write/delete하지 않는다. 새 입력 형식은 dry-run conflict와 source fingerprint test를 함께 추가한다.
+- 과거 데이터 이전 command/source adapter를 v14 table 존재만 보고 되살리지 않는다. 새 이전 기능은 별도 승인·계약·migration으로 다시 설계해야 한다.
 - 기존 artifact 위치를 template 설정에 맞춰 갱신하지 않는다. relocation이 필요하면 별도 dry-run·revisioned journal·rollback migration을 먼저 설계한다.
 - `search_page_cancel`을 frontend stale-result 무시로 대체하지 않는다. active source token과 cancel-before-start tombstone 경계를 유지한다.
 
@@ -223,9 +223,8 @@
 - migration 실패 시 원본 DB transaction을 commit하지 않고 backup 위치를 사용자 오류에 제공한다.
 - interrupted download는 page checkpoint와 `.part`를 reconcile한 뒤 명시적 resume한다.
 - 손상되거나 모호한 manifest·파일은 자동 삭제하지 않고 review 대상으로 분류한다.
-- Next는 Classic을 변경하지 않으므로 Next 전용 profile을 사용하지 않으면 Classic으로 돌아갈 수 있다.
-- Classic import rollback은 해당 import의 Next copy를 quarantine하고 change journal의 신규 row만 제거한다. 기존 Next row와 Classic source는 rollback 대상이 아니다.
-- v15~v17은 additive지만 schema downgrade는 지원하지 않는다. 실제 downgrade는 자동 migration 전 backup과 호환 binary를 함께 복원하고 운영 DB에서 수동 DDL을 실행하지 않는다.
+- v15~v18은 additive지만 schema downgrade는 지원하지 않는다. 실제 downgrade는 자동 migration 전 backup과 호환 binary를 함께 복원하고 운영 DB에서 수동 DDL을 실행하지 않는다.
+- v14의 역사적 table은 runtime에서 접근하지 않지만 rollback 목적으로 수동 삭제하지 않는다.
 - 기존 artifact folder/root는 rollback 과정에서도 자동 rename하지 않는다. 모호한 경로는 reconcile Review에 남기고 overwrite/delete하지 않는다.
 - Git rollback 범위는 milestone별 독립 commit으로 유지한다.
 
@@ -234,5 +233,5 @@
 - 현재 작업 branch: `agent/phase-3-foundation`
 - 이번 UI·경로 안정화를 시작한 원격 코드 기준 HEAD: `88b4f6e3fdcb0f24c4c74390b1ed9085c390f4fb`
 - 안정화 commit 순서: `bff5cee` adaptive card, `e781e70` thumbnail churn retention, `1f969d5` Explore cache/prefetch, `8297b2b` safe artifact folder templates, `c64c3b6` unsupported gallery recovery/diagnostics, `aacda1c` Auto Find history cutoff, `38fa2c0` actual Explore cancellation.
-- 이번 UI·경로 안정화는 설정/경로와 카드/태그의 두 논리적 commit으로 같은 branch에 push하고 기존 Draft PR #1의 본문과 검사 상태를 갱신한다. force push, `main` 직접 push, merge, Draft 해제, release/tag 생성은 하지 않는다.
-- 전달자는 `git diff --check`, 전체 verify, push 뒤 원격 branch SHA와 Draft PR 상태, 최종 clean worktree를 함께 확인한다.
+- 이번 2026-08-21 작업은 사용자 지시에 따라 로컬 구현·검증까지만 수행하며 stage/commit/push/PR 수정은 하지 않는다.
+- 전달자는 `git diff --check`, 전체 verify와 최종 `git status --short`를 보고하고 Git 변경은 사용자 검토 뒤 별도 승인으로 수행한다.

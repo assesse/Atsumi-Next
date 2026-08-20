@@ -1,6 +1,6 @@
 # API Contract V2
 
-Phase 7의 Classic read-only import와 rollback, 그리고 schema v15~v17 안정화까지 구현된 command와 event 형식을 이 문서의 현재 기준 revision으로 사용한다. DB schema는 17, manifest schema와 HashProfile은 1이다.
+현재 실제 runtime과 schema v15~v18 안정화까지 구현된 command와 event 형식을 이 문서의 기준 revision으로 사용한다. DB schema는 18, manifest schema와 HashProfile은 1이다.
 
 ## 공통 규칙
 
@@ -70,13 +70,10 @@ type ApiError = {
 | `thumbnail_invalidate` | `{ key }` | cache removal flags | 예 |
 | `thumbnail_reprioritize` | `{ requestId, priority }` | `boolean` | 우선순위 승격만 적용 |
 | `thumbnail_stats` | 없음 | `ThumbnailWorkerStats` | 예 |
+| `thumbnail_cache_clear` | 없음 | `ThumbnailCacheClearResult` | 예; 완료 cache만 제거 |
 | `artifact_open_first` | `{ entryId }` | `null` | 검증 snapshot 기반 |
 | `app_reconcile` | 없음 | `ReconcileReport` | pending saga와 interrupted job 재사용 |
-| `classic_import_pick_folder` | 없음 | `string | null` | 사용자 선택만 반환 |
-| `classic_import_dry_run` | `{ request }` | `ClassicImportReport` | source fingerprint snapshot |
-| `classic_import_get` | `{ importId }` | `ClassicImportReport` | 예 |
-| `classic_import_apply` | `{ request }` | `ClassicImportApplyResult` | report와 imported gallery/file/byte 합계; import revision·승인 CAS |
-| `classic_import_rollback` | `{ request }` | `ClassicImportReport` | import revision·journal 기반 |
+| `exploration_data_reset` | `{ request: { confirmation: "RESET_EXPLORATION_DATA" } }` | `ExplorationDataResetResult` | 확인 literal + 단일 transaction |
 | `folder_name_template_preview` | `{ template }` | `string` | 실제 artifact planner의 sample 결과 |
 | `app_minimize_to_tray` | 없음 | `null` | 예 |
 | `app_quit` | 없음 | `null` | shutdown gate 기반 |
@@ -112,6 +109,8 @@ type SettingsSnapshot = {
 ```
 
 `settings_update`는 `expectedRevision` CAS를 사용한다. Windows의 `downloadRoot`는 사람이 읽고 편집하는 drive/UNC 형식이며 well-formed `\\?\D:\...`와 `\\?\UNC\...`만 표시 경계에서 일반 형식으로 바꾼다. device path나 malformed prefix는 변환하지 않는다. filesystem containment는 별도로 canonical path를 사용하고 기존 artifact `root_snapshot`은 표시 정규화의 대상이 아니다. `folderNameTemplate`과 `autoFindHistoryMode`의 변경은 새 artifact/새 Auto Find run부터 적용하고 이미 예약된 artifact path나 실행 중 run을 재해석하지 않는다.
+
+`cacheLimitGb`는 기존 settings row 호환을 위해 transport에 남아 있지만 현재 memory-only thumbnail coordinator의 64MiB bound를 바꾸지 않는다. 설정 화면은 효력이 없는 용량 slider를 노출하지 않고, 실제 동작하는 `thumbnail_cache_clear`만 제공한다.
 
 ## SearchRequest
 
@@ -330,6 +329,8 @@ type ThumbnailRequest = {
 - production resolver는 검색·download와 같은 pooled transport를 공유한다. HTTP dispatch는 `critical > visible > prefetch > download`, 전역·host별 동시성, 최소 시작 간격, cancellation, bounded retry, `Retry-After`, 429/503 cooldown을 적용한다.
 - thumbnail failure code는 `cancelled`, `notFound`, `candidatesExhausted`, `responseInvalid`, `decodeFailed`, `temporarilyUnavailable`, `unauthorized`, `invalidData`, `resolver`, `coordinatorClosed` 중 하나다. frontend는 backend가 전달한 `retryable`을 보존하고 문자열 prefix로 retry를 추측하지 않는다.
 
+`thumbnail_cache_clear`는 완료된 backend success/negative cache와 구독자가 없는 frontend retention만 비운다. 진행 중인 work와 현재 화면에서 사용 중인 asset은 취소·회수하지 않는다. 결과는 제거된 success entry/byte와 negative entry 수를 반환한다.
+
 ## Artifact·reconcile·quarantine 계약
 
 - `completed`는 실제 WebP page 전부의 decode·byte length·SHA-256, source page mapping, schema 1 manifest와 DB snapshot이 일치한 뒤에만 기록한다.
@@ -337,6 +338,7 @@ type ThumbnailRequest = {
 - `folder_name_template_preview`는 artist=`작가`, title=`작품 제목`, group=`그룹`, id=`4113714`를 실제 `plan_artifact_relative_directory()`에 전달한다. frontend는 sanitizer를 복제하지 않고 약 125ms debounce한 IPC 결과만 표시한다.
 - template은 새 artifact의 최초 예약에만 적용한다. 기존 `relative_directory`와 v16 `root_snapshot`은 immutable이고 resume/reconcile/Review는 저장된 위치를 사용한다. 기존 artifact 자동 rename/move API는 존재하지 않는다.
 - source candidate는 `unknown|webp|jpeg|png|avif|jxl` 형식, HTTP status, content type, retryability를 page attempt diagnostic에 저장한다. WebP/JPEG/PNG는 검증 후 lossless WebP로 저장한다. AVIF는 pinned pure-Rust bounded decoder를 쓰는 experimental 지원이고 JXL은 decoder가 없어 fallback 뒤 `IMAGE_FORMAT_UNSUPPORTED`가 non-retryable이다.
+- source revision은 최대 512 bytes 문자열 identity로 v18 `galleries.source_revision`에 저장한다. SQLite의 signed integer `galleries.revision`은 내부 snapshot CAS에만 쓰며 FNV 같은 unsigned source fingerprint를 넣지 않는다. 동일 source identity는 내부 revision을 유지하고 identity가 달라질 때만 작은 내부 revision을 증가시킨다.
 - `app_reconcile`은 `{ inspectedArtifacts, verifiedArtifacts, resumedJobs, issues[] }`를 반환한다. 각 issue는 `entryId`, stable `code`, 사용자 문구와 `recoverable`을 가진다.
 - quarantine은 `pending_quarantine -> quarantined`, undo는 `pending_restore -> restored` saga다. filesystem atomic move와 SQLite commit 사이에 종료되면 다음 reconcile이 원본/격리 경로 존재를 비교해 마무리한다.
 - 둘 다 존재하거나 둘 다 없으면 자동 삭제·덮어쓰기를 하지 않고 `QUARANTINE_CONFLICT`를 반환한다. 자동 purge command는 없다.
@@ -361,12 +363,25 @@ type ThumbnailRequest = {
 - 원본과 목적지가 모두 있거나 모두 없으면 overwrite/delete하지 않고 Review 오류로 중단한다. 영구 삭제 command는 없다.
 - Review preview는 작품 중복과 같은 `{ kind: "artifactPage", entryId, sourcePage }` key와 전역 thumbnail coordinator를 사용하며 live source image를 판정 증거로 대체하지 않는다.
 
-## Classic read-only import 계약
+## 유지보수 초기화 계약
 
-- `classic_import_pick_folder() -> string | null`은 Windows 폴더 선택기만 연다. 선택한 경로를 저장하거나 쓰기 가능성으로 판단하지 않는다.
-- `classic_import_dry_run({dataRoot, downloadRoot?}) -> ClassicImportReport`는 Classic `state.json(.bak)`, 명시적 localStorage export, hash DB, manifest, numbered page와 quarantine을 읽기 전용으로 조사한다. 보고서는 label·fingerprint·counts·gallery eligibility와 typed conflict만 전달하고 source 절대 경로는 포함하지 않는다.
-- `classic_import_get(importId)`는 SQLite에 저장된 revisioned 보고서를 복원한다.
-- `classic_import_apply({importId, expectedRevision, acceptedConflictIds})`는 dry-run fingerprint를 재검사하고 모든 acknowledgement 경고의 명시적 승인을 요구한다. Classic 파일은 이동·수정하지 않는다. eligible page를 다시 SHA/length/decode 검증하고 현재 `folderNameTemplate`으로 새 Next artifact를 예약해 WebP 복사, SHA-256과 manifest 검증을 마친 뒤 한 SQLite transaction으로 완료 artifact와 metadata를 등록한다.
-- `classic_import_rollback({importId, expectedRevision})`은 이 import가 새로 만든 DB row만 revision guard로 제거하고, journal에 기록된 정확한 Next artifact 폴더만 `.atsumi-quarantine/classic-import/<importId>/` 아래로 이동한다. Classic source와 기존 Next row는 변경하지 않으며 영구 삭제 command는 없다.
-- apply 전 source fingerprint가 바뀌면 `CLASSIC_SOURCE_CHANGED`, acknowledgement가 빠지면 `CLASSIC_IMPORT_CONFLICT`, state/revision이 낡으면 stable validation/revision 오류로 중단한다.
-- copy destination은 첫 filesystem write 전에 SQLite에 기록한다. 시작 시 남은 `applying`은 failed→rolling_back으로 전환해 부분 Next 폴더를 격리하고, 남은 `rolling_back`도 idempotent하게 마무리한다.
+```ts
+type ThumbnailCacheClearResult = {
+  successEntriesRemoved: number;
+  successBytesRemoved: number;
+  negativeEntriesRemoved: number;
+};
+
+type ExplorationDataResetResult = {
+  favoritesRemoved: number;
+  searchHistoryRemoved: number;
+  autoFindRunsRemoved: number;
+  autoFindCandidatesRemoved: number;
+  autoFindExclusionsRemoved: number;
+};
+```
+
+- `exploration_data_reset`은 정확한 확인 literal `RESET_EXPLORATION_DATA`를 요구한다. active Auto Find run이 있으면 `OPERATION_ACTIVE`로 아무것도 지우지 않는다.
+- 성공하면 favorite, search history, Auto Find run/candidate/cutoff/truncation/exclusion만 `BEGIN IMMEDIATE` 한 transaction에서 삭제한다.
+- download entry/job/attempt/page, gallery, artifact, manifest, duplicate 판정, quarantine과 실제 파일은 대상이 아니다. 다운로드와 artifact를 일괄 삭제하는 유지보수 command는 없다.
+- 저장되지 않은 화면·네트워크 기본값 복원은 frontend draft 동작이며 사용자가 설정 저장을 확정하기 전 SQLite를 바꾸지 않는다. download root와 folder template은 이 기본값 복원 범위에 포함하지 않는다.

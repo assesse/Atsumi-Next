@@ -6,8 +6,6 @@ pub mod source;
 pub mod thumbnail;
 
 #[cfg(test)]
-mod classic_import_tests;
-#[cfg(test)]
 mod tests;
 
 use std::{
@@ -18,15 +16,14 @@ use std::{
 
 use application::{
     ApplicationService, ArtifactRepository, ArtifactStore, AutoFindSource, AutoFindSupervisor,
-    AutomationRepository, ClassicImportRepository, ClassicImportService, ClassicSourceInspector,
-    DisabledDuplicateRelationProvider, DownloadPipelineRepository, DownloadSourcePort,
-    DownloadSupervisor, DuplicateRepository, DuplicateSupervisor, InternalDuplicateRepository,
-    InternalDuplicateSupervisor, StateRepository,
+    AutomationRepository, DisabledDuplicateRelationProvider, DownloadPipelineRepository,
+    DownloadSourcePort, DownloadSupervisor, DuplicateRepository, DuplicateSupervisor,
+    InternalDuplicateRepository, InternalDuplicateSupervisor, StateRepository,
 };
 use domain::{AutoFindRun, DownloadJobProjection, DuplicateScanRun, InternalScanRun};
 use infrastructure::{
-    CompositeThumbnailResolver, FilesystemArtifactStore, FilesystemClassicSource,
-    HitomiLiveAdapter, HitomiLiveConfig, SqliteRepository, WindowsFolderPicker,
+    CompositeThumbnailResolver, FilesystemArtifactStore, HitomiLiveAdapter, HitomiLiveConfig,
+    SqliteRepository, WindowsFolderPicker,
 };
 use interface::AppState;
 use tauri::{
@@ -131,17 +128,6 @@ pub fn run() -> tauri::Result<()> {
                 })?;
             let artifact_store: Arc<dyn ArtifactStore> =
                 Arc::new(FilesystemArtifactStore::new());
-            let classic_import_repository: Arc<dyn ClassicImportRepository> = repository.clone();
-            let classic_import_settings: Arc<dyn StateRepository> = repository.clone();
-            let classic_source: Arc<dyn ClassicSourceInspector> =
-                Arc::new(FilesystemClassicSource::new());
-            let classic_import = ClassicImportService::new(
-                classic_import_repository,
-                classic_import_settings,
-                classic_source,
-                Arc::clone(&artifact_store),
-            );
-            let recovered_classic_imports = classic_import.recover_incomplete()?;
             let thumbnail_config = ThumbnailCoordinatorConfig {
                 max_concurrency: settings.concurrent_image_requests as usize,
                 request_start_interval: Duration::from_millis(settings.request_start_interval_ms),
@@ -286,7 +272,6 @@ pub fn run() -> tauri::Result<()> {
                 auto_find,
                 duplicates,
                 internal_duplicates,
-                classic_import,
                 Arc::new(WindowsFolderPicker::new()),
                 artifact_store,
             ));
@@ -302,7 +287,6 @@ pub fn run() -> tauri::Result<()> {
                 recovered_auto_find_runs,
                 recovered_duplicate_runs,
                 recovered_internal_runs,
-                recovered_classic_imports,
                 reconciled_internal_pages,
                 reconciled_artifacts,
                 reconcile_issues,
@@ -328,6 +312,7 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::auto_find_refresh,
             interface::commands::auto_find_cancel,
             interface::commands::auto_find_exclude,
+            interface::commands::exploration_data_reset,
             interface::commands::duplicate_snapshot,
             interface::commands::duplicate_scan_start,
             interface::commands::duplicate_scan_cancel,
@@ -340,11 +325,6 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::internal_removal_plan,
             interface::commands::internal_removal_apply,
             interface::commands::internal_removal_undo,
-            interface::commands::classic_import_pick_folder,
-            interface::commands::classic_import_dry_run,
-            interface::commands::classic_import_get,
-            interface::commands::classic_import_apply,
-            interface::commands::classic_import_rollback,
             interface::commands::download_queue_add,
             interface::commands::download_entries_list,
             interface::commands::download_retry,
@@ -359,6 +339,7 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::thumbnail_invalidate,
             interface::commands::thumbnail_reprioritize,
             interface::commands::thumbnail_stats,
+            interface::commands::thumbnail_cache_clear,
             interface::commands::app_minimize_to_tray,
             interface::commands::app_quit,
         ])

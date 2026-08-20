@@ -308,6 +308,14 @@ pub struct ThumbnailInvalidationDto {
     pub negative_cache_removed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailCacheClearDto {
+    pub success_entries_removed: usize,
+    pub success_bytes_removed: usize,
+    pub negative_entries_removed: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThumbnailWorkerStatsDto {

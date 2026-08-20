@@ -19,15 +19,18 @@ import type {
   SearchHistoryEntry,
   SearchRequest,
   SettingsPatch,
+  ThumbnailCacheClearResult,
+  ExplorationDataResetResult,
+  ApiResult,
 } from "./api/contracts";
 import { ActivityDrawer } from "./components/ActivityDrawer";
-import { ClassicImportDialog } from "./components/ClassicImportDialog";
 import { DetailWorkspace } from "./components/DetailWorkspace";
 import { DuplicateReviewDialog } from "./components/DuplicateReviewDialog";
 import { InternalDuplicateDialog } from "./components/InternalDuplicateDialog";
 import { ExitConfirmDialog } from "./components/ExitConfirmDialog";
 import { FluentIcon } from "./components/FluentIcon";
 import { GalleryCard } from "./components/GalleryCard";
+import { GalleryGrid } from "./components/GalleryGrid";
 import { SelectionToolbar } from "./components/SelectionToolbar";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SideRail } from "./components/SideRail";
@@ -179,7 +182,6 @@ export default function App() {
   const [toast, setToast] = useState<Toast>(null);
   const [reconcilingArtifacts, setReconcilingArtifacts] = useState(false);
   const [settingsPreview, setSettingsPreview] = useState<{ maxColumns: number; previewWidth: number } | null>(null);
-  const [classicImportOpen, setClassicImportOpen] = useState(false);
   const [exitActiveDownloads, setExitActiveDownloads] = useState<number | null>(null);
   const [exitStatusError, setExitStatusError] = useState(false);
   const [exitActionPending, setExitActionPending] = useState(false);
@@ -246,6 +248,57 @@ export default function App() {
     window.clearTimeout(toastTimer.current);
     setToast({ id: Date.now(), message });
     toastTimer.current = window.setTimeout(() => setToast(null), 2400);
+  }, []);
+
+  const clearThumbnailCache = useCallback(async (): Promise<ApiResult<ThumbnailCacheClearResult>> => {
+    const localEntriesRemoved = thumbnailClient.clearRetainedCache();
+    try {
+      const result = await backend.thumbnailCacheClear();
+      if (!result.ok) return result;
+      return {
+        ok: true,
+        data: {
+          ...result.data,
+          successEntriesRemoved: result.data.successEntriesRemoved + localEntriesRemoved,
+        },
+      };
+    } catch {
+      return {
+        ok: false,
+        error: {
+          code: "CACHE_CLEAR_FAILED",
+          message: "미리보기 캐시를 정리하지 못했습니다.",
+          retryable: true,
+          action: "retry",
+        },
+      };
+    }
+  }, [thumbnailClient]);
+
+  const resetExplorationData = useCallback(async (): Promise<ApiResult<ExplorationDataResetResult>> => {
+    try {
+      const result = await backend.explorationDataReset({
+        confirmation: "RESET_EXPLORATION_DATA",
+      });
+      if (!result.ok) return result;
+      setFavoriteRecords([]);
+      setFavoriteMetadata(new Set());
+      setSearchHistory([]);
+      setAutoFindSnapshot({ candidates: [], cutoffEvidence: [], truncations: [] });
+      setAutoFindIds([]);
+      setAutoFindError(null);
+      return result;
+    } catch {
+      return {
+        ok: false,
+        error: {
+          code: "EXPLORATION_RESET_FAILED",
+          message: "탐색 데이터를 초기화하지 못했습니다.",
+          retryable: true,
+          action: "retry",
+        },
+      };
+    }
   }, []);
 
   const applyAutoFindSnapshot = useCallback((snapshot: AutoFindSnapshot) => {
@@ -384,10 +437,6 @@ export default function App() {
     void hydrateDuplicateSnapshot(true);
     void hydrateInternalSnapshot(true);
   }, [hydrateAutoFind, hydrateDuplicateSnapshot, hydrateFavorites, hydrateInternalSnapshot, hydrateSearchHistory]);
-
-  useLayoutEffect(() => {
-    document.documentElement.style.setProperty("--preview-width", `${previewWidth}px`);
-  }, [previewWidth]);
 
   useLayoutEffect(() => {
     const viewport = galleryViewport.current;
@@ -1461,7 +1510,12 @@ export default function App() {
   const currentDuplicateStatus = duplicateStatusLabel(duplicateLoading, duplicateError, duplicateRun);
   const currentInternalStatus = internalStatusLabel(internalLoading, internalError, internalRun);
   const renderGalleryGrid = (items: Gallery[], ariaLabel: string) => (
-    <div className={`gallery-grid${ui.selection.ids.size ? " is-selection-context" : ""}`} style={{ gridTemplateColumns: `repeat(${galleryColumns}, minmax(0, 1fr))` }} role="list" aria-label={ariaLabel}>
+    <GalleryGrid
+      columns={galleryColumns}
+      previewWidth={previewWidth}
+      selectionContext={ui.selection.ids.size > 0}
+      ariaLabel={ariaLabel}
+    >
       {items.map((gallery, index) => (
         <GalleryCard
           key={gallery.id}
@@ -1481,7 +1535,7 @@ export default function App() {
           onMetadataFavorite={toggleMetadataFavorite}
         />
       ))}
-    </div>
+    </GalleryGrid>
   );
 
   return (
@@ -1684,22 +1738,10 @@ export default function App() {
         error={settingsError}
         onClose={() => dispatch({ type: "overlay.settings", open: false })}
         onSave={saveSettingsPatch}
-        onClassicImport={() => setClassicImportOpen(true)}
         onPreviewLayout={setSettingsPreview}
         onPreviewFolderName={previewFolderNameTemplate}
-      />
-
-      <ClassicImportDialog
-        open={classicImportOpen}
-        onClose={() => setClassicImportOpen(false)}
-        onChanged={() => {
-          setDownloadsRefresh((value) => value + 1);
-          void hydrateFavorites();
-          void hydrateSearchHistory();
-          void hydrateAutoFind();
-          void hydrateDuplicateSnapshot();
-          void hydrateInternalSnapshot();
-        }}
+        onClearCache={clearThumbnailCache}
+        onResetExplorationData={resetExplorationData}
       />
 
       <DuplicateReviewDialog

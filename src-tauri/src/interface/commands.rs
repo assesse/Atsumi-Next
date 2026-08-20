@@ -9,15 +9,14 @@ use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use crate::{
     application::{
         ApplicationError, ApplicationService, ArtifactStore, AutoFindSupervisor,
-        ClassicImportService, DownloadPipelineError, DownloadPipelineErrorCode, DownloadRootPicker,
-        DownloadSupervisor, DuplicateSupervisor, InternalDuplicateSupervisor, ReconcileReport,
+        DownloadPipelineError, DownloadPipelineErrorCode, DownloadRootPicker, DownloadSupervisor,
+        DuplicateSupervisor, InternalDuplicateSupervisor, ReconcileReport,
     },
     domain::{
-        download_root_for_display, AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot,
-        ClassicImportApplyRequest, ClassicImportApplyResult, ClassicImportDryRunRequest,
-        ClassicImportReport, ClassicImportRollbackRequest, DownloadChangedEvent, DownloadEntry,
-        DownloadListRequest, DownloadPage, DuplicateDecisionRequest, DuplicateReview,
-        DuplicateScanRun, DuplicateSnapshot, FavoriteKey, FavoriteMutationResult, FavoriteRecord,
+        AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot, DownloadChangedEvent,
+        DownloadEntry, DownloadListRequest, DownloadPage, DuplicateDecisionRequest,
+        DuplicateReview, DuplicateScanRun, DuplicateSnapshot, ExplorationDataResetRequest,
+        ExplorationDataResetResult, FavoriteKey, FavoriteMutationResult, FavoriteRecord,
         GalleryDetail, GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot,
         InternalRemovalApplyRequest, InternalRemovalPlan, InternalRemovalPlanRequest,
         InternalRemovalResult, InternalRemovalUndoRequest, InternalScanRun, JobRef,
@@ -25,10 +24,10 @@ use crate::{
         ValidationError, WindowPlacement, WindowPlacementSnapshot,
     },
     thumbnail::{
-        CancellationToken, ThumbnailCompletionEventDto, ThumbnailCoordinator,
-        ThumbnailCoordinatorError, ThumbnailInvalidationDto, ThumbnailKey, ThumbnailPriority,
-        ThumbnailRequestDto, ThumbnailRequestTokenDto, ThumbnailRuntimeConfigDto,
-        ThumbnailWorkerStatsDto,
+        CancellationToken, ThumbnailCacheClearDto, ThumbnailCompletionEventDto,
+        ThumbnailCoordinator, ThumbnailCoordinatorError, ThumbnailInvalidationDto, ThumbnailKey,
+        ThumbnailPriority, ThumbnailRequestDto, ThumbnailRequestTokenDto,
+        ThumbnailRuntimeConfigDto, ThumbnailWorkerStatsDto,
     },
 };
 
@@ -42,7 +41,6 @@ pub struct AppState {
     auto_find: AutoFindSupervisor,
     duplicates: DuplicateSupervisor,
     internal_duplicates: InternalDuplicateSupervisor,
-    classic_import: ClassicImportService,
     download_root_picker: Arc<dyn DownloadRootPicker>,
     artifact_store: Arc<dyn ArtifactStore>,
     search_pages: SearchPageRequests,
@@ -115,7 +113,6 @@ impl AppState {
         auto_find: AutoFindSupervisor,
         duplicates: DuplicateSupervisor,
         internal_duplicates: InternalDuplicateSupervisor,
-        classic_import: ClassicImportService,
         download_root_picker: Arc<dyn DownloadRootPicker>,
         artifact_store: Arc<dyn ArtifactStore>,
     ) -> Self {
@@ -127,77 +124,11 @@ impl AppState {
             auto_find,
             duplicates,
             internal_duplicates,
-            classic_import,
             download_root_picker,
             artifact_store,
             search_pages: SearchPageRequests::default(),
         }
     }
-}
-
-#[tauri::command]
-pub async fn classic_import_pick_folder(
-    state: State<'_, AppState>,
-) -> Result<ApiResult<Option<String>>, ApiError> {
-    let picker = Arc::clone(&state.download_root_picker);
-    match tauri::async_runtime::spawn_blocking(move || picker.pick_download_root()).await {
-        Ok(Ok(selected)) => {
-            let selected = selected
-                .map(|path| {
-                    path.into_os_string()
-                        .into_string()
-                        .map(|path| download_root_for_display(&path))
-                        .map_err(|_| {
-                            ApplicationError::ClassicImportInvalid(
-                                "The selected folder path cannot be represented safely".into(),
-                            )
-                        })
-                })
-                .transpose();
-            Ok(selected.into())
-        }
-        Ok(Err(error)) => Ok(ApiResult::failure(ApplicationError::from(error).into())),
-        Err(error) => Err(blocking_task_error("classic_import_pick_folder", &error)),
-    }
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub async fn classic_import_dry_run(
-    state: State<'_, AppState>,
-    request: ClassicImportDryRunRequest,
-) -> Result<ApiResult<ClassicImportReport>, ApiError> {
-    let service = state.classic_import.clone();
-    Ok(run_application_blocking("classic_import_dry_run", move || service.dry_run(request)).await)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub async fn classic_import_get(
-    state: State<'_, AppState>,
-    import_id: String,
-) -> Result<ApiResult<ClassicImportReport>, ApiError> {
-    let service = state.classic_import.clone();
-    Ok(run_application_blocking("classic_import_get", move || service.get(&import_id)).await)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub async fn classic_import_apply(
-    state: State<'_, AppState>,
-    request: ClassicImportApplyRequest,
-) -> Result<ApiResult<ClassicImportApplyResult>, ApiError> {
-    let service = state.classic_import.clone();
-    Ok(run_application_blocking("classic_import_apply", move || service.apply(request)).await)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub async fn classic_import_rollback(
-    state: State<'_, AppState>,
-    request: ClassicImportRollbackRequest,
-) -> Result<ApiResult<ClassicImportReport>, ApiError> {
-    let service = state.classic_import.clone();
-    Ok(
-        run_application_blocking("classic_import_rollback", move || service.rollback(request))
-            .await,
-    )
 }
 
 #[tauri::command]
@@ -229,6 +160,18 @@ pub async fn auto_find_snapshot(
     state: State<'_, AppState>,
 ) -> Result<ApiResult<AutoFindSnapshot>, ApiError> {
     Ok(state.service.auto_find_snapshot().into())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn exploration_data_reset(
+    state: State<'_, AppState>,
+    request: ExplorationDataResetRequest,
+) -> Result<ApiResult<ExplorationDataResetResult>, ApiError> {
+    let service = state.service.clone();
+    Ok(run_application_blocking("exploration_data_reset", move || {
+        service.exploration_data_reset(request)
+    })
+    .await)
 }
 
 #[tauri::command]
@@ -551,6 +494,13 @@ pub fn thumbnail_stats(
     state: State<'_, AppState>,
 ) -> Result<ApiResult<ThumbnailWorkerStatsDto>, ApiError> {
     Ok(ApiResult::success(state.thumbnails.stats()))
+}
+
+#[tauri::command]
+pub fn thumbnail_cache_clear(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<ThumbnailCacheClearDto>, ApiError> {
+    Ok(ApiResult::success(state.thumbnails.clear_cache()))
 }
 
 #[tauri::command(rename_all = "camelCase")]

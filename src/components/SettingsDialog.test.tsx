@@ -17,7 +17,7 @@ const settings: SettingsSnapshot = {
 };
 
 describe("SettingsDialog operational boundaries", () => {
-  it("only exposes implemented sections and disables destructive operations with reasons", async () => {
+  it("exposes preset sizing and only safe, implemented reset operations", async () => {
     const previousShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
     Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
       configurable: true,
@@ -28,10 +28,25 @@ describe("SettingsDialog operational boundaries", () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     const onSave = vi.fn(async () => false);
     const onPreviewFolderName = vi.fn(async () => ({
       ok: true,
       data: "[작가] 작품 제목 [그룹] 4113714",
+    } as const));
+    const onClearCache = vi.fn(async () => ({
+      ok: true,
+      data: { successEntriesRemoved: 2, successBytesRemoved: 10, negativeEntriesRemoved: 1 },
+    } as const));
+    const onResetExplorationData = vi.fn(async () => ({
+      ok: true,
+      data: {
+        favoritesRemoved: 1,
+        searchHistoryRemoved: 2,
+        autoFindRunsRemoved: 1,
+        autoFindCandidatesRemoved: 3,
+        autoFindExclusionsRemoved: 1,
+      },
     } as const));
 
     try {
@@ -43,28 +58,38 @@ describe("SettingsDialog operational boundaries", () => {
           error={null}
           onClose={vi.fn()}
           onSave={onSave}
-          onClassicImport={vi.fn()}
           onPreviewLayout={vi.fn()}
           onPreviewFolderName={onPreviewFolderName}
+          onClearCache={onClearCache}
+          onResetExplorationData={onResetExplorationData}
         />,
       ));
       await act(async () => {
         await new Promise((resolve) => window.setTimeout(resolve, 140));
       });
 
-      const sectionLabels = [...container.querySelectorAll<HTMLButtonElement>(".settings-nav button")]
-        .map((button) => button.textContent);
-      expect(sectionLabels).toEqual(["일반", "저장 공간"]);
+      expect(container.querySelector(".settings-nav")).toBeNull();
       expect(container.textContent).not.toContain("다음 단계");
 
       const destructive = [...container.querySelectorAll<HTMLButtonElement>(".danger-zone button")];
       expect(destructive).toHaveLength(3);
-      expect(destructive.every((button) => button.disabled && Boolean(button.title))).toBe(true);
+      expect(destructive.every((button) => !button.disabled)).toBe(true);
+      expect(container.textContent).toContain("다운로드 DB와 파일은 보존");
+
+      await act(async () => destructive[0]?.click());
+      expect(onClearCache).toHaveBeenCalledTimes(1);
+      await act(async () => destructive[2]?.click());
+      expect(confirm).toHaveBeenCalledWith(expect.stringContaining("다운로드 DB와 파일은 삭제되지 않습니다"));
+      expect(onResetExplorationData).toHaveBeenCalledTimes(1);
 
       const template = container.querySelector<HTMLInputElement>('[aria-label="갤러리 폴더 이름 템플릿"]');
       expect(template?.value).toBe("[{artist}] {title} [{group}] {id}");
       const historyMode = container.querySelector<HTMLSelectElement>('[aria-label="Auto Find 기록 기준"]');
       expect(historyMode?.value).toBe("include_all_history");
+      const previewRange = container.querySelector<HTMLInputElement>('[aria-label="앨범 미리보기 크기"]');
+      expect(previewRange?.min).toBe("0");
+      expect(previewRange?.max).toBe("6");
+      expect(previewRange?.value).toBe("2");
       expect(container.textContent).toContain("사용가능 인자 : {artist}, {title}, {group}, {id}");
       expect(container.textContent).toContain("미리보기 : [작가] 작품 제목 [그룹] 4113714");
       expect(container.textContent).not.toContain("{id}는 필수입니다");
@@ -97,6 +122,7 @@ describe("SettingsDialog operational boundaries", () => {
       } else {
         Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
       }
+      confirm.mockRestore();
     }
   });
 });

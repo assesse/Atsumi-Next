@@ -4,13 +4,13 @@
 
 Atsumi Next는 기존 Atsumi를 보존하면서 새 구조로 재작성하는 독립 프로젝트다.
 
-승인된 UX prototype과 V2 계약을 기준으로 Phase 3의 실제 다운로드 흐름, Phase 4의 영속 즐겨찾기·검색 이력·Auto Find, Phase 5의 작품 중복 Review, Phase 6의 앨범 내부 중복 페이지 검토·격리·undo, Phase 7의 Classic read-only 가져오기·rollback을 구현했다. 현재 DB schema는 v17이고 manifest schema와 HashProfile은 계속 1이다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
+승인된 UX prototype과 V2 계약을 기준으로 실제 다운로드 흐름, 영속 즐겨찾기·검색 이력·Auto Find, 작품 중복 Review, 앨범 내부 중복 페이지 검토·격리·undo를 구현했다. 현재 DB schema는 v18이고 manifest schema와 HashProfile은 계속 1이다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
 
 다운로드는 SQLite queue에서 자동 시작해 source page 번호별 `.part` 기록, decode, WebP 저장, SHA-256, atomic rename, versioned manifest 검증을 마친 뒤에만 `completed`가 된다. 강제 종료된 작업은 검증된 page checkpoint부터 재개하며, 시작 시와 Downloads의 수동 명령에서 DB·manifest·실제 파일을 재조정한다. 완료 파일은 Windows 기본 뷰어로 열 수 있고, 삭제 대신 download root 내부의 crash-safe quarantine으로 옮긴 뒤 복원할 수 있다. 자동 영구 삭제는 하지 않는다.
 
 즐겨찾기는 작가·그룹·시리즈·캐릭터·태그를 SQLite에 저장하고 카드·상세·Related에서 같은 상태로 표시한다. 시리즈와 캐릭터도 실제 Hitomi namespace 검색으로 연결한다. Auto Find는 사용자가 `즐겨찾기 작가 갱신`을 명시적으로 실행할 때만 실제 source를 조회하고, 실행 진행률·취소·오류와 후보를 영속해 재시작 뒤에도 복원한다. 실행마다 이력 정책을 snapshot하며 `newer_than_oldest_downloaded`는 검증 완료 또는 격리된 소유 artifact의 작가 증거만 사용한다. cutoff 증거는 `source=verified_owned_artifact`, `policyVersion=1`로 저장하고 provenance가 불명확하면 임의 cutoff를 만들지 않는다. cutoff 뒤 후보가 50,000개를 넘으면 run truncation도 영속한다. 검색어를 입력하는 동안에는 원격 요청하지 않으며 검색 제출만 이력에 기록한다. 이미 다운로드했거나 사용자가 제외·숨김·중복 판정한 항목은 후보에서 숨긴다.
 
-Explore는 query별 최대 5개의 완료 page를 보존하고 현재 page와 앞뒤 2개 창만 유지한다. 인접 page는 낮은 우선순위로 미리 불러오며 query 교체·session reset 때 frontend 요청뿐 아니라 backend `search_page_cancel`까지 전달해 실제 source 작업을 취소한다. 가로 밀도형 앨범 카드는 점수·날짜 없이 기존 정보 종류를 유지한다. 실제 cover 높이를 카드의 유일한 세로 기준으로 삼고, 남은 공간에 실제 chip을 최대한 배치한 뒤 숨은 태그는 `+N`으로 집약한다. viewport 이탈 뒤 400ms 안에 돌아온 thumbnail 구독은 같은 작업을 이어 쓰고, 완료 preview는 frontend에서 120초/최대 256개까지 보존해 스크롤 왕복 재요청을 줄인다.
+Explore는 query별 최대 5개의 완료 page를 보존하고 현재 page와 앞뒤 2개 창만 유지한다. 인접 page는 낮은 우선순위로 미리 불러오며 query 교체·session reset 때 frontend 요청뿐 아니라 backend `search_page_cancel`까지 전달해 실제 source 작업을 취소한다. 가로 밀도형 앨범 카드는 점수·날짜 없이 기존 정보 종류를 유지한다. 미리보기 폭은 160/190/220/250/280/320/360px 일곱 단계만 사용하며 기본은 220px이다. 같은 시각적 grid 행의 카드들은 원본 thumbnail 비율로 계산한 가장 높은 cover에 맞추고, 본문은 외곽 높이를 늘리지 않는다. 단계별 글꼴·간격과 2/2/3/4/5/6/7줄 태그 예산을 함께 바꾸고 숨은 태그는 `+N`으로 집약한다. viewport 이탈 뒤 400ms 안에 돌아온 thumbnail 구독은 같은 작업을 이어 쓰고, 완료 preview는 frontend에서 120초/최대 256개까지 보존해 스크롤 왕복 재요청을 줄인다.
 
 새 다운로드 폴더 이름은 `[{artist}] {title} [{group}] {id}` 기본 template으로 만들며 `{id}`가 반드시 포함된다. 설정 미리보기는 frontend 모사가 아니라 실제 Rust artifact planner를 호출한다. Windows 설정 화면과 API는 `D:\AD`/UNC 같은 사람이 읽는 경로를 사용하고, filesystem containment는 필요할 때 canonical path를 다시 계산한다. 이 설정은 새 artifact에만 적용되고 기존 `relative_directory`와 `root_snapshot`은 변경하지 않는다. 기존 앨범을 자동으로 이름 변경하거나 이동하는 기능은 없다.
 
@@ -20,7 +20,7 @@ Explore는 query별 최대 5개의 완료 page를 보존하고 현재 page와 �
 
 앨범 내부 중복 검사는 같은 verified artifact 안에서 정확한 SHA 반복과 최소 2행의 단조 시각 장면 블록만 Review에 올린다. 사용자는 각 동기화 행에서 유지할 원본 페이지를 고르고 파일 수·용량이 고정된 revision-CAS 계획을 먼저 확인한다. 적용은 앨범 폴더의 `.atsumi-page-quarantine/<plan-id>/`로만 이동하며 manifest와 SQLite가 crash-safe saga로 조정된다. 원본 페이지 번호는 바꾸지 않고 격리 이력에서 복원할 수 있으며 자동 영구 삭제는 없다.
 
-설정의 저장 공간에서 Classic 데이터·다운로드 폴더를 직접 고르면 먼저 읽기 전용 inventory와 충돌 보고서를 만든다. state, manifest, 실제 페이지, legacy hash provenance, 즐겨찾기·검색 이력·제외·연작·오탐 pair를 검토하고 명시적으로 승인한 안전 항목만 Next에 등록한다. Classic 페이지는 이동하지 않고 검증·WebP 변환한 복사본만 현재의 안전한 folder template으로 새로 만들며, rollback은 Next 복사본만 관리 quarantine으로 옮긴다. 중단된 적용도 다음 시작에서 Next 부분 복사본을 격리한다.
+설정의 초기화 명령은 역할을 분리한다. `미리보기 캐시 비우기`는 완료된 재생성 가능 thumbnail cache만 제거하고 화면에 사용 중이거나 진행 중인 요청은 건드리지 않는다. `화면·네트워크 기본값 복원`은 저장 전 draft만 기본값으로 바꾸며 다운로드 경로와 폴더 template은 유지한다. `탐색 데이터 초기화`는 명시적 확인 문구 뒤 즐겨찾기·검색 이력·Auto Find run/후보/제외만 한 transaction에서 제거한다. 어느 명령도 다운로드 DB, artifact, manifest 또는 사용자 파일을 일괄 삭제하지 않는다.
 
 ## 실행과 검증
 
@@ -59,7 +59,7 @@ GitHub Actions의 `Windows CI`는 `main` push, pull request와 수동 `workflow_
 ## 절대 원칙
 
 1. 기존 Atsumi Classic의 코드와 사용자 데이터는 Atsumi Next가 직접 수정하지 않는다.
-2. 새 버전은 기존 데이터의 복사본을 읽고 변환하며, 원본을 제자리에서 마이그레이션하지 않는다.
+2. 과거 버전의 저장소와 사용자 데이터는 독립 기준선으로 보존하고 제자리에서 마이그레이션하지 않는다.
 3. 현재 동작, 최신 사용자 결정, 실제 로그와 파일, 과거 대화 순으로 요구사항의 신뢰도를 판단한다.
 4. 과거 요구사항은 모두 유지 대상으로 간주하지 않는다. `유지`, `재설계`, `폐기`, `확인 필요`로 분류한다.
 5. 파괴적 작업은 명시적인 사용자 결정, 실행 기록, 복구 경로를 가져야 한다.
@@ -77,7 +77,7 @@ GitHub Actions의 `Windows CI`는 `main` push, pull request와 수동 `workflow_
 - Atsumi Next 원격 저장소: [`assesse/Atsumi-Next`](https://github.com/assesse/Atsumi-Next) (`origin`)
 - 기본 branch는 `main`이며, 기능 작업은 `agent/*` branch와 pull request를 거쳐 병합한다.
 - Classic 기준선은 frontend production build와 Rust 15개 unit test를 통과했다.
-- Classic 코드는 참조 및 데이터 이전 입력으로만 사용하며 새 구현 코드를 Classic 저장소에 추가하지 않는다.
+- Classic 코드는 역사적 참고 기준선으로만 사용하며 새 구현 코드를 Classic 저장소에 추가하지 않는다.
 - 앱 브랜드에는 Aluminum Classic의 `atsumi.svg`, `atsumi-256.png`, `icon.ico` 원본만 복사해 사용한다. Pupil APK 추출 자원은 사용하지 않는다.
 - 국가 표시는 Aluminum Classic 릴리스가 실제 UI에서 사용한 FlagCDN `kr.png`, `jp.png`, `us.png` 바이트를 로컬 번들로 고정한다. 중국어는 네트워크 요청 없는 로컬 `cn.svg`와 `CN` fallback을 사용한다.
 

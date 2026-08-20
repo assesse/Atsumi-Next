@@ -94,12 +94,10 @@ function GalleryCardComponent({
   const hiddenTags = sortedTags.slice(currentTagLayout.visibleCount);
   const overflowDigitCount = String(Math.max(1, sortedTags.length)).length;
   const cardRef = useRef<HTMLElement>(null);
-  const coverRef = useRef<HTMLElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const tagListRef = useRef<HTMLDivElement>(null);
   const tagChipRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const overflowMeasureRefs = useRef<Array<HTMLSpanElement | null>>([]);
-  const lastCoverHeight = useRef(0);
   const lastContentSize = useRef({ width: 0, height: 0 });
   const hasDuplicateCandidates = duplicateCandidateCount > 0;
   const iconOnlyStatus = hasDuplicateCandidates || download?.state === "downloading" || download?.state === "review_required";
@@ -123,24 +121,6 @@ function GalleryCardComponent({
   const invalidateTagLayout = useCallback(() => {
     setTagLayout((current) => current ? null : current);
   }, []);
-
-  useLayoutEffect(() => {
-    const card = cardRef.current;
-    const cover = coverRef.current;
-    if (!card || !cover) return;
-    const applyCoverHeight = () => {
-      const height = cover.getBoundingClientRect().height;
-      if (!Number.isFinite(height) || height <= 0 || Math.abs(lastCoverHeight.current - height) < 0.5) return;
-      lastCoverHeight.current = height;
-      card.style.setProperty("--gallery-card-height", `${height}px`);
-      invalidateTagLayout();
-    };
-    applyCoverHeight();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(applyCoverHeight);
-    observer.observe(cover);
-    return () => observer.disconnect();
-  }, [invalidateTagLayout]);
 
   useLayoutEffect(() => {
     const content = contentRef.current;
@@ -273,7 +253,6 @@ function GalleryCardComponent({
         expectedAspectRatio={gallery.thumbnailWidth !== undefined && gallery.thumbnailHeight !== undefined
           ? { width: gallery.thumbnailWidth, height: gallery.thumbnailHeight }
           : undefined}
-        rootRef={coverRef}
         alt={`${gallery.title} 표지`}
       >
         {download ? <span className="status-wash" aria-hidden="true" /> : null}

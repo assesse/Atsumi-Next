@@ -40,6 +40,7 @@
 | `IDEMPOTENCY_CONFLICT` | 같은 요청 식별자가 다른 대상에 이미 사용되었습니다 | 아니오 | 호출 내용 검토 |
 | `DOWNLOAD_ENTRY_NOT_FOUND` | 다운로드 항목을 다시 불러오세요 | 아니오 | 목록 새로고침 |
 | `INVALID_DOWNLOAD_STATE` | 현재 상태에서는 요청한 작업을 수행할 수 없습니다 | 아니오 | 최신 상태 검토 |
+| `OPERATION_ACTIVE` | 관련 작업이 실행 중이라 초기화를 시작하지 않았습니다 | 예 | 작업 취소·완료 뒤 다시 실행 |
 | `AUTO_FIND_NOT_RUNNING` | 취소할 Auto Find 갱신이 없습니다 | 아니오 | 최신 snapshot 확인 |
 | `DUPLICATE_SCAN_NOT_RUNNING` | 취소할 작품 중복 검사가 없습니다 | 아니오 | 최신 snapshot 확인 |
 | `DUPLICATE_CANDIDATE_NOT_FOUND` | 중복 후보가 더 이상 존재하지 않습니다 | 아니오 | 후보 목록 다시 로드 |
@@ -113,14 +114,6 @@ worker 시작 실패 command는 현재 공통 `DATABASE_ERROR` envelope도 함�
 
 page quarantine에서 원본·격리 경로가 모두 있거나 모두 없으면 `INTERNAL_REMOVAL_PLAN_INVALID`와 Review action으로 중단한다. 경로·파일명을 WebView 오류나 기본 로그에 노출하지 않으며 자동 overwrite/delete하지 않는다.
 
-## Classic import 오류
+## 유지보수 초기화 오류
 
-| Code | 발생 조건 | 재시도 | 사용자 행동 |
-|---|---|---:|---|
-| `CLASSIC_IMPORT_NOT_FOUND` | 저장된 import ID가 없음 | 아니오 | 새 dry-run 실행 |
-| `CLASSIC_IMPORT_INVALID` | 경로·보고서 state·page/manifest가 안전 조건을 충족하지 않음 | 아니오 | conflict 보고서와 폴더 선택 검토 |
-| `CLASSIC_SOURCE_CHANGED` | dry-run 뒤 Classic state/manifest/page fingerprint 또는 page SHA가 변경됨 | 아니오 | dry-run 다시 실행 |
-| `CLASSIC_IMPORT_CONFLICT` | acknowledgement가 필요한 경고를 승인하지 않음 | 아니오 | 해당 conflict를 확인·체크 |
-| `REVISION_CONFLICT` | 보고서가 다른 작업에서 변경됨 | 아니오 | `classic_import_get`으로 최신 보고서 로드 |
-
-apply/rollback 내부 오류는 source 절대 경로와 파일명을 WebView·기본 로그에 노출하지 않는다. 실패한 apply는 `failed` 보고서로 남고, 추적된 Next copy만 명시적 rollback 또는 startup recovery에서 격리한다.
+초기화 confirmation이 정확하지 않으면 공통 validation 오류로 거부한다. `OPERATION_ACTIVE`는 실행 중 Auto Find가 있는 탐색 데이터 초기화에 사용하며 삭제 transaction은 시작하지 않는다. thumbnail cache clear는 active work를 취소하지 않으므로 이 오류를 사용하지 않는다. 다운로드와 artifact를 삭제하는 유지보수 API는 존재하지 않는다.

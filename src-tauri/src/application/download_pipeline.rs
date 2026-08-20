@@ -181,6 +181,7 @@ pub trait DownloadRootPicker: Send + Sync {
 pub struct DownloadArtifactPlan {
     pub descriptor: DownloadJobDescriptor,
     pub gallery: Gallery,
+    pub source_revision: String,
     pub root_snapshot: PathBuf,
     pub relative_directory: ArtifactRelativePath,
     pub manifest_relative_path: ArtifactRelativePath,

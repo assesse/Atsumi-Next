@@ -1,17 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { galleryId, type GalleryId } from "../core/types";
+import {
+  GALLERY_PREVIEW_PRESETS,
+  normalizeGalleryPreviewWidth,
+} from "../layout/galleryPreviewPresets";
 import type {
   ApiResult,
   AutoFindHistoryMode,
   AutoFindExclusionResult,
   AutoFindRun,
   AutoFindSnapshot,
-  ClassicImportApplyRequest,
-  ClassicImportApplyResult,
-  ClassicImportDryRunRequest,
-  ClassicImportReport,
-  ClassicImportRollbackRequest,
   DownloadChangedEvent,
   DownloadEntry,
   DownloadListRequest,
@@ -22,6 +21,8 @@ import type {
   DuplicateReview,
   DuplicateScanRun,
   DuplicateSnapshot,
+  ExplorationDataResetRequest,
+  ExplorationDataResetResult,
   FavoriteKey,
   FavoriteMutationResult,
   FavoriteRecord,
@@ -44,6 +45,7 @@ import type {
   SettingsPatch,
   SettingsSnapshot,
   ThumbnailCompletionEvent,
+  ThumbnailCacheClearResult,
   ThumbnailInvalidation,
   ThumbnailRequestDto,
   ThumbnailRequestToken,
@@ -107,11 +109,6 @@ export interface BackendClient {
   internalRemovalPlan(request: InternalRemovalPlanRequest): Promise<ApiResult<InternalRemovalPlan>>;
   internalRemovalApply(request: InternalRemovalApplyRequest): Promise<ApiResult<InternalRemovalResult>>;
   internalRemovalUndo(request: InternalRemovalUndoRequest): Promise<ApiResult<InternalRemovalResult>>;
-  classicImportPickFolder(): Promise<ApiResult<string | null>>;
-  classicImportDryRun(request: ClassicImportDryRunRequest): Promise<ApiResult<ClassicImportReport>>;
-  classicImportGet(importId: string): Promise<ApiResult<ClassicImportReport>>;
-  classicImportApply(request: ClassicImportApplyRequest): Promise<ApiResult<ClassicImportApplyResult>>;
-  classicImportRollback(request: ClassicImportRollbackRequest): Promise<ApiResult<ClassicImportReport>>;
   downloadQueueAdd(galleries: GalleryId[], requestId: string): Promise<ApiResult<DownloadEntry[]>>;
   downloadEntriesList(request: DownloadListRequest): Promise<ApiResult<DownloadPage>>;
   downloadRetry(entryIds: string[]): Promise<ApiResult<JobRef[]>>;
@@ -126,6 +123,8 @@ export interface BackendClient {
   thumbnailReprioritize(requestId: string, priority: ThumbnailRequestDto["priority"]): Promise<ApiResult<boolean>>;
   thumbnailInvalidate(key: ThumbnailRequestDto["key"]): Promise<ApiResult<ThumbnailInvalidation>>;
   thumbnailStats(): Promise<ApiResult<ThumbnailWorkerStats>>;
+  thumbnailCacheClear(): Promise<ApiResult<ThumbnailCacheClearResult>>;
+  explorationDataReset(request: ExplorationDataResetRequest): Promise<ApiResult<ExplorationDataResetResult>>;
   appMinimizeToTray(): Promise<ApiResult<null>>;
   appQuit(): Promise<ApiResult<null>>;
   on<K extends keyof BackendEventMap>(event: K, handler: (payload: BackendEventMap[K]) => void): Promise<Unsubscribe>;
@@ -173,6 +172,7 @@ const readPersistedBrowserSettings = (): SettingsSnapshot => {
       ...defaultSettings,
       ...parsed,
       downloadRoot: windowsPathForDisplay(parsed.downloadRoot ?? defaultSettings.downloadRoot),
+      previewWidth: normalizeGalleryPreviewWidth(parsed.previewWidth ?? defaultSettings.previewWidth),
       autoFindHistoryMode: parsed.autoFindHistoryMode === "newer_than_oldest_downloaded"
         ? "newer_than_oldest_downloaded"
         : "include_all_history",
@@ -480,17 +480,6 @@ const cloneInternalSnapshot = (snapshot: InternalDuplicateSnapshot): InternalDup
   quarantineRecords: snapshot.quarantineRecords.map((record) => ({ ...record })),
 });
 
-const cloneClassicImportReport = (report: ClassicImportReport): ClassicImportReport => ({
-  ...report,
-  counts: { ...report.counts },
-  conflicts: report.conflicts.map((conflict) => ({ ...conflict })),
-  galleries: report.galleries.map((gallery) => ({
-    ...gallery,
-    pages: gallery.pages.map((page) => ({ ...page })),
-    conflictIds: [...gallery.conflictIds],
-  })),
-});
-
 type Handler<K extends keyof BackendEventMap> = (payload: BackendEventMap[K]) => void;
 
 class BrowserMockBackend implements BackendClient {
@@ -513,8 +502,6 @@ class BrowserMockBackend implements BackendClient {
   private downloadQueueRequests = new Map<string, { gallerySetKey: string; entries: DownloadEntry[] }>();
   private nextDownloadEntryId = 1;
   private nextThumbnailRequestId = 1;
-  private classicFolderSelection = 0;
-  private classicImportReport: ClassicImportReport | null = null;
   private pendingThumbnailRequests = new Map<string, ThumbnailRequestDto>();
   private thumbnailRequestsTotal = 0;
   private favorites = new Map<string, FavoriteRecord>();
@@ -554,7 +541,9 @@ class BrowserMockBackend implements BackendClient {
         ? validationError("autoFindHistoryMode", "must be a supported history mode")
         : null) ??
       validateIntegerRange(next.maxColumns, "maxColumns", 1, 4) ??
-      validateIntegerRange(next.previewWidth, "previewWidth", 160, 360) ??
+      (!GALLERY_PREVIEW_PRESETS.some((preset) => preset.width === next.previewWidth)
+        ? validationError("previewWidth", "must be one of the supported preview presets")
+        : null) ??
       validateIntegerRange(next.cacheLimitGb, "cacheLimitGb", 1, 30) ??
       validateIntegerRange(next.concurrentImageRequests, "concurrentImageRequests", 1, 30) ??
       validateIntegerRange(next.requestStartIntervalMs, "requestStartIntervalMs", 0, 5_000);
@@ -1473,6 +1462,46 @@ class BrowserMockBackend implements BackendClient {
     });
   }
 
+  async thumbnailCacheClear(): Promise<ApiResult<ThumbnailCacheClearResult>> {
+    return ok({
+      successEntriesRemoved: 0,
+      successBytesRemoved: 0,
+      negativeEntriesRemoved: 0,
+    });
+  }
+
+  async explorationDataReset(
+    request: ExplorationDataResetRequest,
+  ): Promise<ApiResult<ExplorationDataResetResult>> {
+    if (request.confirmation !== "RESET_EXPLORATION_DATA") {
+      return validationError("confirmation", "must explicitly confirm exploration data reset");
+    }
+    if (this.autoFind.run?.state === "running") {
+      return {
+        ok: false,
+        error: {
+          code: "OPERATION_ACTIVE",
+          message: "Auto Find 실행을 취소하거나 완료한 뒤 탐색 데이터를 초기화하세요.",
+          retryable: false,
+          action: "none",
+        },
+      };
+    }
+    const result: ExplorationDataResetResult = {
+      favoritesRemoved: this.favorites.size,
+      searchHistoryRemoved: this.searchHistory.size,
+      autoFindRunsRemoved: this.autoFind.run ? 1 : 0,
+      autoFindCandidatesRemoved: this.autoFind.candidates.length,
+      autoFindExclusionsRemoved: this.autoFindExclusions.size,
+    };
+    this.autoFindGeneration += 1;
+    this.favorites.clear();
+    this.searchHistory.clear();
+    this.autoFindExclusions.clear();
+    this.autoFind = { candidates: [], cutoffEvidence: [], truncations: [] };
+    return ok(result);
+  }
+
   async appMinimizeToTray(): Promise<ApiResult<null>> {
     return ok(null);
   }
@@ -1500,111 +1529,6 @@ class BrowserMockBackend implements BackendClient {
       resumedJobs: 0,
       issues: [],
     });
-  }
-
-  async classicImportPickFolder(): Promise<ApiResult<string | null>> {
-    this.classicFolderSelection += 1;
-    return ok(this.classicFolderSelection % 2 === 1
-      ? "C:\\BrowserFixture\\AtsumiData"
-      : "C:\\BrowserFixture\\Downloads");
-  }
-
-  async classicImportDryRun(request: ClassicImportDryRunRequest): Promise<ApiResult<ClassicImportReport>> {
-    if (!request.dataRoot.trim()) return validationError("dataRoot", "must not be empty");
-    const now = new Date().toISOString();
-    this.classicImportReport = {
-      importId: "classic-import-browser-1",
-      revision: 0,
-      state: "dry_run",
-      dataRootLabel: "AtsumiData",
-      ...(request.downloadRoot ? { downloadRootLabel: "Downloads" } : {}),
-      sourceFingerprint: "browser-classic-fixture-v1",
-      counts: {
-        favorites: 3,
-        searchHistory: 2,
-        exclusions: 1,
-        hiddenGalleries: 1,
-        pairExclusions: 1,
-        seriesGroups: 1,
-        galleriesDiscovered: request.downloadRoot ? 2 : 0,
-        galleriesEligible: request.downloadRoot ? 1 : 0,
-        pageFiles: request.downloadRoot ? 12 : 0,
-        legacyHashRows: 18,
-        plannedCopyBytes: request.downloadRoot ? 4_194_304 : 0,
-        conflicts: 1,
-      },
-      conflicts: [{
-        conflictId: "folder-without-state:4051038",
-        code: "folder_without_state",
-        severity: "warning",
-        galleryId: galleryId(4_051_038),
-        message: "manifest-backed 폴더가 Classic UI 목록에는 없습니다.",
-        requiresAcknowledgement: true,
-      }],
-      galleries: request.downloadRoot ? [{
-        galleryId: galleryId(4_051_038),
-        title: "Archive of Rain",
-        artist: "serein",
-        sourceFolder: "Archive of Rain",
-        relativeDirectory: "[serein] Archive of Rain 4051038",
-        expectedPages: 12,
-        pages: [],
-        plannedBytes: 4_194_304,
-        eligible: true,
-        conflictIds: ["folder-without-state:4051038"],
-      }] : [],
-      canApply: true,
-      createdAt: now,
-    };
-    return ok(cloneClassicImportReport(this.classicImportReport));
-  }
-
-  async classicImportGet(importId: string): Promise<ApiResult<ClassicImportReport>> {
-    if (!this.classicImportReport || this.classicImportReport.importId !== importId) {
-      return notFoundError("CLASSIC_IMPORT_NOT_FOUND", "Classic 가져오기 보고서를 찾지 못했습니다.");
-    }
-    return ok(cloneClassicImportReport(this.classicImportReport));
-  }
-
-  async classicImportApply(request: ClassicImportApplyRequest): Promise<ApiResult<ClassicImportApplyResult>> {
-    if (!this.classicImportReport || this.classicImportReport.importId !== request.importId) {
-      return notFoundError("CLASSIC_IMPORT_NOT_FOUND", "Classic 가져오기 보고서를 찾지 못했습니다.");
-    }
-    if (this.classicImportReport.revision !== request.expectedRevision) return conflict("Classic 가져오기");
-    const missing = this.classicImportReport.conflicts.find((item) =>
-      item.requiresAcknowledgement && !request.acceptedConflictIds.includes(item.conflictId));
-    if (missing) {
-      return notFoundError("CLASSIC_IMPORT_CONFLICT", "확인하지 않은 충돌이 있습니다.", {
-        conflictId: missing.conflictId,
-      });
-    }
-    const report: ClassicImportReport = {
-      ...cloneClassicImportReport(this.classicImportReport),
-      revision: this.classicImportReport.revision + 1,
-      state: "applied",
-      appliedAt: new Date().toISOString(),
-    };
-    this.classicImportReport = report;
-    return ok({
-      report: cloneClassicImportReport(report),
-      importedGalleryIds: report.galleries.filter((gallery) => gallery.eligible).map((gallery) => gallery.galleryId),
-      copiedFiles: report.counts.pageFiles,
-      copiedBytes: report.counts.plannedCopyBytes,
-    });
-  }
-
-  async classicImportRollback(request: ClassicImportRollbackRequest): Promise<ApiResult<ClassicImportReport>> {
-    if (!this.classicImportReport || this.classicImportReport.importId !== request.importId) {
-      return notFoundError("CLASSIC_IMPORT_NOT_FOUND", "Classic 가져오기 보고서를 찾지 못했습니다.");
-    }
-    if (this.classicImportReport.revision !== request.expectedRevision) return conflict("Classic 가져오기");
-    this.classicImportReport = {
-      ...cloneClassicImportReport(this.classicImportReport),
-      revision: this.classicImportReport.revision + 1,
-      state: "rolled_back",
-      rolledBackAt: new Date().toISOString(),
-    };
-    return ok(cloneClassicImportReport(this.classicImportReport));
   }
 
   async appQuit(): Promise<ApiResult<null>> {
@@ -1915,26 +1839,6 @@ class TauriBackend implements BackendClient {
     return invoke("internal_removal_undo", { request });
   }
 
-  classicImportPickFolder(): Promise<ApiResult<string | null>> {
-    return invoke("classic_import_pick_folder");
-  }
-
-  classicImportDryRun(request: ClassicImportDryRunRequest): Promise<ApiResult<ClassicImportReport>> {
-    return invoke("classic_import_dry_run", { request });
-  }
-
-  classicImportGet(importId: string): Promise<ApiResult<ClassicImportReport>> {
-    return invoke("classic_import_get", { importId });
-  }
-
-  classicImportApply(request: ClassicImportApplyRequest): Promise<ApiResult<ClassicImportApplyResult>> {
-    return invoke("classic_import_apply", { request });
-  }
-
-  classicImportRollback(request: ClassicImportRollbackRequest): Promise<ApiResult<ClassicImportReport>> {
-    return invoke("classic_import_rollback", { request });
-  }
-
   downloadQueueAdd(
     galleries: GalleryId[],
     requestId: string,
@@ -1995,6 +1899,16 @@ class TauriBackend implements BackendClient {
 
   thumbnailStats(): Promise<ApiResult<ThumbnailWorkerStats>> {
     return invoke("thumbnail_stats");
+  }
+
+  thumbnailCacheClear(): Promise<ApiResult<ThumbnailCacheClearResult>> {
+    return invoke("thumbnail_cache_clear");
+  }
+
+  explorationDataReset(
+    request: ExplorationDataResetRequest,
+  ): Promise<ApiResult<ExplorationDataResetResult>> {
+    return invoke("exploration_data_reset", { request });
   }
 
   appMinimizeToTray(): Promise<ApiResult<null>> {

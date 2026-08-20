@@ -30,10 +30,10 @@ use crate::{
         DuplicateDecisionApplyOutcome, DuplicateDecisionHistory, DuplicateDecisionRequest,
         DuplicateEvidence, DuplicateEvidenceKind, DuplicateGalleryRef, DuplicatePageHash,
         DuplicatePagePair, DuplicateRelation, DuplicateReview, DuplicateScanRun,
-        DuplicateScanState, DuplicateSnapshot, FavoriteKey, FavoriteMutationResult,
-        FavoriteNamespace, FavoriteRecord, FixtureDownloadJobStep, Gallery, GalleryId,
-        GalleryMetadata, GallerySummary, HashProfile, JobEvent, JobRef, JobState, Language,
-        PageArtifact, PageArtifactState, SearchHistoryEntry, SearchRequest, SearchSort,
+        DuplicateScanState, DuplicateSnapshot, ExplorationDataResetResult, FavoriteKey,
+        FavoriteMutationResult, FavoriteNamespace, FavoriteRecord, FixtureDownloadJobStep, Gallery,
+        GalleryId, GalleryMetadata, GallerySummary, HashProfile, JobEvent, JobRef, JobState,
+        Language, PageArtifact, PageArtifactState, SearchHistoryEntry, SearchRequest, SearchSort,
         SeriesGroup, SettingsSnapshot, SourcePageNumber, WindowPlacementSnapshot,
     },
 };
@@ -718,6 +718,54 @@ impl AutomationRepository for SqliteRepository {
             excluded_gallery_ids: gallery_ids.to_vec(),
             snapshot,
         })
+    }
+
+    fn exploration_data_reset(&self) -> Result<ExplorationDataResetResult, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let running: bool = transaction
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM auto_find_runs WHERE state='running')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite_error)?;
+        if running {
+            return Err(RepositoryError::OperationActive(
+                "Auto Find must finish or be cancelled before resetting exploration data".into(),
+            ));
+        }
+        let count = |table: &str| -> Result<u64, RepositoryError> {
+            let sql = format!("SELECT COUNT(*) FROM {table}");
+            let value: i64 = transaction
+                .query_row(&sql, [], |row| row.get(0))
+                .map_err(map_sqlite_error)?;
+            u64::try_from(value)
+                .map_err(|_| RepositoryError::Corrupt(format!("negative row count in {table}")))
+        };
+        let result = ExplorationDataResetResult {
+            favorites_removed: count("favorites")?,
+            search_history_removed: count("search_history")?,
+            auto_find_runs_removed: count("auto_find_runs")?,
+            auto_find_candidates_removed: count("auto_find_candidates")?,
+            auto_find_exclusions_removed: count("auto_find_exclusions")?,
+        };
+        transaction
+            .execute("DELETE FROM favorites", [])
+            .map_err(map_sqlite_error)?;
+        transaction
+            .execute("DELETE FROM search_history", [])
+            .map_err(map_sqlite_error)?;
+        transaction
+            .execute("DELETE FROM auto_find_runs", [])
+            .map_err(map_sqlite_error)?;
+        transaction
+            .execute("DELETE FROM auto_find_exclusions", [])
+            .map_err(map_sqlite_error)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(result)
     }
 }
 
@@ -1802,27 +1850,56 @@ impl DownloadPipelineRepository for SqliteRepository {
             return Err(invalid_pipeline_state(&target, "prepare artifact"));
         }
 
+        let source_revision = plan.source_revision.trim();
+        if source_revision.is_empty() || source_revision.len() > 512 {
+            return Err(RepositoryError::Other(
+                "gallery source revision must contain between 1 and 512 bytes".into(),
+            ));
+        }
+        let existing_gallery = transaction
+            .query_row(
+                "SELECT revision, source_revision FROM galleries WHERE gallery_id=?1",
+                [plan.gallery.id.get()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(map_sqlite_error)?;
+        let gallery_revision = match existing_gallery {
+            Some((revision, Some(stored_source_revision)))
+                if stored_source_revision == source_revision =>
+            {
+                revision
+            }
+            Some((revision, _)) => to_sql_integer(
+                next_stored_revision(revision, "gallery revision")?,
+                "gallery revision",
+            )?,
+            None => 0,
+        };
+
         transaction
             .execute(
                 r#"
                     INSERT INTO galleries (
                         gallery_id, revision, title, primary_artist, primary_group,
-                        source_page_count
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                        source_page_count, source_revision
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                     ON CONFLICT (gallery_id) DO UPDATE SET
                         revision = excluded.revision,
                         title = excluded.title,
                         primary_artist = excluded.primary_artist,
                         primary_group = excluded.primary_group,
-                        source_page_count = excluded.source_page_count
+                        source_page_count = excluded.source_page_count,
+                        source_revision = excluded.source_revision
                 "#,
                 params![
                     plan.gallery.id.get(),
-                    to_sql_integer(plan.gallery.revision, "gallery revision")?,
+                    gallery_revision,
                     plan.gallery.metadata.title,
                     plan.gallery.metadata.primary_artist,
                     plan.gallery.metadata.primary_group,
                     i64::from(plan.gallery.metadata.source_page_count),
+                    source_revision,
                 ],
             )
             .map_err(map_sqlite_error)?;
@@ -5795,7 +5872,10 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
         download_root: values.1,
         folder_name_template: values.2,
         max_columns: stored_u32(values.3, "max columns")?,
-        preview_width: stored_u32(values.4, "preview width")?,
+        preview_width: crate::domain::normalize_gallery_preview_width(stored_u32(
+            values.4,
+            "preview width",
+        )?),
         cache_limit_gb: stored_u32(values.5, "cache limit")?,
         concurrent_image_requests: stored_u32(values.6, "concurrent image requests")?,
         request_start_interval_ms: stored_u64(values.7, "request start interval")?,

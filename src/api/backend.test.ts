@@ -24,6 +24,15 @@ describe("browser backend settings contract", () => {
     if (result.ok) return;
     expect(result.error.code).toBe("VALIDATION_ERROR");
     expect(result.error.details?.field).toBe("maxColumns");
+
+    const arbitraryPreview = await backend.settingsUpdate(
+      { previewWidth: 235 },
+      current.data.revision,
+    );
+    expect(arbitraryPreview).toMatchObject({
+      ok: false,
+      error: { code: "VALIDATION_ERROR", details: { field: "previewWidth" } },
+    });
   });
 
   it("emits the new revision when settings change", async () => {
@@ -69,46 +78,6 @@ describe("browser backend settings contract", () => {
       .resolves.toEqual({ ok: true, data: "[작가] 작품 제목 [그룹] 4113714" });
     await expect(backend.folderNameTemplatePreview("{title}:<{artist}>* [{group}] {id}"))
       .resolves.toEqual({ ok: true, data: "작품 제목__작가__ [그룹] 4113714" });
-  });
-});
-
-describe("browser backend Classic import contract", () => {
-  it("requires warning acknowledgement and preserves a revisioned rollback report", async () => {
-    const dryRun = await backend.classicImportDryRun({
-      dataRoot: "C:\\BrowserFixture\\AtsumiData",
-      downloadRoot: "C:\\BrowserFixture\\Downloads",
-    });
-    expect(dryRun.ok).toBe(true);
-    if (!dryRun.ok) return;
-    expect(dryRun.data).toMatchObject({
-      state: "dry_run",
-      canApply: true,
-      counts: { galleriesEligible: 1 },
-    });
-    const warning = dryRun.data.conflicts.find((item) => item.requiresAcknowledgement);
-    expect(warning).toBeDefined();
-
-    const rejected = await backend.classicImportApply({
-      importId: dryRun.data.importId,
-      expectedRevision: dryRun.data.revision,
-      acceptedConflictIds: [],
-    });
-    expect(rejected).toMatchObject({ ok: false, error: { code: "CLASSIC_IMPORT_CONFLICT" } });
-
-    const applied = await backend.classicImportApply({
-      importId: dryRun.data.importId,
-      expectedRevision: dryRun.data.revision,
-      acceptedConflictIds: [warning!.conflictId],
-    });
-    expect(applied.ok).toBe(true);
-    if (!applied.ok) return;
-    expect(applied.data.report.state).toBe("applied");
-
-    const rolledBack = await backend.classicImportRollback({
-      importId: applied.data.report.importId,
-      expectedRevision: applied.data.report.revision,
-    });
-    expect(rolledBack).toMatchObject({ ok: true, data: { state: "rolled_back" } });
   });
 });
 
@@ -288,6 +257,39 @@ describe("browser backend favorites and automation contract", () => {
       await backend.favoriteSet({ namespace: "artist", value: "mizuno" }, false);
       vi.useRealTimers();
     }
+  });
+
+  it("clears only cache or exploration state and keeps download records", async () => {
+    await backend.favoriteSet({ namespace: "artist", value: "reset fixture" }, true);
+    await backend.searchSubmit(searchRequest({ text: "reset fixture" }));
+    const queued = await backend.downloadQueueAdd([galleryId(7_199_991)], "reset-keeps-download");
+    if (!queued.ok) throw new Error(queued.error.message);
+
+    expect(await backend.thumbnailCacheClear()).toMatchObject({
+      ok: true,
+      data: {
+        successEntriesRemoved: 0,
+        negativeEntriesRemoved: 0,
+      },
+    });
+    const reset = await backend.explorationDataReset({
+      confirmation: "RESET_EXPLORATION_DATA",
+    });
+    expect(reset).toMatchObject({
+      ok: true,
+      data: {
+        favoritesRemoved: expect.any(Number),
+        searchHistoryRemoved: expect.any(Number),
+      },
+    });
+    expect(await backend.favoritesList()).toEqual({ ok: true, data: [] });
+    expect(await backend.searchHistoryList(100)).toEqual({ ok: true, data: [] });
+    expect(await backend.downloadEntriesList({
+      query: queued.data[0]!.entryId,
+      page: 1,
+      pageSize: 20,
+    })).toMatchObject({ ok: true, data: { totalItems: 1 } });
+    await backend.downloadCancel([queued.data[0]!.entryId]);
   });
 });
 

@@ -7,14 +7,17 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 
 use crate::{
-    application::{ApplicationError, ApplicationService, ArtifactRepository, StateRepository},
+    application::{
+        ApplicationError, ApplicationService, ArtifactRepository, AutomationRepository,
+        RepositoryError, StateRepository,
+    },
     domain::{
         windows_path_for_display, ArtifactBundle, ArtifactRelativePath, AutoFindHistoryMode,
-        DownloadArtifact, DownloadArtifactState, DownloadEntry, DownloadEntryId,
-        DownloadListRequest, FixtureDownloadJobStep, Gallery, GalleryId, GalleryMetadata, JobRef,
-        JobState, Language, PageArtifact, PageArtifactState, SearchRequest, SearchSort,
-        SettingsPatch, SettingsSnapshot, SourcePageNumber, WindowPlacement,
-        WindowPlacementSnapshot,
+        AutoFindRunState, DownloadArtifact, DownloadArtifactState, DownloadEntry, DownloadEntryId,
+        DownloadListRequest, ExplorationDataResetRequest, FavoriteKey, FavoriteNamespace,
+        FixtureDownloadJobStep, Gallery, GalleryId, GalleryMetadata, JobRef, JobState, Language,
+        PageArtifact, PageArtifactState, SearchRequest, SearchSort, SettingsPatch,
+        SettingsSnapshot, SourcePageNumber, WindowPlacement, WindowPlacementSnapshot,
     },
     infrastructure::{FixtureSearchRepository, MigrationRunner, SqliteRepository, MIGRATIONS},
     interface::{ApiAction, ApiError, ApiResult},
@@ -91,7 +94,7 @@ fn primary_group_migration_preserves_existing_gallery_rows() {
     let report = MigrationRunner::run(&mut connection).expect("apply v4 migration");
     assert_eq!(
         report.applied_versions,
-        vec![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        vec![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     );
     let stored: (String, Option<String>) = connection
         .query_row(
@@ -173,7 +176,7 @@ fn lifecycle_migration_preserves_v6_download_graph_and_enables_cancelled() {
     let report = MigrationRunner::run(&mut connection).expect("apply lifecycle migration");
     assert_eq!(
         report.applied_versions,
-        vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     );
     let lifecycle: (i64, String, Option<String>, i64) = connection
         .query_row(
@@ -279,7 +282,10 @@ fn visible_metadata_migration_defaults_existing_auto_find_candidates() {
         .expect("seed v10 Auto Find candidate");
 
     let report = MigrationRunner::run(&mut connection).expect("apply visible metadata migration");
-    assert_eq!(report.applied_versions, vec![11, 12, 13, 14, 15, 16, 17]);
+    assert_eq!(
+        report.applied_versions,
+        vec![11, 12, 13, 14, 15, 16, 17, 18]
+    );
     let metadata: (String, String) = connection
         .query_row(
             r#"
@@ -339,7 +345,7 @@ fn settings_constraint_migration_clamps_legacy_values() {
     let report = MigrationRunner::run(&mut connection).expect("upgrade legacy schema");
     assert_eq!(
         report.applied_versions,
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     );
     let tightened: (i64, i64, i64, i64, i64, i64) = connection
         .query_row(
@@ -387,6 +393,24 @@ fn default_settings_match_the_approved_foundation_values() {
             "autoFindHistoryMode": "include_all_history"
         })
     );
+}
+
+#[test]
+fn persisted_legacy_preview_width_is_normalized_on_load() {
+    let temporary = tempfile::tempdir().expect("create temporary directory");
+    let database_path = temporary.path().join("legacy-preview.sqlite3");
+    drop(SqliteRepository::open(&database_path).expect("create repository"));
+    let connection = Connection::open(&database_path).expect("open raw repository");
+    connection
+        .execute(
+            "UPDATE settings SET preview_width=305 WHERE singleton=1",
+            [],
+        )
+        .expect("seed legacy arbitrary preview width");
+    drop(connection);
+
+    let repository = SqliteRepository::open(&database_path).expect("reopen repository");
+    assert_eq!(repository.settings_get().unwrap().preview_width, 280);
 }
 
 #[test]
@@ -511,6 +535,11 @@ fn settings_validation_matches_the_approved_ui_ranges() {
         auto_find_history_mode: AutoFindHistoryMode::IncludeAllHistory,
     };
     assert!(limits.validate().is_ok());
+    for width in [160, 190, 220, 250, 280, 320, 360] {
+        let mut preset = limits.clone();
+        preset.preview_width = width;
+        assert!(preset.validate().is_ok(), "preset {width}");
+    }
 
     let mut invalid = limits.clone();
     invalid.max_columns = 5;
@@ -520,6 +549,9 @@ fn settings_validation_matches_the_approved_ui_ranges() {
     assert!(invalid.validate().is_err());
     invalid = limits.clone();
     invalid.preview_width = 361;
+    assert!(invalid.validate().is_err());
+    invalid = limits.clone();
+    invalid.preview_width = 305;
     assert!(invalid.validate().is_err());
     invalid = limits.clone();
     invalid.cache_limit_gb = 31;
@@ -1310,6 +1342,94 @@ fn download_queue_is_batch_idempotent_and_reuses_active_gallery_entries() {
         oversized_query,
         ApplicationError::Validation(ref error)
             if error.field == "query" && error.message == "must be at most 500 bytes"
+    ));
+}
+
+#[test]
+fn exploration_reset_is_explicit_atomic_and_preserves_download_records() {
+    let repository = Arc::new(SqliteRepository::open_in_memory().expect("create repository"));
+    let service = ApplicationService::new(repository.clone())
+        .with_download_repository(repository.clone())
+        .with_automation_repository(repository.clone());
+    service
+        .favorite_set(
+            FavoriteKey {
+                namespace: FavoriteNamespace::Artist,
+                value: "fixture artist".into(),
+            },
+            true,
+        )
+        .unwrap();
+    repository
+        .search_history_record(&SearchRequest {
+            text: "fixture".into(),
+            include_tags: vec![],
+            exclude_tags: vec![],
+            languages: vec![Language::Korean],
+            sort: SearchSort::Recent,
+            page_size: 20,
+        })
+        .unwrap();
+    let run = repository
+        .auto_find_start(0, AutoFindHistoryMode::IncludeAllHistory, &[])
+        .unwrap();
+    repository
+        .auto_find_finish(&run.run_id, AutoFindRunState::Completed, None, None)
+        .unwrap();
+    repository
+        .auto_find_exclude(&[GalleryId::new(998).unwrap()], "fixture exclusion")
+        .unwrap();
+    service
+        .download_queue_add(vec![997], "reset-preserves-download".into())
+        .unwrap();
+
+    let reset = service
+        .exploration_data_reset(ExplorationDataResetRequest {
+            confirmation: "RESET_EXPLORATION_DATA".into(),
+        })
+        .unwrap();
+    assert_eq!(reset.favorites_removed, 1);
+    assert_eq!(reset.search_history_removed, 1);
+    assert_eq!(reset.auto_find_runs_removed, 1);
+    assert_eq!(reset.auto_find_candidates_removed, 0);
+    assert_eq!(reset.auto_find_exclusions_removed, 1);
+    assert!(service.favorites_list().unwrap().is_empty());
+    assert!(service.search_history_list(20).unwrap().is_empty());
+    assert_eq!(
+        service
+            .download_entries_list(DownloadListRequest {
+                state: None,
+                query: None,
+                page: 1,
+                page_size: 20,
+            })
+            .unwrap()
+            .total_items,
+        1
+    );
+}
+
+#[test]
+fn exploration_reset_rejects_bad_confirmation_and_running_auto_find() {
+    let repository = Arc::new(SqliteRepository::open_in_memory().expect("create repository"));
+    let service =
+        ApplicationService::new(repository.clone()).with_automation_repository(repository.clone());
+    assert!(matches!(
+        service.exploration_data_reset(ExplorationDataResetRequest {
+            confirmation: "RESET".into(),
+        }),
+        Err(ApplicationError::Validation(_))
+    ));
+    repository
+        .auto_find_start(0, AutoFindHistoryMode::IncludeAllHistory, &[])
+        .unwrap();
+    assert!(matches!(
+        service.exploration_data_reset(ExplorationDataResetRequest {
+            confirmation: "RESET_EXPLORATION_DATA".into(),
+        }),
+        Err(ApplicationError::Repository(
+            RepositoryError::OperationActive(_)
+        ))
     ));
 }
 

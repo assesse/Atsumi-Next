@@ -780,6 +780,7 @@ fn run_download(
     let prepared = inner.repository.pipeline_prepare(&DownloadArtifactPlan {
         descriptor: descriptor.clone(),
         gallery: snapshot.gallery,
+        source_revision: snapshot.source_revision,
         root_snapshot: root.clone(),
         relative_directory: planned_relative_directory,
         manifest_relative_path: planned_manifest_relative_path,
@@ -1304,6 +1305,7 @@ mod tests {
     struct FakeDownloadSource {
         pages: u32,
         block_page: Option<u32>,
+        gallery_revision: u64,
         calls: Mutex<Vec<u32>>,
     }
 
@@ -1312,8 +1314,14 @@ mod tests {
             Self {
                 pages,
                 block_page,
+                gallery_revision: 1,
                 calls: Mutex::new(Vec::new()),
             }
+        }
+
+        fn with_gallery_revision(mut self, gallery_revision: u64) -> Self {
+            self.gallery_revision = gallery_revision;
+            self
         }
 
         fn calls(&self) -> Vec<u32> {
@@ -1341,8 +1349,8 @@ mod tests {
                 })
                 .collect();
             Ok(DownloadGallerySnapshot {
-                gallery: Gallery::new(gallery_id, 1, metadata),
-                source_revision: "fixture-gallery-v1".into(),
+                gallery: Gallery::new(gallery_id, self.gallery_revision, metadata),
+                source_revision: format!("fixture-gallery:{:016x}", self.gallery_revision),
                 pages,
             })
         }
@@ -1570,6 +1578,33 @@ mod tests {
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".part"))
         .count();
         assert_eq!(part_files, 0);
+    }
+
+    #[test]
+    fn unsigned_source_revision_never_overflows_sqlite_gallery_revision() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let (repository, service) = configured_repository(&root);
+        let source = Arc::new(FakeDownloadSource::new(1, None).with_gallery_revision(u64::MAX));
+        let (supervisor, _events) = launch(&repository, source);
+        let queued = service
+            .download_queue_add(vec![4_113_714], "unsigned-source-revision".into())
+            .unwrap();
+        let entry_id = queued.entries[0].entry_id.to_string();
+        supervisor.enqueue_all(queued.jobs).unwrap();
+        wait_for_state(&service, &entry_id, JobState::Completed, 100.0);
+        supervisor.shutdown_and_wait();
+
+        let stored: (i64, String) = rusqlite::Connection::open(root.join("state.sqlite3"))
+            .unwrap()
+            .query_row(
+                "SELECT revision, source_revision FROM galleries WHERE gallery_id=4113714",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, 0);
+        assert_eq!(stored.1, "fixture-gallery:ffffffffffffffff");
     }
 
     #[test]

@@ -1,5 +1,4 @@
 mod auto_find_supervisor;
-mod classic_import;
 mod download_pipeline;
 mod download_supervisor;
 mod duplicate_analyzer;
@@ -11,7 +10,6 @@ mod ports;
 mod service;
 
 pub use auto_find_supervisor::AutoFindSupervisor;
-pub use classic_import::{ClassicImportService, ClassicSourceInspector, ClassicSourceInventory};
 pub use download_pipeline::{
     ArtifactLayout, ArtifactStore, DownloadArtifactPlan, DownloadCheckpoint,
     DownloadGallerySnapshot, DownloadPageAttempt, DownloadPageAttemptOutcome,
@@ -26,9 +24,8 @@ pub use error::{ApplicationError, RepositoryError};
 pub use internal_duplicate_supervisor::InternalDuplicateSupervisor;
 pub use ports::{
     ArtifactRepository, AutoFindSource, AutoFindSourceRequest, AutoFindSourceResult,
-    AutomationRepository, ClassicArtifactCopy, ClassicImportRepository,
-    ClassicImportTransitionOutcome, DownloadMutationOutcome, DownloadQueueAddOutcome,
-    DownloadQueueRecord, DownloadRepository, DuplicateRelationProvider, DuplicateRepository,
+    AutomationRepository, DownloadMutationOutcome, DownloadQueueAddOutcome, DownloadQueueRecord,
+    DownloadRepository, DuplicateRelationProvider, DuplicateRepository,
     InternalDuplicateRepository, InternalPlanPrepareOutcome, SearchRepository, StateRepository,
 };
 pub use service::{ApplicationService, DownloadQueueLaunch};

@@ -459,6 +459,40 @@ fn invalidation_also_allows_an_explicit_retry_of_negative_cache() {
     coordinator.shutdown();
 }
 
+#[test]
+fn explicit_cache_clear_removes_completed_caches_without_touching_active_work() {
+    let success_key = ThumbnailKey::gallery_cover(17).unwrap();
+    let failure_key = ThumbnailKey::gallery_cover(18).unwrap();
+    let resolver = FixtureThumbnailResolver::new().with_failure(
+        failure_key.clone(),
+        ThumbnailResolveError::new(ThumbnailFailureCode::NotFound, "gone", false),
+    );
+    let coordinator = ThumbnailCoordinator::with_resolver(resolver, config(1)).unwrap();
+    assert!(coordinator
+        .request(request(success_key, ThumbnailPriority::Visible))
+        .unwrap()
+        .recv()
+        .is_ok());
+    assert!(coordinator
+        .request(request(failure_key, ThumbnailPriority::Visible))
+        .unwrap()
+        .recv()
+        .is_err());
+    let before = coordinator.stats();
+    assert_eq!(before.success_cache_entries, 1);
+    assert_eq!(before.negative_cache_entries, 1);
+
+    let cleared = coordinator.clear_cache();
+    assert_eq!(cleared.success_entries_removed, 1);
+    assert!(cleared.success_bytes_removed > 0);
+    assert_eq!(cleared.negative_entries_removed, 1);
+    let after = coordinator.stats();
+    assert_eq!(after.success_cache_entries, 0);
+    assert_eq!(after.success_cache_bytes, 0);
+    assert_eq!(after.negative_cache_entries, 0);
+    coordinator.shutdown();
+}
+
 struct RecordingResolver {
     order: Mutex<Vec<i64>>,
     latency: Duration,

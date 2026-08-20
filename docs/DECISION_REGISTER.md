@@ -21,7 +21,7 @@
 | D-101 | Desktop stack은 Tauri 2와 Rust를 유지한다. | 2026-08-12 전체 승인 |
 | D-102 | Frontend는 TypeScript와 React로 재작성한다. | 2026-08-12 전체 승인 |
 | D-103 | SQLite를 영속 상태의 canonical source로 사용한다. | 2026-08-12 전체 승인 |
-| D-104 | Classic command는 새 domain의 기준이 아니라 import/compatibility adapter로만 사용한다. | 2026-08-12 전체 승인 |
+| D-104 | Classic command를 새 domain의 기준으로 삼지 않는다. | 2026-08-12 전체 승인; active compatibility 경로는 D-160에서 제거 |
 | D-105 | 최상위 navigation은 Explore, Auto Find, Downloads 3개를 유지한다. | 2026-08-12 전체 승인 |
 | D-106 | Review는 Downloads의 검토 filter와 context action에서 진입한다. | 2026-08-12 전체 승인 |
 | D-107 | 어두운 compact rail과 밝은 작업 영역의 identity를 유지하고 controls를 재설계한다. | 2026-08-12 전체 승인 |
@@ -61,10 +61,7 @@
 | D-141 | 내부 visual page 중복은 단일 유사 page로 만들지 않고 최소 2행의 단조 scene block만 Review에 올린다. exact SHA 반복은 별도 근거로 한 행을 허용한다. | 2026-08-16 Milestone F 오탐 안전 경계 |
 | D-142 | 내부 page 제거는 group revision·파일 수·byte 합계를 고정한 plan preview 후에만 artifact 내부 quarantine으로 적용한다. source page number와 검증 metadata를 유지하고 자동 영구 삭제하지 않는다. | 2026-08-16 Milestone F 구현 |
 | D-143 | page quarantine·undo는 DB intent, atomic file move, manifest atomic replace, SQLite completion으로 구성된 crash-safe saga다. 시작 시 pending saga를 재개하고 모호한 두 경로는 overwrite/delete하지 않는다. | 2026-08-16 Milestone F 안전 경계 |
-| D-144 | Classic import는 사용자가 고른 경로만 읽기 전용으로 inventory하고 원본 state·DB·파일을 이동·수정·삭제하지 않는다. | 2026-08-16 Milestone G 안전 경계 |
-| D-145 | Classic artifact는 dry-run·경고 확인·최종 승인 뒤 Next 관리 폴더에 검증된 WebP 복사본으로 만들며 실제 파일·manifest 확인 뒤에만 completed로 등록한다. | 2026-08-16 Milestone G 구현 |
-| D-146 | Classic legacy hash는 provenance로만 보존하고 현재 HashProfile의 중복 차단 근거로 신뢰하지 않는다. manifestless·ID mismatch·중복 폴더를 자동 추측하거나 병합하지 않는다. | 2026-08-16 Milestone G 안전 경계 |
-| D-147 | Classic rollback은 해당 import가 새로 만든 Next DB row와 복사본만 대상으로 하며 파일은 영구 삭제하지 않고 import 전용 quarantine으로 이동한다. 적용/rollback 중단도 시작 시 같은 상태로 수렴한다. | 2026-08-16 Milestone G 구현 |
+| D-144~147 | 역사적으로 구현했던 Classic 데이터 이전 경계. 현재 active command·repository·UI에서는 철회됐고 v14 migration/table만 호환 이력으로 보존한다. | 2026-08-21 D-160으로 대체 |
 | D-148 | production thumbnail client는 앱 composition root가 반드시 명시적으로 주입한다. React context가 브라우저 fixture로 암묵 fallback하지 않으며 browser review mode만 명시적인 fixture adapter를 사용한다. | 2026-08-16 Milestone H 보안 경계 |
 | D-149 | 설정에는 실제 구현된 일반·저장 공간만 노출한다. 안전한 plan·undo가 없는 cache/영구 삭제는 이유를 표시한 disabled 상태로 두며, 상세 page 확대는 전역 thumbnail coordinator를 사용하는 실제 dialog로 제공한다. | 2026-08-16 Milestone H 운영 UX |
 | D-150 | 앨범 카드는 포스터형 대신 가로 밀도형을 유지한다. 점수·날짜는 제거하고 기존 metadata 종류는 보존하되, 실제 chip 측정·font 준비·container resize와 원본 이미지 비율로 배치를 적응시킨다. | 2026-08-20 사용자 지시 및 adaptive card 구현 |
@@ -75,8 +72,12 @@
 | D-155 | Auto Find history mode는 run 시작 시 snapshot한다. `newer_than_oldest_downloaded` cutoff는 검증 소유 artifact만 근거로 하고 `source=verified_owned_artifact`, `policyVersion=1`을 영속한다. 증거가 없으면 cutoff하지 않는다. | 2026-08-20 schema v17 안전 경계 |
 | D-156 | Auto Find는 Nozomi ID에 cutoff를 먼저 적용한 뒤 최대 50,000 candidate를 처리하고 초과 시 `candidate_limit_after_cutoff`를 기록한다. 기존 작가당 250-page 상한은 폐기한다. | 2026-08-20 Auto Find source 정책 |
 | D-157 | Windows 설정의 download root는 사람이 읽는 drive/UNC 형식으로 저장·표시하고 filesystem 경계는 canonical path를 별도로 사용한다. 기존 artifact `root_snapshot`은 바꾸지 않으며 폴더 이름 미리보기는 실제 Rust planner를 호출한다. | 2026-08-20 사용자 지시 및 경로 안정화 |
-| D-158 | 가로 밀도형 앨범 카드의 외부 높이는 실제 렌더링된 cover 높이가 유일한 기준이다. 제목·metadata·태그·상태는 그 높이를 늘리지 않으며 남은 영역에 실측 chip을 최대한 배치하고 숨은 태그는 비상호작용 `+N`으로 집약한다. | 2026-08-20 사용자 지시 및 카드 안정화 |
+| D-158 | 가로 밀도형 앨범 카드는 같은 시각적 grid 행 안에서 원본 비율로 계산한 가장 높은 cover를 행 높이로 공유한다. 제목·metadata·태그·상태는 그 높이를 늘리지 않으며 숨은 태그는 비상호작용 `+N`으로 집약한다. | 2026-08-20 사용자 지시, 2026-08-21 행 정렬 보완 |
 | D-159 | 카드 표시용 태그는 canonical 배열을 바꾸지 않고 즐겨찾기 우선, Female→Male→중립, 같은 bucket 원래 순서로 안정 정렬한다. F/M namespace marker와 주황 favorite star는 별도 DOM으로 동시에 표시한다. | 2026-08-20 사용자 지시 및 태그 의미 보존 |
+| D-160 | Classic 데이터 이전의 active UI/API/Rust 경로를 제거한다. 이미 적용된 v14 migration과 역사적 table은 기존 DB 호환을 위해 수정·삭제하지 않는다. | 2026-08-21 사용자 지시 |
+| D-161 | 카드 미리보기는 160/190/220/250/280/320/360px 일곱 단계만 사용하며 기본은 220px이다. 각 단계는 글꼴·간격과 2/2/3/4/5/6/7줄 태그 예산을 함께 정의한다. | 2026-08-21 사용자 지시 |
+| D-162 | source revision 문자열 identity와 SQLite 내부 revision을 분리한다. unsigned source fingerprint를 signed SQLite integer로 변환하지 않는다. | 2026-08-21 gallery 4113714/4132312 다운로드 장애 회귀 수정 |
+| D-163 | 캐시·탐색 데이터 초기화는 typed scope와 명시적 확인을 가지며 다운로드 DB, artifact, manifest와 사용자 파일을 일괄 삭제하지 않는다. | 2026-08-21 사용자 지시 |
 
 ## 제안
 
@@ -89,7 +90,6 @@
 | R-201 | React virtual list가 20~200개 카드와 resize에서 충분한가 | prototype frame과 input latency 측정 |
 | R-202 | SQLite writer 단일화와 hash worker 병렬 처리 | lock 없이 동시 download/hash integration test |
 | R-203 | 비동기 pooled HTTP에서 동시성 5 경계가 유지되는가 | download-probe 새 client mode 결과 |
-| R-204 | Classic localStorage 안전 export | Classic 코드 최소 변경 또는 WebView profile read 방법 결정 |
 | R-205 | E-Hentai relation을 초기 milestone에서 제외해도 후보 품질이 충분한가 | golden candidate recall 비교 |
 
 ## 다음 사용자 확인 항목

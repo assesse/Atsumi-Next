@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import type { ApiError, ApiResult, SettingsPatch, SettingsSnapshot } from "../api/contracts";
+import type {
+  ApiError,
+  ApiResult,
+  ExplorationDataResetResult,
+  SettingsPatch,
+  SettingsSnapshot,
+  ThumbnailCacheClearResult,
+} from "../api/contracts";
+import {
+  GALLERY_PREVIEW_PRESETS,
+  galleryPreviewPresetIndex,
+} from "../layout/galleryPreviewPresets";
 import { FluentIcon } from "./FluentIcon";
 
 type SettingsDialogProps = {
@@ -9,31 +20,33 @@ type SettingsDialogProps = {
   error: ApiError | null;
   onClose: () => void;
   onSave: (patch: SettingsPatch) => Promise<boolean>;
-  onClassicImport: () => void;
   onPreviewLayout: (layout: { maxColumns: number; previewWidth: number } | null) => void;
   onPreviewFolderName: (template: string) => Promise<ApiResult<string>>;
+  onClearCache: () => Promise<ApiResult<ThumbnailCacheClearResult>>;
+  onResetExplorationData: () => Promise<ApiResult<ExplorationDataResetResult>>;
 };
 
-const sections = ["일반", "저장 공간"];
 const DEFAULT_FOLDER_NAME_TEMPLATE = "[{artist}] {title} [{group}] {id}";
 
-export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onClassicImport, onPreviewLayout, onPreviewFolderName }: SettingsDialogProps) {
+export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onPreviewLayout, onPreviewFolderName, onClearCache, onResetExplorationData }: SettingsDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const closingInternally = useRef(false);
   const wasOpen = useRef(false);
-  const [activeSection, setActiveSection] = useState("일반");
   const [draft, setDraft] = useState<SettingsSnapshot>(settings);
   const [saving, setSaving] = useState(false);
   const [folderPreview, setFolderPreview] = useState("");
   const [folderPreviewError, setFolderPreviewError] = useState("");
   const folderPreviewRequest = useRef(0);
+  const [maintenanceBusy, setMaintenanceBusy] = useState<"cache" | "exploration" | null>(null);
+  const [maintenanceMessage, setMaintenanceMessage] = useState("");
 
   useEffect(() => {
     if (open && !wasOpen.current) {
       opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       setDraft(settings);
+      setMaintenanceMessage("");
       onPreviewLayout({ maxColumns: settings.maxColumns, previewWidth: settings.previewWidth });
       if (!dialog.current?.open) dialog.current?.showModal();
       window.requestAnimationFrame(() => closeButton.current?.focus());
@@ -86,6 +99,40 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
     onClose();
   };
 
+  const restorePreferenceDefaults = () => {
+    const maxColumns = 3;
+    const previewWidth = 220;
+    setDraft((current) => ({
+      ...current,
+      autoFindHistoryMode: "include_all_history",
+      maxColumns,
+      previewWidth,
+      concurrentImageRequests: 5,
+      requestStartIntervalMs: 25,
+    }));
+    previewLayout(maxColumns, previewWidth);
+    setMaintenanceMessage("화면·네트워크 설정을 기본값으로 되돌렸습니다. 저장을 눌러 적용하세요.");
+  };
+
+  const clearCache = async () => {
+    setMaintenanceBusy("cache");
+    const result = await onClearCache();
+    setMaintenanceBusy(null);
+    setMaintenanceMessage(result.ok
+      ? `재생성 가능한 미리보기 캐시 ${result.data.successEntriesRemoved + result.data.negativeEntriesRemoved}개를 정리했습니다.`
+      : result.error.message);
+  };
+
+  const resetExplorationData = async () => {
+    if (!window.confirm("즐겨찾기, 검색 이력, Auto Find 결과와 제외 기록을 초기화할까요? 다운로드 DB와 파일은 삭제되지 않습니다.")) return;
+    setMaintenanceBusy("exploration");
+    const result = await onResetExplorationData();
+    setMaintenanceBusy(null);
+    setMaintenanceMessage(result.ok
+      ? `탐색 데이터 ${result.data.favoritesRemoved + result.data.searchHistoryRemoved + result.data.autoFindRunsRemoved + result.data.autoFindCandidatesRemoved + result.data.autoFindExclusionsRemoved}건을 초기화했습니다.`
+      : result.error.message);
+  };
+
   const save = async () => {
     setSaving(true);
     const success = await onSave({
@@ -134,23 +181,8 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
             </button>
           </div>
         </header>
-        <div className="settings-layout">
-          <nav className="settings-nav" aria-label="설정 분류">
-            {sections.map((section) => (
-              <button key={section} type="button" aria-current={activeSection === section ? "page" : undefined} className={activeSection === section ? "is-active" : ""} onClick={() => setActiveSection(section)}>
-                {section}
-              </button>
-            ))}
-          </nav>
+        <div className="settings-layout settings-layout-single">
           <section className="settings-content">
-            {activeSection === "저장 공간" ? (
-              <div className="settings-storage">
-                <span className="eyebrow">MIGRATION</span>
-                <h3>Classic 데이터</h3>
-                <p>Classic 원본은 읽기 전용으로 조사하고, dry-run 보고서를 승인한 뒤에만 Next 저장소로 복사합니다.</p>
-                <button type="button" className="text-button primary" onClick={() => { close(); onClassicImport(); }}>Classic 가져오기 열기</button>
-              </div>
-            ) : (
               <>
                 {error ? <div className="inline-error" role="alert">{error.message}</div> : null}
                 <div className="setting-row">
@@ -201,11 +233,7 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                 </div>
                 <div className="setting-row">
                   <div><strong>앨범 미리보기 크기</strong><span>Explore와 Downloads에 함께 적용</span></div>
-                  <div className="range-wrap"><input id="settings-preview-width" aria-label="앨범 미리보기 크기" type="range" min="160" max="360" value={draft.previewWidth} onChange={(event) => { const value = Number(event.target.value); patch("previewWidth", value); previewLayout(draft.maxColumns, value); }} /><output htmlFor="settings-preview-width">{draft.previewWidth}px</output></div>
-                </div>
-                <div className="setting-row">
-                  <div><strong>캐시 한도</strong><span>썸네일과 재생성 가능한 자료</span></div>
-                  <div className="range-wrap"><input id="settings-cache-limit" aria-label="캐시 한도" type="range" min="1" max="30" value={draft.cacheLimitGb} onChange={(event) => patch("cacheLimitGb", Number(event.target.value))} /><output htmlFor="settings-cache-limit">{draft.cacheLimitGb}GB</output></div>
+                  <div className="range-wrap"><input id="settings-preview-width" aria-label="앨범 미리보기 크기" type="range" min="0" max={GALLERY_PREVIEW_PRESETS.length - 1} step="1" value={galleryPreviewPresetIndex(draft.previewWidth)} onChange={(event) => { const preset = GALLERY_PREVIEW_PRESETS[Number(event.target.value)] ?? GALLERY_PREVIEW_PRESETS[2]!; patch("previewWidth", preset.width); previewLayout(draft.maxColumns, preset.width); }} /><output htmlFor="settings-preview-width">{draft.previewWidth}px</output></div>
                 </div>
                 <div className="setting-row">
                   <div><strong>동시 이미지 요청</strong><span>Classic 실측 안정 기본값 5</span></div>
@@ -217,15 +245,16 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                 </div>
                 <div className="danger-zone">
                   <strong>저장 데이터 관리</strong>
-                  <p id="destructive-settings-unavailable">캐시 정리와 영구 삭제는 안전한 계획·검토·undo 계약이 아직 없으므로 사용할 수 없습니다. 다운로드 격리와 복원은 Downloads에서 이용할 수 있습니다.</p>
+                  <p>캐시는 재생성 가능한 미리보기만 지웁니다. 탐색 데이터 초기화는 즐겨찾기·검색 이력·Auto Find 기록만 지우며 다운로드 DB와 파일은 보존합니다.</p>
+                  {maintenanceMessage ? <p className="maintenance-message" role="status">{maintenanceMessage}</p> : null}
                   <div>
-                    <button type="button" className="text-button" disabled aria-describedby="destructive-settings-unavailable" title="안전한 캐시 제거 계획이 아직 제공되지 않습니다">캐시 제거</button>
-                    <button type="button" className="text-button warning-button" disabled aria-describedby="destructive-settings-unavailable" title="dry-run과 undo를 제공하기 전에는 사용할 수 없습니다">데이터 제거</button>
-                    <button type="button" className="text-button danger-button" disabled aria-describedby="destructive-settings-unavailable" title="영구 삭제는 지원하지 않습니다">모든 파일 제거</button>
+                    <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={() => void clearCache()}>{maintenanceBusy === "cache" ? "정리 중" : "캐시 초기화"}</button>
+                    <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={restorePreferenceDefaults}>설정 기본값</button>
+                    <button type="button" className="text-button warning-button" disabled={maintenanceBusy !== null} onClick={() => void resetExplorationData()}>{maintenanceBusy === "exploration" ? "초기화 중" : "탐색 데이터 초기화"}</button>
                   </div>
+                  <p>다운로드 기록·artifact·격리 파일의 일괄 영구 삭제는 복구 계획이 없으므로 제공하지 않습니다.</p>
                 </div>
               </>
-            )}
           </section>
         </div>
       </div>

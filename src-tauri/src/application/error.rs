@@ -19,6 +19,8 @@ pub enum RepositoryError {
     MigrationBackup(String),
     #[error("database operation failed: {0}")]
     Other(String),
+    #[error("operation is active: {0}")]
+    OperationActive(String),
     #[error(transparent)]
     Source(#[from] SourceContractError),
 }
@@ -31,6 +33,7 @@ impl RepositoryError {
             Self::UnsupportedSchema { .. } => "DATABASE_SCHEMA_NEWER",
             Self::MigrationBackup(_) => "DATABASE_BACKUP_FAILED",
             Self::Other(_) => "DATABASE_ERROR",
+            Self::OperationActive(_) => "OPERATION_ACTIVE",
             Self::Source(error) => error.code.as_str(),
         }
     }
@@ -72,16 +75,6 @@ pub enum ApplicationError {
     InternalDuplicateEntryNotFound(String),
     #[error("internal removal plan is invalid: {0}")]
     InternalRemovalPlanInvalid(String),
-    #[error("Classic import {0:?} was not found")]
-    ClassicImportNotFound(String),
-    #[error("Classic import is invalid: {0}")]
-    ClassicImportInvalid(String),
-    #[error("Classic source changed after the dry run")]
-    ClassicImportSourceChanged,
-    #[error("Classic import plan must be regenerated with the current schema")]
-    ClassicImportPlanOutdated,
-    #[error("Classic import conflicts must be reviewed: {0}")]
-    ClassicImportConflict(String),
     #[error(transparent)]
     DownloadPipeline(#[from] DownloadPipelineError),
     #[error(transparent)]
