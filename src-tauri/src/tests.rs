@@ -9,11 +9,12 @@ use serde_json::json;
 use crate::{
     application::{ApplicationError, ApplicationService, ArtifactRepository, StateRepository},
     domain::{
-        ArtifactBundle, ArtifactRelativePath, AutoFindHistoryMode, DownloadArtifact,
-        DownloadArtifactState, DownloadEntry, DownloadEntryId, DownloadListRequest,
-        FixtureDownloadJobStep, Gallery, GalleryId, GalleryMetadata, JobRef, JobState, Language,
-        PageArtifact, PageArtifactState, SearchRequest, SearchSort, SettingsPatch,
-        SettingsSnapshot, SourcePageNumber, WindowPlacement, WindowPlacementSnapshot,
+        windows_path_for_display, ArtifactBundle, ArtifactRelativePath, AutoFindHistoryMode,
+        DownloadArtifact, DownloadArtifactState, DownloadEntry, DownloadEntryId,
+        DownloadListRequest, FixtureDownloadJobStep, Gallery, GalleryId, GalleryMetadata, JobRef,
+        JobState, Language, PageArtifact, PageArtifactState, SearchRequest, SearchSort,
+        SettingsPatch, SettingsSnapshot, SourcePageNumber, WindowPlacement,
+        WindowPlacementSnapshot,
     },
     infrastructure::{FixtureSearchRepository, MigrationRunner, SqliteRepository, MIGRATIONS},
     interface::{ApiAction, ApiError, ApiResult},
@@ -453,8 +454,9 @@ fn settings_display_normalization_does_not_move_or_rewrite_existing_artifacts() 
     }
 
     let service = ApplicationService::new(repository.clone());
+    let expected_display = windows_path_for_display(&canonical_text);
     let displayed = service.settings_get().expect("load displayed settings");
-    assert_eq!(displayed.download_root, download_root.to_string_lossy());
+    assert_eq!(displayed.download_root, expected_display);
     let updated = service
         .settings_update(
             SettingsPatch {
@@ -464,7 +466,7 @@ fn settings_display_normalization_does_not_move_or_rewrite_existing_artifacts() 
             displayed.revision,
         )
         .expect("save unrelated setting");
-    assert_eq!(updated.download_root, download_root.to_string_lossy());
+    assert_eq!(updated.download_root, expected_display);
 
     let connection = repository.connection().expect("lock repository");
     let stored_setting: String = connection
@@ -481,7 +483,13 @@ fn settings_display_normalization_does_not_move_or_rewrite_existing_artifacts() 
             |row| row.get(0),
         )
         .expect("read immutable artifact root");
-    assert_eq!(stored_setting, download_root.to_string_lossy());
+    assert_eq!(stored_setting, expected_display);
+    assert_eq!(
+        std::path::Path::new(&stored_setting)
+            .canonicalize()
+            .expect("display root resolves to the same directory"),
+        canonical_root
+    );
     assert_eq!(stored_artifact_root, canonical_text);
     assert_eq!(
         std::fs::read(&sentinel).expect("existing artifact remains in place"),
