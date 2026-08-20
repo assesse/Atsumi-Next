@@ -16,6 +16,7 @@ export type SettingsSnapshot = {
   revision: number;
   downloadRoot: string;
   folderNameTemplate: string;
+  autoFindHistoryMode: AutoFindHistoryMode;
   maxColumns: number;
   previewWidth: number;
   cacheLimitGb: number;
@@ -215,6 +216,23 @@ export type SearchHistoryEntry = {
 
 export type AutoFindRunState = "running" | "completed" | "failed" | "cancelled";
 
+export type AutoFindHistoryMode = "include_all_history" | "newer_than_oldest_downloaded";
+
+export type AutoFindCutoffEvidence = {
+  artist: string;
+  oldestOwnedGalleryId?: GalleryId;
+  qualifiedOwnedCount: number;
+  source: "verified_owned_artifact";
+  policyVersion: 1;
+};
+
+export type AutoFindTruncation = {
+  artist: string;
+  reason: "candidate_limit_after_cutoff";
+  eligibleCount: number;
+  limit: number;
+};
+
 export type AutoFindRun = {
   runId: string;
   revision: number;
@@ -227,6 +245,7 @@ export type AutoFindRun = {
   finishedAt?: string;
   errorCode?: string;
   errorMessage?: string;
+  historyMode: AutoFindHistoryMode;
 };
 
 export type AutoFindCandidate = GallerySummary & {
@@ -238,6 +257,8 @@ export type AutoFindCandidate = GallerySummary & {
 export type AutoFindSnapshot = {
   run?: AutoFindRun;
   candidates: AutoFindCandidate[];
+  cutoffEvidence: AutoFindCutoffEvidence[];
+  truncations: AutoFindTruncation[];
 };
 
 export type AutoFindExclusionResult = {

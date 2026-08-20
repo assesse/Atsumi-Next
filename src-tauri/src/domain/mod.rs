@@ -22,9 +22,9 @@ pub use artifact_path::{
     MAX_FOLDER_COMPONENT_UTF16, MAX_MANAGED_ABSOLUTE_PATH_UTF16,
 };
 pub use auto_find::{
-    AutoFindCandidate, AutoFindCandidateRecord, AutoFindExclusionResult, AutoFindRun,
-    AutoFindRunState, AutoFindSnapshot, FavoriteKey, FavoriteMutationResult, FavoriteNamespace,
-    FavoriteRecord, SearchHistoryEntry,
+    AutoFindCandidate, AutoFindCandidateRecord, AutoFindCutoffEvidence, AutoFindExclusionResult,
+    AutoFindRun, AutoFindRunState, AutoFindSnapshot, AutoFindTruncation, FavoriteKey,
+    FavoriteMutationResult, FavoriteNamespace, FavoriteRecord, SearchHistoryEntry,
 };
 pub use classic_import::{
     ClassicConflictCode, ClassicConflictSeverity, ClassicImportApplyRequest,
@@ -59,7 +59,7 @@ pub use search::{
     GalleryDetail, GalleryPage, GallerySummary, Language, SearchRequest, SearchSort,
     SearchSubmission,
 };
-pub use settings::{SettingsPatch, SettingsSnapshot};
+pub use settings::{AutoFindHistoryMode, SettingsPatch, SettingsSnapshot};
 pub use window_placement::{WindowPlacement, WindowPlacementSnapshot};
 
 use thiserror::Error;

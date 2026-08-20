@@ -17,11 +17,11 @@ use std::{
 };
 
 use application::{
-    ApplicationService, ArtifactRepository, ArtifactStore, AutoFindSupervisor,
+    ApplicationService, ArtifactRepository, ArtifactStore, AutoFindSource, AutoFindSupervisor,
     AutomationRepository, ClassicImportRepository, ClassicImportService, ClassicSourceInspector,
     DisabledDuplicateRelationProvider, DownloadPipelineRepository, DownloadSourcePort,
     DownloadSupervisor, DuplicateRepository, DuplicateSupervisor, InternalDuplicateRepository,
-    InternalDuplicateSupervisor, SearchRepository, StateRepository,
+    InternalDuplicateSupervisor, StateRepository,
 };
 use domain::{AutoFindRun, DownloadJobProjection, DuplicateScanRun, InternalScanRun};
 use infrastructure::{
@@ -109,11 +109,13 @@ pub fn run() -> tauri::Result<()> {
                 .with_automation_repository(repository.clone());
             let recovered_entries = service.download_recover_interrupted()?;
             let automation_repository: Arc<dyn AutomationRepository> = repository.clone();
-            let auto_find_search: Arc<dyn SearchRepository> = live_source.clone();
+            let auto_find_settings: Arc<dyn StateRepository> = repository.clone();
+            let auto_find_source: Arc<dyn AutoFindSource> = live_source.clone();
             let (auto_find_event_tx, auto_find_event_rx) = mpsc::channel::<AutoFindRun>();
             let auto_find = AutoFindSupervisor::new(
                 automation_repository,
-                auto_find_search,
+                auto_find_settings,
+                auto_find_source,
                 auto_find_event_tx,
             );
             let recovered_auto_find_runs = auto_find.recover_interrupted()?;

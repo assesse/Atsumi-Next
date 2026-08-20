@@ -65,6 +65,7 @@ pub struct GalleryPageId {
 pub struct GalleryMetadata {
     pub title: String,
     pub primary_artist: Option<String>,
+    pub artists: Vec<String>,
     pub primary_group: Option<String>,
     pub source_page_count: u32,
 }
@@ -91,10 +92,31 @@ impl GalleryMetadata {
 
         Ok(Self {
             title,
+            artists: primary_artist.iter().cloned().collect(),
             primary_artist,
             primary_group,
             source_page_count,
         })
+    }
+
+    /// Replaces the source artist list while retaining the established primary
+    /// artist projection for legacy storage and folder naming.
+    pub fn with_artists(mut self, artists: Vec<String>) -> Self {
+        let mut normalized = artists
+            .into_iter()
+            .map(|artist| artist.trim().to_owned())
+            .filter(|artist| !artist.is_empty())
+            .collect::<Vec<_>>();
+        normalized.sort_unstable();
+        normalized.dedup();
+        if self.primary_artist.is_none() {
+            self.primary_artist = normalized.first().cloned();
+        }
+        if normalized.is_empty() {
+            normalized.extend(self.primary_artist.iter().cloned());
+        }
+        self.artists = normalized;
+        self
     }
 }
 

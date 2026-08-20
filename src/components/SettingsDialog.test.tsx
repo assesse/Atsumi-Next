@@ -8,6 +8,7 @@ const settings: SettingsSnapshot = {
   revision: 1,
   downloadRoot: "C:\\Atsumi",
   folderNameTemplate: "[{artist}] {title} [{group}] {id}",
+  autoFindHistoryMode: "include_all_history",
   maxColumns: 3,
   previewWidth: 220,
   cacheLimitGb: 5,
@@ -54,6 +55,8 @@ describe("SettingsDialog operational boundaries", () => {
 
       const template = container.querySelector<HTMLInputElement>('[aria-label="갤러리 폴더 이름 템플릿"]');
       expect(template?.value).toBe("[{artist}] {title} [{group}] {id}");
+      const historyMode = container.querySelector<HTMLSelectElement>('[aria-label="Auto Find 기록 기준"]');
+      expect(historyMode?.value).toBe("include_all_history");
       expect(container.textContent).toContain("미리보기: [작가] 작품 제목 [그룹] 4113714");
       await act(async () => {
         if (!template) throw new Error("template input missing");
@@ -72,6 +75,7 @@ describe("SettingsDialog operational boundaries", () => {
       });
       expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
         folderNameTemplate: "[{artist}] {title} [{group}] {id}",
+        autoFindHistoryMode: "include_all_history",
       }));
     } finally {
       await act(async () => root.unmount());

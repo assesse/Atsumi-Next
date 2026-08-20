@@ -8,6 +8,31 @@ pub const DEFAULT_CACHE_LIMIT_GB: u32 = 10;
 pub const DEFAULT_CONCURRENT_IMAGE_REQUESTS: u32 = 5;
 pub const DEFAULT_REQUEST_START_INTERVAL_MS: u64 = 25;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoFindHistoryMode {
+    #[default]
+    IncludeAllHistory,
+    NewerThanOldestDownloaded,
+}
+
+impl AutoFindHistoryMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IncludeAllHistory => "include_all_history",
+            Self::NewerThanOldestDownloaded => "newer_than_oldest_downloaded",
+        }
+    }
+
+    pub fn from_database(value: &str) -> Option<Self> {
+        match value {
+            "include_all_history" => Some(Self::IncludeAllHistory),
+            "newer_than_oldest_downloaded" => Some(Self::NewerThanOldestDownloaded),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSnapshot {
@@ -19,6 +44,7 @@ pub struct SettingsSnapshot {
     pub cache_limit_gb: u32,
     pub concurrent_image_requests: u32,
     pub request_start_interval_ms: u64,
+    pub auto_find_history_mode: AutoFindHistoryMode,
 }
 
 impl Default for SettingsSnapshot {
@@ -32,6 +58,7 @@ impl Default for SettingsSnapshot {
             cache_limit_gb: DEFAULT_CACHE_LIMIT_GB,
             concurrent_image_requests: DEFAULT_CONCURRENT_IMAGE_REQUESTS,
             request_start_interval_ms: DEFAULT_REQUEST_START_INTERVAL_MS,
+            auto_find_history_mode: AutoFindHistoryMode::default(),
         }
     }
 }
@@ -46,6 +73,7 @@ pub struct SettingsPatch {
     pub cache_limit_gb: Option<u32>,
     pub concurrent_image_requests: Option<u32>,
     pub request_start_interval_ms: Option<u64>,
+    pub auto_find_history_mode: Option<AutoFindHistoryMode>,
 }
 
 impl SettingsSnapshot {
@@ -72,6 +100,9 @@ impl SettingsSnapshot {
         }
         if let Some(value) = patch.request_start_interval_ms {
             next.request_start_interval_ms = value;
+        }
+        if let Some(value) = patch.auto_find_history_mode {
+            next.auto_find_history_mode = value;
         }
 
         next.revision = self

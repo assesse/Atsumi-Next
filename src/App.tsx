@@ -149,7 +149,7 @@ export default function App() {
   const [favoriteMetadata, setFavoriteMetadata] = useState<ReadonlySet<string>>(() => new Set());
   const [favoriteRecords, setFavoriteRecords] = useState<FavoriteRecord[]>([]);
   const [searchHistory, setSearchHistory] = useState<SearchHistoryEntry[]>([]);
-  const [autoFindSnapshot, setAutoFindSnapshot] = useState<AutoFindSnapshot>({ candidates: [] });
+  const [autoFindSnapshot, setAutoFindSnapshot] = useState<AutoFindSnapshot>({ candidates: [], cutoffEvidence: [], truncations: [] });
   const [autoFindIds, setAutoFindIds] = useState<GalleryId[]>([]);
   const [autoFindLoading, setAutoFindLoading] = useState(true);
   const [autoFindError, setAutoFindError] = useState<string | null>(null);
@@ -1566,7 +1566,29 @@ export default function App() {
               {ui.view === "explore" ? (
                 <div className="select-control"><label htmlFor="sort-select">정렬</label><select id="sort-select" value={ui.exploreSort} onChange={(event) => { setExploreSearchOverride(null); dispatch({ type: "sort.set", sort: event.target.value as SearchSort }); }}>{sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
               ) : ui.view === "auto-find" ? (
-                <span className={`context-summary auto-find-status is-${autoFindSnapshot.run?.state ?? "idle"}`} role="status">{currentAutoFindStatus}</span>
+                <div className="auto-find-evidence" role="status" aria-live="polite">
+                  <span className={`context-summary auto-find-status is-${autoFindSnapshot.run?.state ?? "idle"}`}>{currentAutoFindStatus}</span>
+                  {autoFindSnapshot.run?.historyMode === "newer_than_oldest_downloaded" && autoFindSnapshot.cutoffEvidence.length ? (
+                    <ul aria-label="Auto Find 기록 cutoff 근거">
+                      {autoFindSnapshot.cutoffEvidence.map((evidence) => (
+                        <li key={evidence.artist}>
+                          {evidence.artist}: {evidence.oldestOwnedGalleryId === undefined
+                            ? "검증 완료·격리 소유 작품 없음"
+                            : `가장 오래된 소유 gallery ID #${evidence.oldestOwnedGalleryId} 이후, ${evidence.qualifiedOwnedCount}개 확인`}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {autoFindSnapshot.truncations.length ? (
+                    <ul aria-label="Auto Find 결과 제한 경고">
+                      {autoFindSnapshot.truncations.map((truncation) => (
+                        <li key={`${truncation.artist}-${truncation.limit}`}>
+                          {truncation.artist}: cutoff 이후 후보 {truncation.eligibleCount}개 중 {truncation.limit}개만 표시했습니다.
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
               ) : (
                 <>
                   <div className="segmented status-filter" role="group" aria-label="다운로드 상태 필터">

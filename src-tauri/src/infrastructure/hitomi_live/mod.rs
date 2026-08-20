@@ -127,6 +127,17 @@ impl HitomiLiveAdapter {
         &self,
         gallery_id: u64,
     ) -> Result<Arc<HitomiGalleryMetadata>, SourceContractError> {
+        self.fetch_metadata_with_cancellation(gallery_id, None)
+    }
+
+    fn fetch_metadata_with_cancellation(
+        &self,
+        gallery_id: u64,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Arc<HitomiGalleryMetadata>, SourceContractError> {
+        if let Some(cancellation) = cancellation {
+            check_cancelled(cancellation)?;
+        }
         if let Some(metadata) = unpoison(self.metadata_cache.lock())
             .get_fresh(&gallery_id, self.config.metadata_cache_ttl)
         {
@@ -148,6 +159,11 @@ impl HitomiLiveAdapter {
                 })
         };
         let _request_guard = unpoison(request_lock.lock());
+        // A shared single-flight wait cannot be interrupted while blocked on
+        // std::sync::Mutex, but cancellation is checked immediately after it.
+        if let Some(cancellation) = cancellation {
+            check_cancelled(cancellation)?;
+        }
         if let Some(metadata) = unpoison(self.metadata_cache.lock())
             .get_fresh(&gallery_id, self.config.metadata_cache_ttl)
         {
@@ -161,8 +177,11 @@ impl HitomiLiveAdapter {
             max_bytes: SCRIPT_RESPONSE_LIMIT,
             range: None,
             priority: HttpPriority::Critical,
-            cancellation: None,
+            cancellation: cancellation.cloned(),
         })?;
+        if let Some(cancellation) = cancellation {
+            check_cancelled(cancellation)?;
+        }
         let script = std::str::from_utf8(&payload.bytes).map_err(|error| {
             SourceContractError::invalid_data("galleryinfo script", error.to_string())
         })?;
@@ -205,6 +224,17 @@ impl HitomiLiveAdapter {
     }
 
     fn fetch_nozomi_path(&self, path: &str) -> Result<Vec<u64>, SourceContractError> {
+        self.fetch_nozomi_path_with_cancellation(path, None)
+    }
+
+    fn fetch_nozomi_path_with_cancellation(
+        &self,
+        path: &str,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<u64>, SourceContractError> {
+        if let Some(cancellation) = cancellation {
+            check_cancelled(cancellation)?;
+        }
         if path.starts_with('/') || path.contains("..") || !path.ends_with(".nozomi") {
             return Err(SourceContractError::validation(
                 "nozomiPath",
@@ -217,13 +247,27 @@ impl HitomiLiveAdapter {
             max_bytes: NOZOMI_RESPONSE_LIMIT,
             range: None,
             priority: HttpPriority::Critical,
-            cancellation: None,
+            cancellation: cancellation.cloned(),
         })?;
+        if let Some(cancellation) = cancellation {
+            check_cancelled(cancellation)?;
+        }
         parse_nozomi_ids(&payload.bytes)
     }
 
     fn fetch_optional_nozomi_path(&self, path: &str) -> Result<Vec<u64>, SourceContractError> {
         match self.fetch_nozomi_path(path) {
+            Err(error) if error.code == SourceErrorCode::NotFound => Ok(Vec::new()),
+            result => result,
+        }
+    }
+
+    fn fetch_optional_nozomi_path_with_cancellation(
+        &self,
+        path: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<u64>, SourceContractError> {
+        match self.fetch_nozomi_path_with_cancellation(path, Some(cancellation)) {
             Err(error) if error.code == SourceErrorCode::NotFound => Ok(Vec::new()),
             result => result,
         }
@@ -341,6 +385,7 @@ impl DownloadSourcePort for HitomiLiveAdapter {
             metadata.groups.first().cloned(),
             source_page_count,
         )
+        .map(|gallery| gallery.with_artists(metadata.artists.clone()))
         .map_err(|error| {
             SourceContractError::invalid_data("gallery metadata", error.to_string())
         })?;

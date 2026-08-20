@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { galleryId, type GalleryId } from "../core/types";
 import type {
   ApiResult,
+  AutoFindHistoryMode,
   AutoFindExclusionResult,
   AutoFindRun,
   AutoFindSnapshot,
@@ -132,11 +133,41 @@ const defaultSettings: SettingsSnapshot = {
   revision: 0,
   downloadRoot: "",
   folderNameTemplate: "[{artist}] {title} [{group}] {id}",
+  autoFindHistoryMode: "include_all_history",
   maxColumns: 3,
   previewWidth: 220,
   cacheLimitGb: 10,
   concurrentImageRequests: 5,
   requestStartIntervalMs: 25,
+};
+
+const BROWSER_SETTINGS_STORAGE_KEY = "atsumi.browser.settings.v1";
+
+const readPersistedBrowserSettings = (): SettingsSnapshot => {
+  if (typeof window === "undefined") return { ...defaultSettings };
+  try {
+    const raw = window.localStorage.getItem(BROWSER_SETTINGS_STORAGE_KEY);
+    if (!raw) return { ...defaultSettings };
+    const parsed = JSON.parse(raw) as Partial<SettingsSnapshot>;
+    return {
+      ...defaultSettings,
+      ...parsed,
+      autoFindHistoryMode: parsed.autoFindHistoryMode === "newer_than_oldest_downloaded"
+        ? "newer_than_oldest_downloaded"
+        : "include_all_history",
+    };
+  } catch {
+    return { ...defaultSettings };
+  }
+};
+
+const persistBrowserSettings = (settings: SettingsSnapshot): void => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(BROWSER_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // Browser storage can be unavailable in private/test contexts; memory parity remains usable.
+  }
 };
 
 const defaultPlacement: WindowPlacementSnapshot = {
@@ -272,7 +303,17 @@ const cloneAutoFindSnapshot = (snapshot: AutoFindSnapshot): AutoFindSnapshot => 
     characters: [...(candidate.characters ?? [])],
     matchedFavorite: { ...candidate.matchedFavorite },
   })),
+  cutoffEvidence: snapshot.cutoffEvidence.map((evidence) => ({ ...evidence })),
+  truncations: snapshot.truncations.map((truncation) => ({ ...truncation })),
 });
+
+const historyModeAllows = (
+  galleryIdValue: GalleryId,
+  evidence: AutoFindSnapshot["cutoffEvidence"][number] | undefined,
+  mode: AutoFindRun["historyMode"],
+): boolean => mode === "include_all_history"
+  || evidence?.oldestOwnedGalleryId === undefined
+  || galleryIdValue > evidence.oldestOwnedGalleryId;
 
 const duplicateProfile: DuplicateSnapshot["profile"] = {
   profileVersion: 1,
@@ -433,7 +474,7 @@ type Handler<K extends keyof BackendEventMap> = (payload: BackendEventMap[K]) =>
 
 class BrowserMockBackend implements BackendClient {
   readonly runtime = "browser-mock" as const;
-  private settings = { ...defaultSettings };
+  private settings = readPersistedBrowserSettings();
   private placement = { ...defaultPlacement };
   private listeners: { [K in keyof BackendEventMap]: Set<Handler<K>> } = {
     "auto-find:changed": new Set(),
@@ -458,7 +499,7 @@ class BrowserMockBackend implements BackendClient {
   private favorites = new Map<string, FavoriteRecord>();
   private searchHistory = new Map<string, SearchHistoryEntry>();
   private nextSearchHistoryId = 1;
-  private autoFind: AutoFindSnapshot = { candidates: [] };
+  private autoFind: AutoFindSnapshot = { candidates: [], cutoffEvidence: [], truncations: [] };
   private autoFindExclusions = new Set<number>();
   private autoFindGeneration = 0;
   private nextAutoFindRunId = 1;
@@ -487,6 +528,9 @@ class BrowserMockBackend implements BackendClient {
     const next = { ...this.settings, ...patch };
     const invalid =
       validateFolderNameTemplate(next.folderNameTemplate) ??
+      (next.autoFindHistoryMode !== "include_all_history" && next.autoFindHistoryMode !== "newer_than_oldest_downloaded"
+        ? validationError("autoFindHistoryMode", "must be a supported history mode")
+        : null) ??
       validateIntegerRange(next.maxColumns, "maxColumns", 1, 4) ??
       validateIntegerRange(next.previewWidth, "previewWidth", 160, 360) ??
       validateIntegerRange(next.cacheLimitGb, "cacheLimitGb", 1, 30) ??
@@ -494,6 +538,7 @@ class BrowserMockBackend implements BackendClient {
       validateIntegerRange(next.requestStartIntervalMs, "requestStartIntervalMs", 0, 5_000);
     if (invalid) return invalid;
     this.settings = { ...next, revision: this.settings.revision + 1 };
+    persistBrowserSettings(this.settings);
     this.emit("settings:changed", { ...this.settings });
     return ok({ ...this.settings });
   }
@@ -613,6 +658,29 @@ class BrowserMockBackend implements BackendClient {
     const artists = [...this.favorites.values()].filter((favorite) => favorite.namespace === "artist");
     const now = new Date().toISOString();
     const generation = ++this.autoFindGeneration;
+    const historyMode = this.settings.autoFindHistoryMode;
+    const completedOwned = [...this.downloadEntries.values()]
+      .filter((entry) => entry.state === "completed" || entry.state === "quarantined");
+    const cutoffEvidence = artists.map((favorite) => {
+      const ownedIds = runSearchFixture({
+        text: `artist:${favorite.value}`,
+        includeTags: [],
+        excludeTags: [],
+        languages: ["korean", "japanese", "chinese", "english"],
+        sort: "recent",
+        pageSize: 200,
+      }).items
+        .filter((gallery) => completedOwned.some((entry) => entry.galleryId === gallery.id))
+        .map((gallery) => gallery.id)
+        .sort((left, right) => left - right);
+      return {
+        artist: favorite.value,
+        ...(ownedIds[0] !== undefined ? { oldestOwnedGalleryId: ownedIds[0] } : {}),
+        qualifiedOwnedCount: ownedIds.length,
+        source: "verified_owned_artifact" as const,
+        policyVersion: 1 as const,
+      };
+    });
     const run: AutoFindRun = {
       runId: `browser-auto-find-${this.nextAutoFindRunId++}`,
       revision: 0,
@@ -622,9 +690,10 @@ class BrowserMockBackend implements BackendClient {
       candidatesFound: 0,
       startedAt: now,
       updatedAt: now,
+      historyMode,
       ...(!artists.length ? { finishedAt: now } : {}),
     };
-    this.autoFind = { run, candidates: [] };
+    this.autoFind = { run, candidates: [], cutoffEvidence, truncations: [] };
     queueMicrotask(() => this.emit("auto-find:changed", cloneAutoFindRun(run)));
 
     artists.forEach((favorite, index) => {
@@ -1578,7 +1647,19 @@ class BrowserMockBackend implements BackendClient {
     const downloaded = new Set([...this.downloadEntries.values()].map((entry) => entry.galleryId));
     const existing = new Set(this.autoFind.candidates.map((candidate) => candidate.id));
     const discoveredAt = new Date().toISOString();
-    const candidates = fixture.items
+    const cutoff = this.autoFind.cutoffEvidence.find((evidence) => evidence.artist === favorite.value);
+    const eligible = fixture.items.filter((gallery) => historyModeAllows(gallery.id, cutoff, current.historyMode));
+    const candidateLimit = 200;
+    const truncation = eligible.length > candidateLimit
+      ? {
+        artist: favorite.value,
+        reason: "candidate_limit_after_cutoff" as const,
+        eligibleCount: eligible.length,
+        limit: candidateLimit,
+      }
+      : null;
+    const candidates = eligible
+      .slice(0, candidateLimit)
       .filter((gallery) => !downloaded.has(gallery.id))
       .filter((gallery) => !this.duplicateHiddenGalleryIds.has(gallery.id))
       .filter((gallery) => !this.autoFindExclusions.has(gallery.id))
@@ -1602,7 +1683,9 @@ class BrowserMockBackend implements BackendClient {
       updatedAt: now,
       ...(completed ? { finishedAt: now } : {}),
     };
-    this.autoFind = { run, candidates: allCandidates };
+    const truncations = this.autoFind.truncations.filter((item) => item.artist !== favorite.value);
+    if (truncation) truncations.push(truncation);
+    this.autoFind = { ...this.autoFind, run, candidates: allCandidates, truncations };
     this.emit("auto-find:changed", cloneAutoFindRun(run));
   }
 

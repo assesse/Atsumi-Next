@@ -6,7 +6,10 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
-    application::{RepositoryError, SearchRepository},
+    application::{
+        AutoFindSource, AutoFindSourceRequest, AutoFindSourceResult, RepositoryError,
+        SearchRepository,
+    },
     domain::{
         GalleryDetail, GalleryId, GalleryPage, GallerySummary, Language, SearchRequest, SearchSort,
         SearchSubmission,
@@ -15,9 +18,12 @@ use crate::{
         hitomi::{HitomiGalleryMetadata, HitomiTagKind},
         SourceContractError, SourceErrorCode,
     },
+    thumbnail::CancellationToken,
 };
 
 use super::{unpoison, HitomiLiveAdapter};
+
+const AUTO_FIND_CANDIDATE_LIMIT: u32 = 50_000;
 
 pub(super) struct QueryCache {
     capacity: usize,
@@ -278,6 +284,92 @@ impl SearchRepository for HitomiLiveAdapter {
             }
         }
         Ok(Some(GalleryDetail { summary, related }))
+    }
+}
+
+impl AutoFindSource for HitomiLiveAdapter {
+    fn auto_find_artist_plan(
+        &self,
+        request: &AutoFindSourceRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<AutoFindSourceResult, RepositoryError> {
+        let artist_path = prefixed_nozomi_path(&format!("artist:{}", request.artist))
+            .ok_or_else(|| SourceContractError::validation("artist", "must not be empty"))?;
+        // Build the complete ID set first. Gallery metadata is deliberately
+        // fetched only after language, artist and history constraints apply.
+        let artist_ids = self
+            .fetch_optional_nozomi_path_with_cancellation(&artist_path, cancellation)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let languages = if request.languages.is_empty() {
+            vec![Language::Korean]
+        } else {
+            request.languages.clone()
+        };
+        let cutoff = request.newer_than_gallery_id.map(|id| id.get() as u64);
+        let mut ids = Vec::new();
+        for language in languages {
+            check_auto_find_cancelled(cancellation)?;
+            let path = format!("n/index-{}.nozomi", language_slug(language));
+            ids.extend(self.fetch_optional_nozomi_path_with_cancellation(&path, cancellation)?);
+        }
+        ids.sort_unstable_by(|left, right| right.cmp(left));
+        let mut seen = HashSet::new();
+        ids.retain(|id| seen.insert(*id));
+        ids.retain(|id| artist_ids.contains(id) && cutoff.is_none_or(|minimum| *id > minimum));
+        ids.dedup();
+        let eligible_count = u32::try_from(ids.len()).unwrap_or(u32::MAX);
+        let bounded_limit = request.candidate_limit.min(AUTO_FIND_CANDIDATE_LIMIT);
+        let limit = usize::try_from(bounded_limit).unwrap_or(usize::MAX);
+        let truncated_reason =
+            (ids.len() > limit).then_some("candidate_limit_after_cutoff".to_owned());
+        ids.truncate(limit);
+
+        Ok(AutoFindSourceResult {
+            candidate_ids: ids
+                .into_iter()
+                .map(|id| {
+                    let id = i64::try_from(id).map_err(|_| {
+                        SourceContractError::invalid_data(
+                            "gallery ID",
+                            "does not fit the application domain",
+                        )
+                    })?;
+                    GalleryId::new(id).map_err(|error| {
+                        SourceContractError::invalid_data("gallery ID", error.to_string())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            eligible_count,
+            limit: bounded_limit,
+            truncated_reason,
+        })
+    }
+
+    fn auto_find_gallery_summary(
+        &self,
+        gallery_id: GalleryId,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<GallerySummary>, RepositoryError> {
+        check_auto_find_cancelled(cancellation)?;
+        let source_id = u64::try_from(gallery_id.get())
+            .map_err(|_| SourceContractError::validation("galleryId", "must be positive"))?;
+        match self.fetch_metadata_with_cancellation(source_id, Some(cancellation)) {
+            Ok(metadata) => {
+                check_auto_find_cancelled(cancellation)?;
+                Ok(Some(gallery_summary(&metadata, SearchSort::Recent, 0)?))
+            }
+            Err(error) if error.code == SourceErrorCode::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+fn check_auto_find_cancelled(cancellation: &CancellationToken) -> Result<(), SourceContractError> {
+    if cancellation.is_cancelled() {
+        Err(SourceContractError::cancelled())
+    } else {
+        Ok(())
     }
 }
 

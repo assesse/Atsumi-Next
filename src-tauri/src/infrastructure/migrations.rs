@@ -1171,6 +1171,68 @@ pub const MIGRATIONS: &[Migration] = &[
             END;
         "#,
     },
+    Migration {
+        version: 17,
+        name: "auto_find_history_cutoff_evidence",
+        sql: r#"
+            ALTER TABLE settings
+            ADD COLUMN auto_find_history_mode TEXT NOT NULL
+                DEFAULT 'include_all_history'
+                CHECK (auto_find_history_mode IN (
+                    'include_all_history', 'newer_than_oldest_downloaded'
+                ));
+
+            ALTER TABLE auto_find_runs
+            ADD COLUMN history_mode TEXT NOT NULL
+                DEFAULT 'include_all_history'
+                CHECK (history_mode IN (
+                    'include_all_history', 'newer_than_oldest_downloaded'
+                ));
+
+            CREATE TABLE owned_gallery_artists (
+                gallery_id INTEGER NOT NULL CHECK (gallery_id > 0),
+                artist TEXT NOT NULL COLLATE NOCASE
+                    CHECK (length(trim(artist)) BETWEEN 1 AND 200),
+                PRIMARY KEY (gallery_id, artist)
+            ) STRICT;
+            CREATE INDEX owned_gallery_artists_artist_idx
+                ON owned_gallery_artists(artist, gallery_id);
+
+            -- Legacy records only retained a primary artist. Keeping that
+            -- conservative backfill means unknown co-artists get no cutoff.
+            INSERT OR IGNORE INTO owned_gallery_artists (gallery_id, artist)
+            SELECT DISTINCT gallery.gallery_id, trim(gallery.primary_artist)
+            FROM galleries gallery
+            JOIN download_entries entry ON entry.gallery_id = gallery.gallery_id
+            JOIN download_artifacts artifact ON artifact.entry_id = entry.entry_id
+            WHERE gallery.primary_artist IS NOT NULL
+              AND length(trim(gallery.primary_artist)) > 0
+              AND entry.state IN ('completed', 'quarantined')
+              AND artifact.state IN ('complete', 'quarantined');
+
+            CREATE TABLE auto_find_run_cutoffs (
+                run_id TEXT NOT NULL REFERENCES auto_find_runs(run_id) ON DELETE CASCADE,
+                artist TEXT NOT NULL COLLATE NOCASE
+                    CHECK (length(trim(artist)) BETWEEN 1 AND 200),
+                oldest_owned_gallery_id INTEGER CHECK (oldest_owned_gallery_id > 0),
+                qualified_owned_count INTEGER NOT NULL CHECK (qualified_owned_count >= 0),
+                cutoff_source TEXT NOT NULL
+                    CHECK (cutoff_source = 'verified_owned_artifact'),
+                policy_version INTEGER NOT NULL CHECK (policy_version = 1),
+                PRIMARY KEY (run_id, artist)
+            ) STRICT;
+
+            CREATE TABLE auto_find_run_truncations (
+                run_id TEXT NOT NULL REFERENCES auto_find_runs(run_id) ON DELETE CASCADE,
+                artist TEXT NOT NULL COLLATE NOCASE
+                    CHECK (length(trim(artist)) BETWEEN 1 AND 200),
+                reason TEXT NOT NULL CHECK (reason = 'candidate_limit_after_cutoff'),
+                eligible_count INTEGER NOT NULL CHECK (eligible_count >= 0),
+                candidate_limit INTEGER NOT NULL CHECK (candidate_limit > 0),
+                PRIMARY KEY (run_id, artist)
+            ) STRICT;
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1456,7 +1518,7 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v14 to v15");
-        assert_eq!(report.applied_versions, vec![15, 16]);
+        assert_eq!(report.applied_versions, vec![15, 16, 17]);
         let template: String = connection
             .query_row("SELECT folder_name_template FROM settings", [], |row| {
                 row.get(0)
@@ -1534,8 +1596,8 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
-        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16]);
-        assert_eq!(report.current_version, 16);
+        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16, 17]);
+        assert_eq!(report.current_version, 17);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",

@@ -6,6 +6,7 @@ const fallback: SettingsSnapshot = {
   revision: 0,
   downloadRoot: "",
   folderNameTemplate: "[{artist}] {title} [{group}] {id}",
+  autoFindHistoryMode: "include_all_history",
   maxColumns: 3,
   previewWidth: 220,
   cacheLimitGb: 10,

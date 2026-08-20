@@ -228,7 +228,7 @@ describe("browser backend favorites and automation contract", () => {
       if (seededDownload.ok) seededDownloadEntryId = seededDownload.data[0]?.entryId;
 
       const started = await backend.autoFindRefresh();
-      expect(started).toMatchObject({ ok: true, data: { state: "running", totalFavorites: 2 } });
+      expect(started).toMatchObject({ ok: true, data: { state: "running", totalFavorites: 2, historyMode: "include_all_history" } });
       await vi.advanceTimersByTimeAsync(60);
       const partial = await backend.autoFindSnapshot();
       expect(partial).toMatchObject({

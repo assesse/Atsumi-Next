@@ -25,7 +25,8 @@ pub use duplicate_supervisor::{DisabledDuplicateRelationProvider, DuplicateSuper
 pub use error::{ApplicationError, RepositoryError};
 pub use internal_duplicate_supervisor::InternalDuplicateSupervisor;
 pub use ports::{
-    ArtifactRepository, AutomationRepository, ClassicArtifactCopy, ClassicImportRepository,
+    ArtifactRepository, AutoFindSource, AutoFindSourceRequest, AutoFindSourceResult,
+    AutomationRepository, ClassicArtifactCopy, ClassicImportRepository,
     ClassicImportTransitionOutcome, DownloadMutationOutcome, DownloadQueueAddOutcome,
     DownloadQueueRecord, DownloadRepository, DuplicateRelationProvider, DuplicateRepository,
     InternalDuplicateRepository, InternalPlanPrepareOutcome, SearchRepository, StateRepository,

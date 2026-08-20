@@ -697,6 +697,14 @@ fn apply_artifact(
             ],
         )
         .map_err(map_sqlite_error)?;
+    for artist in &bundle.gallery.metadata.artists {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO owned_gallery_artists (gallery_id, artist) VALUES (?1, ?2)",
+                params![gallery_id, artist],
+            )
+            .map_err(map_sqlite_error)?;
+    }
     transaction
         .execute(
             r#"

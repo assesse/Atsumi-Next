@@ -75,6 +75,7 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
     const success = await onSave({
       downloadRoot: draft.downloadRoot,
       folderNameTemplate: draft.folderNameTemplate,
+      autoFindHistoryMode: draft.autoFindHistoryMode,
       maxColumns: draft.maxColumns,
       previewWidth: draft.previewWidth,
       cacheLimitGb: draft.cacheLimitGb,
@@ -161,6 +162,21 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                       기본값 복원
                     </button>
                   </div>
+                </div>
+                <div className="setting-row">
+                  <div>
+                    <strong>Auto Find 기록 기준</strong>
+                    <span>변경한 기준은 다음 Auto Find 실행부터 적용됩니다.</span>
+                    <span>최신 기준은 검증 완료·격리된 소유 작품의 gallery ID 이후만 후보로 봅니다.</span>
+                  </div>
+                  <select
+                    aria-label="Auto Find 기록 기준"
+                    value={draft.autoFindHistoryMode}
+                    onChange={(event) => patch("autoFindHistoryMode", event.target.value as SettingsSnapshot["autoFindHistoryMode"])}
+                  >
+                    <option value="include_all_history">전체 기록 포함</option>
+                    <option value="newer_than_oldest_downloaded">가장 오래된 소유 작품 이후</option>
+                  </select>
                 </div>
                 <div className="setting-row">
                   <div><strong>앨범 카드 최대 열 수</strong><span>창이 넓어도 설정한 열 수를 넘지 않습니다</span></div>

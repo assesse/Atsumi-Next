@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::{GalleryId, GallerySummary, Language, SearchSort, ValidationError};
+use super::{
+    AutoFindHistoryMode, GalleryId, GallerySummary, Language, SearchSort, ValidationError,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,6 +160,7 @@ pub struct AutoFindRun {
     pub total_favorites: u32,
     pub completed_favorites: u32,
     pub candidates_found: u32,
+    pub history_mode: AutoFindHistoryMode,
     pub started_at: String,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -166,6 +169,26 @@ pub struct AutoFindRun {
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoFindCutoffEvidence {
+    pub artist: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_owned_gallery_id: Option<GalleryId>,
+    pub qualified_owned_count: u32,
+    pub source: String,
+    pub policy_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoFindTruncation {
+    pub artist: String,
+    pub reason: String,
+    pub eligible_count: u32,
+    pub limit: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -184,6 +207,8 @@ pub struct AutoFindSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<AutoFindRun>,
     pub candidates: Vec<AutoFindCandidate>,
+    pub cutoff_evidence: Vec<AutoFindCutoffEvidence>,
+    pub truncations: Vec<AutoFindTruncation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

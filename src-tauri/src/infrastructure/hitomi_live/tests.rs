@@ -8,7 +8,10 @@ use std::{
 use reqwest::Url;
 
 use crate::{
-    application::{ArtifactStore, DownloadSourcePort, ExistingPageVerification, SearchRepository},
+    application::{
+        ArtifactStore, AutoFindSource, AutoFindSourceRequest, DownloadSourcePort,
+        ExistingPageVerification, SearchRepository,
+    },
     domain::{ArtifactRelativePath, GalleryId, Language, SearchRequest, SearchSort},
     infrastructure::FilesystemArtifactStore,
     source::{
@@ -149,6 +152,69 @@ fn structured_tag_paths_preserve_hitomi_gender_namespace() {
         prefixed_nozomi_path("character:mira_lane").as_deref(),
         Some("n/character/mira%20lane-all.nozomi")
     );
+}
+
+#[test]
+fn auto_find_filters_nozomi_ids_before_metadata_and_reports_the_bounded_plan() {
+    let transport = Arc::new(FakeTransport::default());
+    let origin = HITOMI_METADATA_ORIGIN;
+    transport.respond(
+        format!("{origin}/n/artist/serein-all.nozomi"),
+        "application/x-nozomi",
+        nozomi(&[90, 200, 300, 400]),
+    );
+    transport.respond(
+        format!("{origin}/n/index-english.nozomi"),
+        "application/x-nozomi",
+        nozomi(&[90, 200, 300]),
+    );
+    let selected_url = galleryinfo_script_url(300).unwrap();
+    transport.respond(
+        selected_url.clone(),
+        "text/javascript",
+        gallery_script(300, "Newest", "[]").into_bytes(),
+    );
+    let adapter = HitomiLiveAdapter::with_transport(
+        HitomiLiveConfig {
+            request_start_interval: Duration::ZERO,
+            ..HitomiLiveConfig::default()
+        },
+        transport.clone(),
+    );
+    let cancellation = CancellationToken::new();
+    let plan = adapter
+        .auto_find_artist_plan(
+            &AutoFindSourceRequest {
+                artist: "serein".into(),
+                languages: vec![Language::English],
+                newer_than_gallery_id: Some(GalleryId::new(100).unwrap()),
+                candidate_limit: 1,
+            },
+            &cancellation,
+        )
+        .unwrap();
+
+    assert_eq!(plan.candidate_ids, vec![GalleryId::new(300).unwrap()]);
+    assert_eq!(plan.eligible_count, 2);
+    assert_eq!(
+        plan.truncated_reason.as_deref(),
+        Some("candidate_limit_after_cutoff")
+    );
+    assert_eq!(
+        transport.call_count(&selected_url),
+        0,
+        "plan must not fetch metadata"
+    );
+    assert_eq!(
+        adapter
+            .auto_find_gallery_summary(GalleryId::new(300).unwrap(), &cancellation)
+            .unwrap()
+            .unwrap()
+            .id
+            .get(),
+        300
+    );
+    assert_eq!(transport.call_count(&selected_url), 1);
 }
 
 #[test]

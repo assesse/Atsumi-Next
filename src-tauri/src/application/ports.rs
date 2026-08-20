@@ -1,9 +1,10 @@
 use crate::domain::{
-    ArtifactBundle, AutoFindCandidateRecord, AutoFindExclusionResult, AutoFindRun,
-    AutoFindRunState, AutoFindSnapshot, DownloadEntry, DownloadEntryId, DownloadJobDescriptor,
-    DownloadJobProjection, DownloadListRequest, DownloadPage, DuplicateCandidateRecord,
-    DuplicateDecisionApplyOutcome, DuplicateDecisionRequest, DuplicatePageHash, DuplicateReview,
-    DuplicateScanRun, DuplicateScanState, DuplicateSnapshot, ExternalRelationEvidence, FavoriteKey,
+    ArtifactBundle, AutoFindCandidateRecord, AutoFindCutoffEvidence, AutoFindExclusionResult,
+    AutoFindHistoryMode, AutoFindRun, AutoFindRunState, AutoFindSnapshot, AutoFindTruncation,
+    DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
+    DownloadListRequest, DownloadPage, DuplicateCandidateRecord, DuplicateDecisionApplyOutcome,
+    DuplicateDecisionRequest, DuplicatePageHash, DuplicateReview, DuplicateScanRun,
+    DuplicateScanState, DuplicateSnapshot, ExternalRelationEvidence, FavoriteKey,
     FavoriteMutationResult, FavoriteRecord, FixtureDownloadJobStep, GalleryDetail, GalleryId,
     GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot, InternalGroupRecord,
     InternalRemovalPlan, InternalRemovalSelection, InternalScanRun, InternalScanState, JobRef,
@@ -78,6 +79,39 @@ pub trait SearchRepository: Send + Sync {
     ) -> Result<Option<GalleryDetail>, RepositoryError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoFindSourceRequest {
+    pub artist: String,
+    pub languages: Vec<crate::domain::Language>,
+    pub newer_than_gallery_id: Option<crate::domain::GalleryId>,
+    pub candidate_limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoFindSourceResult {
+    pub candidate_ids: Vec<crate::domain::GalleryId>,
+    pub eligible_count: u32,
+    pub limit: u32,
+    pub truncated_reason: Option<String>,
+}
+
+/// Source-specific artist discovery. This intentionally bypasses the user
+/// search cap so Auto Find can apply its persisted history cutoff before any
+/// gallery metadata is fetched.
+pub trait AutoFindSource: Send + Sync {
+    fn auto_find_artist_plan(
+        &self,
+        request: &AutoFindSourceRequest,
+        cancellation: &crate::thumbnail::CancellationToken,
+    ) -> Result<AutoFindSourceResult, RepositoryError>;
+
+    fn auto_find_gallery_summary(
+        &self,
+        gallery_id: crate::domain::GalleryId,
+        cancellation: &crate::thumbnail::CancellationToken,
+    ) -> Result<Option<crate::domain::GallerySummary>, RepositoryError>;
+}
+
 pub trait AutomationRepository: Send + Sync {
     fn favorites_list(&self) -> Result<Vec<FavoriteRecord>, RepositoryError>;
 
@@ -96,7 +130,23 @@ pub trait AutomationRepository: Send + Sync {
 
     fn auto_find_recover_interrupted(&self) -> Result<usize, RepositoryError>;
 
-    fn auto_find_start(&self, total_favorites: u32) -> Result<AutoFindRun, RepositoryError>;
+    fn auto_find_owned_cutoffs(
+        &self,
+        artists: &[String],
+    ) -> Result<Vec<AutoFindCutoffEvidence>, RepositoryError>;
+
+    fn auto_find_start(
+        &self,
+        total_favorites: u32,
+        history_mode: AutoFindHistoryMode,
+        cutoff_evidence: &[AutoFindCutoffEvidence],
+    ) -> Result<AutoFindRun, RepositoryError>;
+
+    fn auto_find_truncation_add(
+        &self,
+        run_id: &str,
+        truncation: &AutoFindTruncation,
+    ) -> Result<(), RepositoryError>;
 
     fn auto_find_candidate_add(
         &self,

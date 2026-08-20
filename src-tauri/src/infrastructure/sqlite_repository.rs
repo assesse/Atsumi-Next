@@ -21,8 +21,9 @@ use crate::{
     },
     domain::{
         ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
-        ArtifactStorageFormat, AutoFindCandidate, AutoFindCandidateRecord, AutoFindExclusionResult,
-        AutoFindRun, AutoFindRunState, AutoFindSnapshot, DownloadArtifact, DownloadArtifactState,
+        ArtifactStorageFormat, AutoFindCandidate, AutoFindCandidateRecord, AutoFindCutoffEvidence,
+        AutoFindExclusionResult, AutoFindHistoryMode, AutoFindRun, AutoFindRunState,
+        AutoFindSnapshot, AutoFindTruncation, DownloadArtifact, DownloadArtifactState,
         DownloadChangedEvent, DownloadEntry, DownloadEntryId, DownloadJobDescriptor,
         DownloadJobProjection, DownloadListRequest, DownloadPage, DownloadReviewKind,
         DuplicateCandidate, DuplicateCandidateRecord, DuplicateDecisionAction,
@@ -257,8 +258,9 @@ impl StateRepository for SqliteRepository {
                         preview_width = ?5,
                         cache_limit_gb = ?6,
                         concurrent_image_requests = ?7,
-                        request_start_interval_ms = ?8
-                    WHERE singleton = 1 AND revision = ?9
+                        request_start_interval_ms = ?8,
+                        auto_find_history_mode = ?9
+                    WHERE singleton = 1 AND revision = ?10
                 "#,
                 params![
                     to_sql_integer(next.revision, "settings revision")?,
@@ -269,6 +271,7 @@ impl StateRepository for SqliteRepository {
                     i64::from(next.cache_limit_gb),
                     i64::from(next.concurrent_image_requests),
                     to_sql_integer(next.request_start_interval_ms, "request start interval")?,
+                    next.auto_find_history_mode.as_str(),
                     to_sql_integer(expected_revision, "expected settings revision")?,
                 ],
             )
@@ -453,7 +456,23 @@ impl AutomationRepository for SqliteRepository {
             .map_err(map_sqlite_error)
     }
 
-    fn auto_find_start(&self, total_favorites: u32) -> Result<AutoFindRun, RepositoryError> {
+    fn auto_find_owned_cutoffs(
+        &self,
+        artists: &[String],
+    ) -> Result<Vec<AutoFindCutoffEvidence>, RepositoryError> {
+        let connection = self.connection()?;
+        artists
+            .iter()
+            .map(|artist| read_auto_find_owned_cutoff(&connection, artist))
+            .collect()
+    }
+
+    fn auto_find_start(
+        &self,
+        total_favorites: u32,
+        history_mode: AutoFindHistoryMode,
+        cutoff_evidence: &[AutoFindCutoffEvidence],
+    ) -> Result<AutoFindRun, RepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -468,22 +487,41 @@ impl AutomationRepository for SqliteRepository {
                 r#"
                     INSERT INTO auto_find_runs (
                         run_id, revision, state, total_favorites,
-                        completed_favorites, candidates_found,
+                        completed_favorites, candidates_found, history_mode,
                         started_at, updated_at
                     ) VALUES (
-                        ?1, 0, 'running', ?2, 0, 0,
+                        ?1, 0, 'running', ?2, 0, 0, ?3,
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                     )
                 "#,
-                params![run_id, i64::from(total_favorites)],
+                params![run_id, i64::from(total_favorites), history_mode.as_str()],
             )
             .map_err(map_sqlite_error)?;
+        for cutoff in cutoff_evidence {
+            transaction.execute(
+                "INSERT INTO auto_find_run_cutoffs (run_id, artist, oldest_owned_gallery_id, qualified_owned_count, cutoff_source, policy_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![run_id, cutoff.artist, cutoff.oldest_owned_gallery_id.map(GalleryId::get), i64::from(cutoff.qualified_owned_count), cutoff.source, i64::from(cutoff.policy_version)],
+            ).map_err(map_sqlite_error)?;
+        }
         let run = read_auto_find_run(&transaction, &run_id)?.ok_or_else(|| {
             RepositoryError::Corrupt("Auto Find start did not produce a run".into())
         })?;
         transaction.commit().map_err(map_sqlite_error)?;
         Ok(run)
+    }
+
+    fn auto_find_truncation_add(
+        &self,
+        run_id: &str,
+        truncation: &AutoFindTruncation,
+    ) -> Result<(), RepositoryError> {
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO auto_find_run_truncations (run_id, artist, reason, eligible_count, candidate_limit) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![run_id, truncation.artist, truncation.reason, i64::from(truncation.eligible_count), i64::from(truncation.limit)],
+        ).map_err(map_sqlite_error)?;
+        Ok(())
     }
 
     fn auto_find_candidate_add(
@@ -1412,6 +1450,21 @@ impl ArtifactRepository for SqliteRepository {
             )
             .map_err(map_sqlite_error)?;
 
+        transaction
+            .execute(
+                "DELETE FROM owned_gallery_artists WHERE gallery_id = ?1",
+                [bundle.gallery.id.get()],
+            )
+            .map_err(map_sqlite_error)?;
+        for artist in &bundle.gallery.metadata.artists {
+            transaction
+                .execute(
+                    "INSERT INTO owned_gallery_artists (gallery_id, artist) VALUES (?1, ?2)",
+                    params![bundle.gallery.id.get(), artist],
+                )
+                .map_err(map_sqlite_error)?;
+        }
+
         let entry_gallery_id = transaction
             .query_row(
                 "SELECT gallery_id FROM download_entries WHERE entry_id = ?1",
@@ -1569,12 +1622,14 @@ impl ArtifactRepository for SqliteRepository {
         };
 
         let gallery_id = GalleryId::new(stored.gallery_id).map_err(domain_corruption)?;
+        let artists = read_owned_gallery_artists(&connection, gallery_id)?;
         let metadata = GalleryMetadata::new(
             stored.title,
             stored.primary_artist,
             stored.primary_group,
             stored_u32(stored.source_page_count, "gallery source page count")?,
         )
+        .map(|metadata| metadata.with_artists(artists))
         .map_err(domain_corruption)?;
         let gallery = Gallery::new(
             gallery_id,
@@ -5304,7 +5359,7 @@ fn read_running_auto_find(connection: &Connection) -> Result<Option<AutoFindRun>
         .query_row(
             r#"
                 SELECT run_id, revision, state, total_favorites,
-                       completed_favorites, candidates_found,
+                       completed_favorites, candidates_found, history_mode,
                        started_at, updated_at, finished_at,
                        error_code, error_message
                 FROM auto_find_runs
@@ -5328,7 +5383,7 @@ fn read_auto_find_run(
         .query_row(
             r#"
                 SELECT run_id, revision, state, total_favorites,
-                       completed_favorites, candidates_found,
+                       completed_favorites, candidates_found, history_mode,
                        started_at, updated_at, finished_at,
                        error_code, error_message
                 FROM auto_find_runs
@@ -5350,6 +5405,7 @@ struct StoredAutoFindRun {
     total_favorites: i64,
     completed_favorites: i64,
     candidates_found: i64,
+    history_mode: String,
     started_at: String,
     updated_at: String,
     finished_at: Option<String>,
@@ -5371,6 +5427,14 @@ impl StoredAutoFindRun {
                 "Auto Find completed favorite count",
             )?,
             candidates_found: stored_u32(self.candidates_found, "Auto Find candidate count")?,
+            history_mode: AutoFindHistoryMode::from_database(&self.history_mode).ok_or_else(
+                || {
+                    RepositoryError::Corrupt(format!(
+                        "Auto Find history mode {:?} is unsupported",
+                        self.history_mode
+                    ))
+                },
+            )?,
             started_at: self.started_at,
             updated_at: self.updated_at,
             finished_at: self.finished_at,
@@ -5388,11 +5452,12 @@ fn stored_auto_find_run(row: &Row<'_>) -> rusqlite::Result<StoredAutoFindRun> {
         total_favorites: row.get(3)?,
         completed_favorites: row.get(4)?,
         candidates_found: row.get(5)?,
-        started_at: row.get(6)?,
-        updated_at: row.get(7)?,
-        finished_at: row.get(8)?,
-        error_code: row.get(9)?,
-        error_message: row.get(10)?,
+        history_mode: row.get(6)?,
+        started_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        finished_at: row.get(9)?,
+        error_code: row.get(10)?,
+        error_message: row.get(11)?,
     })
 }
 
@@ -5401,7 +5466,7 @@ fn read_auto_find_snapshot(connection: &Connection) -> Result<AutoFindSnapshot, 
         .query_row(
             r#"
                 SELECT run_id, revision, state, total_favorites,
-                       completed_favorites, candidates_found,
+                       completed_favorites, candidates_found, history_mode,
                        started_at, updated_at, finished_at,
                        error_code, error_message
                 FROM auto_find_runs
@@ -5419,6 +5484,8 @@ fn read_auto_find_snapshot(connection: &Connection) -> Result<AutoFindSnapshot, 
         return Ok(AutoFindSnapshot {
             run: None,
             candidates: Vec::new(),
+            cutoff_evidence: Vec::new(),
+            truncations: Vec::new(),
         });
     };
     let mut statement = connection
@@ -5464,10 +5531,151 @@ fn read_auto_find_snapshot(connection: &Connection) -> Result<AutoFindSnapshot, 
     let candidates = rows
         .map(|row| row.map_err(map_sqlite_error)?.try_into_domain())
         .collect::<Result<Vec<_>, _>>()?;
+    let cutoff_evidence = read_auto_find_cutoff_evidence(connection, &run.run_id)?;
+    let truncations = read_auto_find_truncations(connection, &run.run_id)?;
     Ok(AutoFindSnapshot {
         run: Some(run),
         candidates,
+        cutoff_evidence,
+        truncations,
     })
+}
+
+fn read_auto_find_owned_cutoff(
+    connection: &Connection,
+    artist: &str,
+) -> Result<AutoFindCutoffEvidence, RepositoryError> {
+    let (oldest, count): (Option<i64>, i64) = connection
+        .query_row(
+            r#"
+            SELECT MIN(owned.gallery_id), COUNT(DISTINCT owned.gallery_id)
+            FROM owned_gallery_artists owned
+            JOIN download_entries entry ON entry.gallery_id = owned.gallery_id
+            JOIN download_artifacts artifact
+              ON artifact.entry_id = entry.entry_id AND artifact.gallery_id = entry.gallery_id
+            WHERE owned.artist = ?1
+              AND entry.state IN ('completed', 'quarantined')
+              AND artifact.state IN ('complete', 'quarantined')
+              AND artifact.manifest_relative_path IS NOT NULL
+              AND artifact.manifest_schema_version IS NOT NULL
+              AND artifact.writer_version IS NOT NULL
+              AND artifact.completed_at IS NOT NULL
+              AND (SELECT COUNT(*) FROM download_pages page
+                   WHERE page.entry_id = artifact.entry_id) = artifact.expected_page_count
+              AND EXISTS (
+                  SELECT 1 FROM download_pages page
+                  WHERE page.entry_id = artifact.entry_id
+                    AND page.excluded = 0
+                    AND page.state IN ('present', 'quarantined')
+                    AND page.byte_length IS NOT NULL AND page.sha256 IS NOT NULL
+                    AND page.storage_format IS NOT NULL AND page.source_revision IS NOT NULL
+                    AND page.verified_at IS NOT NULL
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM download_pages page
+                  WHERE page.entry_id = artifact.entry_id
+                    AND page.excluded = 0
+                    AND (page.state NOT IN ('present', 'quarantined')
+                         OR page.byte_length IS NULL OR page.sha256 IS NULL
+                         OR page.storage_format IS NULL OR page.source_revision IS NULL
+                         OR page.verified_at IS NULL)
+              )
+        "#,
+            [artist],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(map_sqlite_error)?;
+    Ok(AutoFindCutoffEvidence {
+        artist: artist.to_owned(),
+        oldest_owned_gallery_id: oldest
+            .map(GalleryId::new)
+            .transpose()
+            .map_err(domain_corruption)?,
+        qualified_owned_count: stored_u32(count, "Auto Find qualified ownership count")?,
+        source: "verified_owned_artifact".into(),
+        policy_version: 1,
+    })
+}
+
+fn read_owned_gallery_artists(
+    connection: &Connection,
+    gallery_id: GalleryId,
+) -> Result<Vec<String>, RepositoryError> {
+    let mut statement = connection
+        .prepare("SELECT artist FROM owned_gallery_artists WHERE gallery_id = ?1 ORDER BY artist COLLATE NOCASE ASC")
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([gallery_id.get()], |row| row.get::<_, String>(0))
+        .map_err(map_sqlite_error)?;
+    rows.map(|row| row.map_err(map_sqlite_error)).collect()
+}
+
+fn read_auto_find_cutoff_evidence(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Vec<AutoFindCutoffEvidence>, RepositoryError> {
+    let mut statement = connection.prepare(
+        "SELECT artist, oldest_owned_gallery_id, qualified_owned_count, cutoff_source, policy_version FROM auto_find_run_cutoffs WHERE run_id = ?1 ORDER BY artist COLLATE NOCASE ASC",
+    ).map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(map_sqlite_error)?;
+    rows.map(|row| {
+        let (artist, oldest, count, source, policy_version) = row.map_err(map_sqlite_error)?;
+        if source != "verified_owned_artifact" {
+            return Err(RepositoryError::Corrupt(format!(
+                "Auto Find cutoff source {source:?} is unsupported"
+            )));
+        }
+        Ok(AutoFindCutoffEvidence {
+            artist,
+            oldest_owned_gallery_id: oldest
+                .map(GalleryId::new)
+                .transpose()
+                .map_err(domain_corruption)?,
+            qualified_owned_count: stored_u32(count, "Auto Find qualified ownership count")?,
+            source,
+            policy_version: stored_u32(policy_version, "Auto Find cutoff policy version")?,
+        })
+    })
+    .collect()
+}
+
+fn read_auto_find_truncations(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Vec<AutoFindTruncation>, RepositoryError> {
+    let mut statement = connection.prepare(
+        "SELECT artist, reason, eligible_count, candidate_limit FROM auto_find_run_truncations WHERE run_id = ?1 ORDER BY artist COLLATE NOCASE ASC",
+    ).map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(map_sqlite_error)?;
+    rows.map(|row| {
+        let (artist, reason, eligible, limit) = row.map_err(map_sqlite_error)?;
+        Ok(AutoFindTruncation {
+            artist,
+            reason,
+            eligible_count: stored_u32(eligible, "Auto Find eligible candidate count")?,
+            limit: stored_u32(limit, "Auto Find candidate limit")?,
+        })
+    })
+    .collect()
 }
 
 struct StoredAutoFindCandidate {
@@ -5561,7 +5769,7 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
             r#"
                 SELECT revision, download_root, folder_name_template, max_columns, preview_width,
                        cache_limit_gb, concurrent_image_requests,
-                       request_start_interval_ms
+                       request_start_interval_ms, auto_find_history_mode
                 FROM settings
                 WHERE singleton = 1
             "#,
@@ -5576,6 +5784,7 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             },
         )
@@ -5590,6 +5799,12 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
         cache_limit_gb: stored_u32(values.5, "cache limit")?,
         concurrent_image_requests: stored_u32(values.6, "concurrent image requests")?,
         request_start_interval_ms: stored_u64(values.7, "request start interval")?,
+        auto_find_history_mode: AutoFindHistoryMode::from_database(&values.8).ok_or_else(|| {
+            RepositoryError::Corrupt(format!(
+                "Auto Find history mode {:?} is unsupported",
+                values.8
+            ))
+        })?,
     })
 }
 
@@ -6182,7 +6397,9 @@ mod duplicate_repository_tests {
     #[test]
     fn auto_find_add_and_snapshot_exclude_duplicate_visibility_state() {
         let repository = SqliteRepository::open_in_memory().expect("open repository");
-        let run = repository.auto_find_start(1).unwrap();
+        let run = repository
+            .auto_find_start(1, AutoFindHistoryMode::IncludeAllHistory, &[])
+            .unwrap();
         {
             let connection = repository.connection().unwrap();
             connection
@@ -6224,6 +6441,66 @@ mod duplicate_repository_tests {
             .unwrap()
             .candidates
             .is_empty());
+    }
+
+    #[test]
+    fn auto_find_cutoff_requires_a_complete_verified_owned_artifact() {
+        let repository = SqliteRepository::open_in_memory().expect("open repository");
+        let seed = |gallery_id: i64,
+                    entry_state: &str,
+                    artifact_state: &str,
+                    expected: i64,
+                    page_count: i64,
+                    excluded: bool| {
+            let connection = repository.connection().expect("lock repository");
+            connection.execute(
+                "INSERT INTO galleries (gallery_id, revision, title, primary_artist, source_page_count) VALUES (?1, 0, ?2, 'serein', ?3)",
+                params![gallery_id, format!("Gallery {gallery_id}"), expected],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO download_entries (entry_id, gallery_id, revision, state, progress, created_at, updated_at) VALUES (?1, ?2, 0, ?3, 100.0, 'now', 'now')",
+                params![format!("entry-{gallery_id}"), gallery_id, entry_state],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO download_artifacts (entry_id, gallery_id, revision, relative_directory, expected_page_count, state, manifest_relative_path, manifest_schema_version, writer_version, hash_profile_version, completed_at) VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, 1, 'test', 1, 'now')",
+                params![format!("entry-{gallery_id}"), gallery_id, format!("gallery-{gallery_id}"), expected, artifact_state, format!("gallery-{gallery_id}/manifest.json")],
+            ).unwrap();
+            for page in 1..=page_count {
+                connection.execute(
+                    "INSERT INTO download_pages (entry_id, gallery_id, source_page_number, relative_path, state, byte_length, sha256, storage_format, source_revision, verified_at, excluded) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'webp', 'source', 'now', ?7)",
+                    params![format!("entry-{gallery_id}"), gallery_id, page, format!("{page}.webp"), if artifact_state == "quarantined" { "quarantined" } else { "present" }, "a".repeat(64), excluded],
+                ).unwrap();
+            }
+            connection
+                .execute(
+                    "INSERT INTO owned_gallery_artists (gallery_id, artist) VALUES (?1, 'serein')",
+                    [gallery_id],
+                )
+                .unwrap();
+        };
+
+        seed(100, "completed", "complete", 2, 1, false); // missing required page
+        seed(150, "completed", "complete", 1, 1, true); // all-excluded is not owned evidence
+        seed(200, "quarantined", "quarantined", 1, 1, false); // recoverable ownership counts
+        seed(50, "failed", "complete", 1, 1, false); // failed work is not owned
+        repository.connection().unwrap().execute(
+            "INSERT INTO duplicate_hidden_galleries (gallery_id, decision_id, created_at) VALUES (200, 'hidden-200', 'now')",
+            [],
+        ).unwrap();
+
+        let cutoffs = repository
+            .auto_find_owned_cutoffs(&["serein".into()])
+            .unwrap();
+        assert_eq!(
+            cutoffs,
+            vec![AutoFindCutoffEvidence {
+                artist: "serein".into(),
+                oldest_owned_gallery_id: Some(GalleryId::new(200).unwrap()),
+                qualified_owned_count: 1,
+                source: "verified_owned_artifact".into(),
+                policy_version: 1,
+            }]
+        );
     }
 
     #[test]

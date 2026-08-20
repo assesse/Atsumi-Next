@@ -1,20 +1,23 @@
 use std::{
+    collections::BTreeMap,
     sync::{mpsc::Sender, Arc, Mutex},
     thread::{self, JoinHandle},
 };
 
 use crate::{
     domain::{
-        AutoFindCandidateRecord, AutoFindRun, AutoFindRunState, FavoriteNamespace, Language,
-        SearchRequest, SearchSort,
+        AutoFindCandidateRecord, AutoFindCutoffEvidence, AutoFindHistoryMode, AutoFindRun,
+        AutoFindRunState, FavoriteNamespace, Language,
     },
     thumbnail::CancellationToken,
 };
 
-use super::{ApplicationError, AutomationRepository, RepositoryError, SearchRepository};
+use super::{
+    ApplicationError, AutoFindSource, AutoFindSourceRequest, AutomationRepository, RepositoryError,
+    StateRepository,
+};
 
-const AUTO_FIND_PAGE_SIZE: u32 = 200;
-const AUTO_FIND_MAX_PAGES_PER_FAVORITE: u32 = 250;
+const AUTO_FIND_CANDIDATE_LIMIT: u32 = 50_000;
 
 #[derive(Clone)]
 pub struct AutoFindSupervisor {
@@ -23,7 +26,8 @@ pub struct AutoFindSupervisor {
 
 struct AutoFindSupervisorInner {
     repository: Arc<dyn AutomationRepository>,
-    search: Arc<dyn SearchRepository>,
+    settings: Arc<dyn StateRepository>,
+    source: Arc<dyn AutoFindSource>,
     events: Sender<AutoFindRun>,
     control: Mutex<()>,
     active: Mutex<Option<ActiveRun>>,
@@ -38,13 +42,15 @@ struct ActiveRun {
 impl AutoFindSupervisor {
     pub fn new(
         repository: Arc<dyn AutomationRepository>,
-        search: Arc<dyn SearchRepository>,
+        settings: Arc<dyn StateRepository>,
+        source: Arc<dyn AutoFindSource>,
         events: Sender<AutoFindRun>,
     ) -> Self {
         Self {
             inner: Arc::new(AutoFindSupervisorInner {
                 repository,
-                search,
+                settings,
+                source,
                 events,
                 control: Mutex::new(()),
                 active: Mutex::new(None),
@@ -74,7 +80,17 @@ impl AutoFindSupervisor {
             .filter(|favorite| favorite.namespace == FavoriteNamespace::Artist)
             .collect::<Vec<_>>();
         let total_favorites = u32::try_from(favorites.len()).unwrap_or(u32::MAX);
-        let run = self.inner.repository.auto_find_start(total_favorites)?;
+        let history_mode = self.inner.settings.settings_get()?.auto_find_history_mode;
+        let artists = favorites
+            .iter()
+            .map(|favorite| favorite.value.clone())
+            .collect::<Vec<_>>();
+        let cutoff_evidence = self.inner.repository.auto_find_owned_cutoffs(&artists)?;
+        let run = self.inner.repository.auto_find_start(
+            total_favorites,
+            history_mode,
+            &cutoff_evidence,
+        )?;
         if run.state != AutoFindRunState::Running {
             return Ok(run);
         }
@@ -100,7 +116,14 @@ impl AutoFindSupervisor {
         let worker = thread::Builder::new()
             .name(format!("atsumi-auto-find-{}", short_id(&run_id)))
             .spawn(move || {
-                run_refresh(inner, worker_run_id, favorites, worker_cancellation);
+                run_refresh(
+                    inner,
+                    worker_run_id,
+                    favorites,
+                    history_mode,
+                    cutoff_evidence,
+                    worker_cancellation,
+                );
             })
             .map_err(|error| {
                 let _ = self.inner.repository.auto_find_finish(
@@ -206,51 +229,62 @@ fn run_refresh(
     inner: Arc<AutoFindSupervisorInner>,
     run_id: String,
     favorites: Vec<crate::domain::FavoriteRecord>,
+    history_mode: AutoFindHistoryMode,
+    cutoff_evidence: Vec<AutoFindCutoffEvidence>,
     cancellation: CancellationToken,
 ) {
     let result = (|| -> Result<(), RepositoryError> {
+        let cutoffs = cutoff_evidence
+            .into_iter()
+            .map(|evidence| (evidence.artist.clone(), evidence))
+            .collect::<BTreeMap<_, _>>();
         for (favorite_index, favorite) in favorites.iter().enumerate() {
             if cancelled(&inner, &run_id, &cancellation)? {
                 return Ok(());
             }
-            let request = SearchRequest {
-                text: favorite.key().search_token(),
-                include_tags: Vec::new(),
-                exclude_tags: Vec::new(),
+            let cutoff = cutoffs.get(&favorite.value);
+            let request = AutoFindSourceRequest {
+                artist: favorite.value.clone(),
                 languages: vec![
                     Language::Korean,
                     Language::Japanese,
                     Language::Chinese,
                     Language::English,
                 ],
-                sort: SearchSort::Recent,
-                page_size: AUTO_FIND_PAGE_SIZE,
+                newer_than_gallery_id: (history_mode
+                    == AutoFindHistoryMode::NewerThanOldestDownloaded)
+                    .then(|| cutoff.and_then(|evidence| evidence.oldest_owned_gallery_id))
+                    .flatten(),
+                candidate_limit: AUTO_FIND_CANDIDATE_LIMIT,
             };
-            let submission = inner.search.search_submit(&request)?;
-            record_page(
-                &inner,
-                &run_id,
-                favorite,
-                &submission.first_page,
-                &cancellation,
-            )?;
-            let total_pages = submission
-                .first_page
-                .total_pages
-                .min(AUTO_FIND_MAX_PAGES_PER_FAVORITE);
-            for page_number in 2..=total_pages {
+            let source = inner
+                .source
+                .auto_find_artist_plan(&request, &cancellation)?;
+            if let Some(reason) = source.truncated_reason {
+                inner.repository.auto_find_truncation_add(
+                    &run_id,
+                    &crate::domain::AutoFindTruncation {
+                        artist: favorite.value.clone(),
+                        reason,
+                        eligible_count: source.eligible_count,
+                        limit: source.limit,
+                    },
+                )?;
+            }
+            for gallery_id in source.candidate_ids {
                 if cancelled(&inner, &run_id, &cancellation)? {
                     return Ok(());
                 }
-                let Some(page) = inner
-                    .search
-                    .search_page_get(&submission.query_id, page_number)?
+                let Some(gallery) = inner
+                    .source
+                    .auto_find_gallery_summary(gallery_id, &cancellation)?
                 else {
-                    return Err(RepositoryError::Other(
-                        "Auto Find search snapshot expired during a refresh".into(),
-                    ));
+                    continue;
                 };
-                record_page(&inner, &run_id, favorite, &page, &cancellation)?;
+                if cancelled(&inner, &run_id, &cancellation)? {
+                    return Ok(());
+                }
+                record_candidate(&inner, &run_id, favorite, gallery)?;
             }
             if let Some(run) = inner.repository.auto_find_progress(
                 &run_id,
@@ -269,7 +303,18 @@ fn run_refresh(
         Ok(())
     })();
 
-    if result.is_err() && !cancellation.is_cancelled() {
+    if cancellation.is_cancelled() {
+        if let Ok(true) = inner.repository.auto_find_is_running(&run_id) {
+            if let Ok(Some(run)) = inner.repository.auto_find_finish(
+                &run_id,
+                AutoFindRunState::Cancelled,
+                Some("AUTO_FIND_CANCELLED"),
+                Some("The Auto Find refresh was cancelled"),
+            ) {
+                let _ = inner.events.send(run);
+            }
+        }
+    } else if result.is_err() {
         if let Ok(Some(run)) = inner.repository.auto_find_finish(
             &run_id,
             AutoFindRunState::Failed,
@@ -281,25 +326,19 @@ fn run_refresh(
     }
 }
 
-fn record_page(
+fn record_candidate(
     inner: &AutoFindSupervisorInner,
     run_id: &str,
     favorite: &crate::domain::FavoriteRecord,
-    page: &crate::domain::GalleryPage,
-    cancellation: &CancellationToken,
+    gallery: crate::domain::GallerySummary,
 ) -> Result<(), RepositoryError> {
-    for gallery in &page.items {
-        if cancelled(inner, run_id, cancellation)? {
-            return Ok(());
-        }
-        let _ = inner
-            .repository
-            .auto_find_candidate_add(&AutoFindCandidateRecord {
-                run_id: run_id.to_owned(),
-                gallery: gallery.clone(),
-                matched_favorite: favorite.key(),
-            })?;
-    }
+    let _ = inner
+        .repository
+        .auto_find_candidate_add(&AutoFindCandidateRecord {
+            run_id: run_id.to_owned(),
+            gallery,
+            matched_favorite: favorite.key(),
+        })?;
     Ok(())
 }
 
@@ -329,12 +368,13 @@ mod tests {
 
     use crate::{
         application::{
-            ApplicationService, AutomationRepository, DownloadRepository, SearchRepository,
+            ApplicationService, AutoFindSource, AutoFindSourceRequest, AutoFindSourceResult,
+            AutomationRepository, DownloadRepository, SearchRepository,
         },
         domain::{
-            AutoFindCandidateRecord, AutoFindRunState, FavoriteKey, FavoriteNamespace,
-            GalleryDetail, GalleryId, GalleryPage, GallerySummary, Language, SearchRequest,
-            SearchSort, SearchSubmission,
+            AutoFindCandidateRecord, AutoFindHistoryMode, AutoFindRunState, FavoriteKey,
+            FavoriteNamespace, GalleryDetail, GalleryId, GalleryPage, GallerySummary, Language,
+            SearchRequest, SearchSort, SearchSubmission, SettingsPatch,
         },
         infrastructure::{FixtureSearchRepository, SqliteRepository},
     };
@@ -345,7 +385,10 @@ mod tests {
         items: Vec<GallerySummary>,
         submissions: AtomicUsize,
         requests: Mutex<Vec<SearchRequest>>,
+        auto_find_requests: Mutex<Vec<AutoFindSourceRequest>>,
         gate: Option<Arc<SearchGate>>,
+        cancel_after_summary: Option<usize>,
+        summary_calls: AtomicUsize,
     }
 
     impl DeterministicSearchRepository {
@@ -354,7 +397,10 @@ mod tests {
                 items,
                 submissions: AtomicUsize::new(0),
                 requests: Mutex::new(Vec::new()),
+                auto_find_requests: Mutex::new(Vec::new()),
                 gate: None,
+                cancel_after_summary: None,
+                summary_calls: AtomicUsize::new(0),
             }
         }
 
@@ -363,12 +409,27 @@ mod tests {
                 items,
                 submissions: AtomicUsize::new(0),
                 requests: Mutex::new(Vec::new()),
+                auto_find_requests: Mutex::new(Vec::new()),
                 gate: Some(gate),
+                cancel_after_summary: None,
+                summary_calls: AtomicUsize::new(0),
             }
         }
 
         fn submission_count(&self) -> usize {
             self.submissions.load(Ordering::SeqCst)
+        }
+
+        fn cancels_after_summaries(items: Vec<GallerySummary>, summaries: usize) -> Self {
+            Self {
+                items,
+                submissions: AtomicUsize::new(0),
+                requests: Mutex::new(Vec::new()),
+                auto_find_requests: Mutex::new(Vec::new()),
+                gate: None,
+                cancel_after_summary: Some(summaries),
+                summary_calls: AtomicUsize::new(0),
+            }
         }
     }
 
@@ -408,6 +469,46 @@ mod tests {
             _gallery_id: GalleryId,
         ) -> Result<Option<GalleryDetail>, super::RepositoryError> {
             Ok(None)
+        }
+    }
+
+    impl AutoFindSource for DeterministicSearchRepository {
+        fn auto_find_artist_plan(
+            &self,
+            request: &AutoFindSourceRequest,
+            _cancellation: &crate::thumbnail::CancellationToken,
+        ) -> Result<AutoFindSourceResult, super::RepositoryError> {
+            self.submissions.fetch_add(1, Ordering::SeqCst);
+            self.auto_find_requests
+                .lock()
+                .expect("test Auto Find request mutex")
+                .push(request.clone());
+            if let Some(gate) = &self.gate {
+                gate.block();
+            }
+            Ok(AutoFindSourceResult {
+                candidate_ids: self.items.iter().map(|item| item.id).collect(),
+                eligible_count: u32::try_from(self.items.len()).unwrap_or(u32::MAX),
+                limit: 50_000,
+                truncated_reason: None,
+            })
+        }
+
+        fn auto_find_gallery_summary(
+            &self,
+            gallery_id: GalleryId,
+            cancellation: &crate::thumbnail::CancellationToken,
+        ) -> Result<Option<GallerySummary>, super::RepositoryError> {
+            let call = self.summary_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let result = self
+                .items
+                .iter()
+                .find(|item| item.id == gallery_id)
+                .cloned();
+            if self.cancel_after_summary == Some(call) {
+                cancellation.cancel();
+            }
+            Ok(result)
         }
     }
 
@@ -645,7 +746,12 @@ mod tests {
                 gallery(candidate.get(), "serein"),
             ]));
             let (events, event_receiver) = mpsc::channel();
-            let supervisor = AutoFindSupervisor::new(repository.clone(), search.clone(), events);
+            let supervisor = AutoFindSupervisor::new(
+                repository.clone(),
+                repository.clone(),
+                search.clone(),
+                events,
+            );
 
             let started = supervisor.refresh().expect("start Auto Find refresh");
             assert_eq!(started.state, AutoFindRunState::Running);
@@ -663,8 +769,8 @@ mod tests {
             assert_eq!(run.candidates_found, 1);
             assert_eq!(search.submission_count(), 1);
             assert_eq!(
-                search.requests.lock().expect("test requests")[0].text,
-                "artist:serein"
+                search.auto_find_requests.lock().expect("test requests")[0].artist,
+                "serein"
             );
             assert_eq!(
                 snapshot
@@ -710,7 +816,8 @@ mod tests {
             gate.clone(),
         ));
         let (events, _event_receiver) = mpsc::channel();
-        let supervisor = AutoFindSupervisor::new(repository.clone(), search, events);
+        let supervisor =
+            AutoFindSupervisor::new(repository.clone(), repository.clone(), search, events);
 
         supervisor
             .refresh()
@@ -732,6 +839,88 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_preserves_already_persisted_candidates_and_stops_later_metadata() {
+        let repository =
+            Arc::new(SqliteRepository::open_in_memory().expect("open Auto Find repository"));
+        enable_artist(&repository, "serein");
+        let source = Arc::new(DeterministicSearchRepository::cancels_after_summaries(
+            vec![
+                gallery(901, "serein"),
+                gallery(902, "serein"),
+                gallery(903, "serein"),
+            ],
+            2,
+        ));
+        let (events, _event_receiver) = mpsc::channel();
+        let supervisor = AutoFindSupervisor::new(
+            repository.clone(),
+            repository.clone(),
+            source.clone(),
+            events,
+        );
+        supervisor
+            .refresh()
+            .expect("start cancellable Auto Find refresh");
+        let snapshot = wait_for_terminal(&repository);
+        supervisor.shutdown_and_wait();
+
+        assert_eq!(source.summary_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(snapshot.candidates.len(), 1);
+        assert_eq!(snapshot.candidates[0].gallery.id.get(), 901);
+        assert_eq!(
+            snapshot.run.expect("terminal run").state,
+            AutoFindRunState::Cancelled
+        );
+    }
+
+    #[test]
+    fn history_mode_is_snapshotted_and_a_settings_change_applies_to_the_next_run() {
+        let repository =
+            Arc::new(SqliteRepository::open_in_memory().expect("open Auto Find repository"));
+        enable_artist(&repository, "serein");
+        let gate = Arc::new(SearchGate::default());
+        let source = Arc::new(DeterministicSearchRepository::blocked(
+            Vec::new(),
+            gate.clone(),
+        ));
+        let (events, _event_receiver) = mpsc::channel();
+        let supervisor =
+            AutoFindSupervisor::new(repository.clone(), repository.clone(), source, events);
+        supervisor.refresh().expect("start first run");
+        gate.wait_until_entered();
+        let service = ApplicationService::new(repository.clone());
+        let settings = service.settings_get().expect("load settings");
+        service
+            .settings_update(
+                SettingsPatch {
+                    auto_find_history_mode: Some(AutoFindHistoryMode::NewerThanOldestDownloaded),
+                    ..SettingsPatch::default()
+                },
+                settings.revision,
+            )
+            .expect("save setting while first run is active");
+        assert_eq!(
+            repository
+                .auto_find_snapshot()
+                .unwrap()
+                .run
+                .unwrap()
+                .history_mode,
+            AutoFindHistoryMode::IncludeAllHistory
+        );
+        gate.release();
+        wait_for_terminal(&repository);
+
+        supervisor.refresh().expect("start second run");
+        let second = wait_for_terminal(&repository);
+        supervisor.shutdown_and_wait();
+        assert_eq!(
+            second.run.expect("second run").history_mode,
+            AutoFindHistoryMode::NewerThanOldestDownloaded
+        );
+    }
+
+    #[test]
     fn concurrent_refresh_calls_share_one_run_and_one_worker() {
         let repository =
             Arc::new(SqliteRepository::open_in_memory().expect("open Auto Find repository"));
@@ -742,7 +931,8 @@ mod tests {
             gate.clone(),
         ));
         let (events, _event_receiver) = mpsc::channel();
-        let supervisor = AutoFindSupervisor::new(repository, search.clone(), events);
+        let supervisor =
+            AutoFindSupervisor::new(repository.clone(), repository, search.clone(), events);
         let barrier = Arc::new(Barrier::new(3));
         let callers = (0..2)
             .map(|_| {
@@ -775,7 +965,9 @@ mod tests {
         let interrupted_run_id = {
             let repository =
                 SqliteRepository::open(&database_path).expect("open recovery repository");
-            let run = repository.auto_find_start(2).expect("seed running run");
+            let run = repository
+                .auto_find_start(2, AutoFindHistoryMode::IncludeAllHistory, &[])
+                .expect("seed running run");
             repository
                 .auto_find_candidate_add(&AutoFindCandidateRecord {
                     run_id: run.run_id.clone(),
@@ -794,7 +986,8 @@ mod tests {
         );
         let search = Arc::new(DeterministicSearchRepository::immediate(Vec::new()));
         let (events, _event_receiver) = mpsc::channel();
-        let supervisor = AutoFindSupervisor::new(repository.clone(), search, events);
+        let supervisor =
+            AutoFindSupervisor::new(repository.clone(), repository.clone(), search, events);
         assert_eq!(
             supervisor
                 .recover_interrupted()
