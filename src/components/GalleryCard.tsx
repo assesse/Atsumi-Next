@@ -1,4 +1,13 @@
-import { memo, useRef, type CSSProperties, type KeyboardEvent, type MouseEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
 import type { Gallery, GalleryId, ViewId } from "../core/types";
 import { languagePresentation } from "../data/languages";
 import {
@@ -10,6 +19,7 @@ import {
 import { GalleryThumbnail } from "./GalleryThumbnail";
 import { GalleryStatusIcon } from "./GalleryStatusIcon";
 import { MetadataChip } from "./MetadataChip";
+import { fitTagChipCount, splitGalleryTitle } from "./galleryCardLayout";
 
 type GalleryCardProps = {
   gallery: Gallery;
@@ -28,12 +38,6 @@ type GalleryCardProps = {
   onMetadataSearch: (value: string) => void;
   onMetadataFavorite: (value: string) => void;
 };
-
-const VISIBLE_TAG_LIMIT = 4;
-const VISIBLE_SERIES_LIMIT = 1;
-const VISIBLE_CHARACTER_LIMIT = 1;
-const metadataSearchToken = (namespace: "series" | "character", value: string): string =>
-  `${namespace}:${value.trim().replace(/\s+/g, "_")}`;
 
 const workLabel: Partial<Record<NonNullable<Gallery["download"]>["state"], string>> = {
   queued: "대기",
@@ -75,13 +79,16 @@ function GalleryCardComponent({
   );
   const statusClass = ["failed", "interrupted"].includes(download?.state ?? "") ? " failed" : "";
   const language = languagePresentation[gallery.language];
-  const subtitle = gallery.subtitle?.trim() ?? "";
+  const { primary: displayTitle, secondary: subtitle } = splitGalleryTitle(gallery.title, gallery.subtitle);
   const thumbnailKey = galleryCoverThumbnailKey(gallery);
   const thumbnailConsumer = thumbnailConsumerForView(view);
-  const visibleTags = gallery.tags.slice(0, VISIBLE_TAG_LIMIT);
-  const hiddenTags = gallery.tags.slice(VISIBLE_TAG_LIMIT);
-  const visibleSeries = (gallery.series ?? []).slice(0, VISIBLE_SERIES_LIMIT);
-  const visibleCharacters = (gallery.characters ?? []).slice(0, VISIBLE_CHARACTER_LIMIT);
+  const tagLayoutKey = `${gallery.title}\u0000${gallery.subtitle ?? ""}\u0000${gallery.tags.join("\u0001")}`;
+  const [tagLayout, setTagLayout] = useState<{ key: string; count: number } | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const tagListRef = useRef<HTMLDivElement>(null);
+  const tagChipRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const visibleTagCount = tagLayout?.key === tagLayoutKey ? tagLayout.count : gallery.tags.length;
+  const visibleTags = gallery.tags.slice(0, visibleTagCount);
   const hasDuplicateCandidates = duplicateCandidateCount > 0;
   const iconOnlyStatus = hasDuplicateCandidates || download?.state === "downloading" || download?.state === "review_required";
   const cardStatusClass = download?.state === "completed"
@@ -100,6 +107,45 @@ function GalleryCardComponent({
     : download?.state === "review_required"
       ? `${gallery.title}, 중복 의심, 검토 열기`
       : download ? `${gallery.title}, ${workLabel[download.state]}, 작업 상태 열기` : "";
+
+  const invalidateTagLayout = useCallback(() => {
+    setTagLayout((current) => current ? null : current);
+  }, []);
+
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    const tagList = tagListRef.current;
+    if (!content || !tagList || !gallery.tags.length || tagLayout?.key === tagLayoutKey) return;
+
+    const style = getComputedStyle(tagList);
+    const gapX = Number.parseFloat(style.columnGap) || 0;
+    const gapY = Number.parseFloat(style.rowGap) || 0;
+    if (tagList.clientWidth <= 0 || tagList.clientHeight <= 0) {
+      setTagLayout({ key: tagLayoutKey, count: gallery.tags.length });
+      return;
+    }
+    const measurements = tagChipRefs.current.slice(0, gallery.tags.length).map((chip) => {
+      const rect = chip?.getBoundingClientRect();
+      return { width: rect?.width ?? 0, height: rect?.height ?? 0 };
+    });
+    const count = fitTagChipCount(measurements, tagList.clientWidth, tagList.clientHeight, gapX, gapY);
+    setTagLayout({ key: tagLayoutKey, count });
+  }, [gallery.tags.length, tagLayout, tagLayoutKey]);
+
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(invalidateTagLayout);
+    observer.observe(content);
+    let disposed = false;
+    document.fonts?.ready.then(() => {
+      if (!disposed) invalidateTagLayout();
+    });
+    return () => {
+      disposed = true;
+      observer.disconnect();
+    };
+  }, [invalidateTagLayout]);
 
   const selectsInsteadOfActivating = (event: Pick<MouseEvent<HTMLElement>, "ctrlKey" | "shiftKey">) =>
     selectionContext || event.ctrlKey || event.shiftKey;
@@ -178,6 +224,9 @@ function GalleryCardComponent({
         priority={thumbnailPriority}
         client={thumbnailClient}
         sizing="intrinsic"
+        expectedAspectRatio={gallery.thumbnailWidth !== undefined && gallery.thumbnailHeight !== undefined
+          ? { width: gallery.thumbnailWidth, height: gallery.thumbnailHeight }
+          : undefined}
         alt={`${gallery.title} 표지`}
       >
         {download ? <span className="status-wash" aria-hidden="true" /> : null}
@@ -221,9 +270,9 @@ function GalleryCardComponent({
           </div>
         ) : null}
       </GalleryThumbnail>
-      <div className="card-content">
-        <div className="card-title">
-          <strong>{gallery.title}</strong>
+      <div ref={contentRef} className="card-content">
+        <div className="card-title" title={gallery.title}>
+          <strong title={gallery.title}>{displayTitle}</strong>
           {subtitle ? <span className="title-sub">{subtitle}</span> : null}
         </div>
         <div className="card-byline" aria-label="작가 및 그룹">
@@ -251,36 +300,11 @@ function GalleryCardComponent({
             </>
           ) : null}
         </div>
-        <div className="tag-list" aria-label={`태그: ${gallery.tags.join(", ")}`}>
-          {visibleSeries.map((series) => (
-            <MetadataChip
-              key={`series:${series}`}
-              value={`series:${series}`}
-              searchValue={metadataSearchToken("series", series)}
-              label={`시리즈 · ${series.replaceAll("_", " ")}`}
-              favorite={favoriteMetadata.has(`series:${series}`)}
-              kind="meta-chip"
-              onClickCapture={selectFromInteractiveTarget}
-              onSearch={onMetadataSearch}
-              onToggleFavorite={onMetadataFavorite}
-            />
-          ))}
-          {visibleCharacters.map((character) => (
-            <MetadataChip
-              key={`character:${character}`}
-              value={`character:${character}`}
-              searchValue={metadataSearchToken("character", character)}
-              label={`캐릭터 · ${character.replaceAll("_", " ")}`}
-              favorite={favoriteMetadata.has(`character:${character}`)}
-              kind="meta-chip"
-              onClickCapture={selectFromInteractiveTarget}
-              onSearch={onMetadataSearch}
-              onToggleFavorite={onMetadataFavorite}
-            />
-          ))}
-          {visibleTags.map((tag) => (
+        <div ref={tagListRef} className="tag-list" aria-label={`태그: ${gallery.tags.join(", ")}`}>
+          {visibleTags.map((tag, index) => (
             <MetadataChip
               key={tag}
+              ref={(chip) => { tagChipRefs.current[index] = chip; }}
               value={tag}
               favorite={favoriteMetadata.has(tag)}
               kind="tag"
@@ -289,15 +313,6 @@ function GalleryCardComponent({
               onToggleFavorite={onMetadataFavorite}
             />
           ))}
-          {hiddenTags.length ? (
-            <span
-              className="tag-overflow"
-              title={`추가 태그: ${hiddenTags.join(", ")}`}
-              aria-label={`추가 태그 ${hiddenTags.length}개`}
-            >
-              +{hiddenTags.length}
-            </span>
-          ) : null}
         </div>
         <div className="meta-bottom">
           <span>{gallery.pages}p</span>

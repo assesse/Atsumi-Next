@@ -989,11 +989,12 @@ h2 {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-rows: auto auto minmax(min-content, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   align-self: stretch;
   min-width: 0;
   min-height: 0;
   padding: 12px;
+  container: gallery-card-content / inline-size;
 }
 
 .card-title {
@@ -1002,9 +1003,16 @@ h2 {
   gap: 4px;
   min-width: 0;
   overflow: hidden;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   line-height: 20px;
+}
+
+@container gallery-card-content (min-width: 300px) {
+  .card-title {
+    font-size: 18px;
+    line-height: 22px;
+  }
 }
 
 .card-title > strong {
@@ -1096,7 +1104,8 @@ h2 {
   align-content: flex-start;
   gap: 4px 6px;
   min-width: 0;
-  max-height: 52px;
+  min-height: 0;
+  height: 100%;
   margin-top: 8px;
   overflow: hidden;
 }
@@ -1162,7 +1171,7 @@ h2 {
 
 .tag.favorite {
   color: var(--favorite);
-  background: #f3f7f6;
+  background: #fff7eb;
 }
 
 .tag.favorite::before {
@@ -1173,36 +1182,7 @@ h2 {
 }
 
 .tag.female.favorite {
-  color: #566b71;
-}
-
-.tag.female.favorite::before {
-  content: "F";
-  color: var(--female);
-}
-
-.tag.male.favorite {
-  color: #566b71;
-}
-
-.tag.male.favorite::before {
-  content: "M";
-  color: var(--male);
-}
-
-.tag-overflow {
-  display: inline-grid;
-  place-items: center;
-  height: 24px;
-  min-height: 24px;
-  padding: 0 8px;
-  color: #52676e;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 16px;
-  white-space: nowrap;
-  background: #e8f0ee;
-  border-radius: 999px;
+  color: var(--favorite);
 }
 
 .meta-bottom {

@@ -7,6 +7,7 @@ import { mockGalleries } from "../data/mockGalleries";
 import { applyDownloadChanged } from "../state/downloadProjection";
 import { browserFixtureThumbnailAdapter, ThumbnailClient } from "../thumbnail";
 import { GalleryCard } from "./GalleryCard";
+import { fitTagChipCount, splitGalleryTitle } from "./galleryCardLayout";
 
 const defaultThumbnailClient = new ThumbnailClient(browserFixtureThumbnailAdapter);
 
@@ -289,35 +290,40 @@ describe("GalleryCard event projection", () => {
     container.remove();
   });
 
-  it("shows four representative tags followed by an accessible overflow count", async () => {
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    const gallery: Gallery = {
-      ...mockGalleries[0]!,
-      tags: ["one", "two", "three", "four", "five", "six", "seven"],
-    };
+  it("fits measured tags by rows instead of using a fixed tag count", () => {
+    expect(fitTagChipCount(
+      [{ width: 80, height: 24 }, { width: 100, height: 24 }, { width: 90, height: 24 }, { width: 120, height: 24 }],
+      190,
+      52,
+      6,
+      4,
+    )).toBe(3);
+    expect(fitTagChipCount(
+      [{ width: 80, height: 24 }, { width: 100, height: 24 }, { width: 90, height: 24 }, { width: 120, height: 24 }],
+      190,
+      24,
+      6,
+      4,
+    )).toBe(2);
+  });
 
-    await act(async () => root.render(
-      <GalleryCard
-        gallery={gallery}
-        view="explore"
-        selected={false}
-        selectionContext={false}
-        favoriteMetadata={new Set()}
-        {...callbacks}
-      />,
-    ));
-
-    const tagList = container.querySelector(".tag-list");
-    const overflow = tagList?.querySelector<HTMLElement>(".tag-overflow");
-    expect(tagList?.querySelectorAll(".tag")).toHaveLength(4);
-    expect(tagList).toHaveAccessibleName(`태그: ${gallery.tags.join(", ")}`);
-    expect(overflow).toHaveTextContent("+3");
-    expect(overflow).toHaveAccessibleName("추가 태그 3개");
-    expect(overflow).toHaveAttribute("title", "추가 태그: five, six, seven");
-    await act(async () => root.unmount());
-    container.remove();
+  it("splits a pipe title for display while preserving the canonical title", () => {
+    expect(splitGalleryTitle("Archive of Rain | 비 내리는 도시의 기록")).toEqual({
+      primary: "Archive of Rain",
+      secondary: "비 내리는 도시의 기록",
+    });
+    expect(splitGalleryTitle("Archive of Rain | Pipe subtitle", "Explicit subtitle")).toEqual({
+      primary: "Archive of Rain",
+      secondary: "Pipe subtitle · Explicit subtitle",
+    });
+    expect(splitGalleryTitle("Archive of Rain", "Archive of Rain")).toEqual({
+      primary: "Archive of Rain",
+      secondary: "",
+    });
+    expect(splitGalleryTitle("Archive of Rain | 한국어 | English", "English")).toEqual({
+      primary: "Archive of Rain",
+      secondary: "한국어 · English",
+    });
   });
 
   it("renders a non-color selection indicator while preserving selection in the card name", async () => {
@@ -421,7 +427,7 @@ describe("GalleryCard event projection", () => {
     const image = cover?.querySelector<HTMLImageElement>(".cover-image--sprite");
     expect(cover).toHaveClass("has-sprite-image");
     expect(cover).not.toHaveClass("has-thumbnail-image");
-    expect(cover).toHaveStyle({ aspectRatio: "1 / 1" });
+    expect(cover).toHaveStyle({ aspectRatio: "720 / 1080" });
     expect(image?.getAttribute("src")).not.toBe("opaque-thumbnail-key");
     expect(image).toHaveAttribute("width", "1536");
     expect(image).toHaveAttribute("height", "1024");
@@ -673,7 +679,7 @@ describe("GalleryCard event projection", () => {
     container.remove();
   });
 
-  it("renders searchable series and character chips with independent favorite state", async () => {
+  it("keeps series and character metadata out of compact cards", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -689,17 +695,8 @@ describe("GalleryCard event projection", () => {
         {...callbacks}
       />,
     ));
-    const series = container.querySelector<HTMLButtonElement>('[title^="시리즈 · rain archives"]');
-    const character = container.querySelector<HTMLButtonElement>('[title^="캐릭터 · mira lane"]');
-
-    expect(series).toHaveClass("favorite");
-    expect(character).not.toHaveClass("favorite");
-    await act(async () => {
-      series?.click();
-      character?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
-    });
-    expect(callbacks.onMetadataSearch).toHaveBeenCalledWith("series:rain_archives");
-    expect(callbacks.onMetadataFavorite).toHaveBeenCalledWith("character:mira lane");
+    expect(container.querySelector('[title^="시리즈 · rain archives"]')).toBeNull();
+    expect(container.querySelector('[title^="캐릭터 · mira lane"]')).toBeNull();
 
     await act(async () => root.unmount());
     container.remove();

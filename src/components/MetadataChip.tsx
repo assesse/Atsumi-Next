@@ -1,4 +1,4 @@
-import type { MouseEvent, MouseEventHandler } from "react";
+import { forwardRef, type MouseEvent, type MouseEventHandler } from "react";
 
 type MetadataIconProps = {
   kind: "artist" | "group";
@@ -40,7 +40,7 @@ type MetadataChipProps = {
   onToggleFavorite: (value: string) => void;
 };
 
-export function MetadataChip({
+export const MetadataChip = forwardRef<HTMLButtonElement, MetadataChipProps>(function MetadataChip({
   value,
   searchValue,
   label,
@@ -49,7 +49,7 @@ export function MetadataChip({
   onClickCapture,
   onSearch,
   onToggleFavorite,
-}: MetadataChipProps) {
+}, ref) {
   const [namespace = "", ...rest] = value.split(":");
   const visibleLabel = label ?? (rest.length ? rest.join(":") : namespace).replaceAll("_", " ");
   const namespaceClass = ["female", "male", "artist", "group"].includes(namespace) ? namespace : "";
@@ -64,6 +64,7 @@ export function MetadataChip({
   return (
     <button
       type="button"
+      ref={ref}
       className={classes}
       title={`${visibleLabel} · 좌클릭 검색 / 우클릭 즐겨찾기`}
       onClickCapture={onClickCapture}
@@ -78,4 +79,4 @@ export function MetadataChip({
       {visibleLabel}
     </button>
   );
-}
+});

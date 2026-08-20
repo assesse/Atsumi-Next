@@ -20,8 +20,8 @@ describe("Classic language assets", () => {
     expect(new Set(icons).size).toBe(3);
   });
 
-  it("omits both the icon and fallback for Chinese like Classic", () => {
-    expect(languagePresentation.chinese.icon).toBeNull();
-    expect(languagePresentation.chinese.fallback).toBeNull();
+  it("provides a local CN flag and fallback for Chinese", () => {
+    expect(languagePresentation.chinese.icon).toMatch(/^data:image\/svg\+xml/);
+    expect(languagePresentation.chinese.fallback).toBe("CN");
   });
 });

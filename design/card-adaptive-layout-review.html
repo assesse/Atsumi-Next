@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atsumi adaptive GalleryCard review</title>
+  <style>
+    /* CN flag is the hand-authored public-domain geometry in ../src/assets/flags/cn.svg. */
+    :root { color-scheme: light; font-family: "Segoe UI Variable Text", "Segoe UI", "Malgun Gothic", sans-serif; color: #16242b; background: #f3f6f5; }
+    body { margin: 0; padding: 24px; }
+    header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+    h1, p { margin: 0; }
+    h1 { font-size: 20px; }
+    p { color: #64767d; font-size: 13px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    label { color: #52676e; font-size: 13px; font-weight: 600; }
+    select, button { min-height: 34px; padding: 5px 10px; font: inherit; color: #42585f; background: #fff; border: 1px solid #cfdddb; border-radius: 8px; }
+    button[aria-pressed="true"] { color: #0879aa; background: #e8f6f9; border-color: #73bed5; }
+    .gallery-grid { display: grid; grid-template-columns: repeat(var(--columns), minmax(0, 1fr)); gap: 14px; }
+    .gallery-card { display: grid; grid-template-columns: minmax(112px, var(--preview)) minmax(0, 1fr); min-width: 0; min-height: var(--preview); overflow: hidden; background: #fff; border: 1px solid #d5e1df; border-radius: 10px; box-shadow: 0 1px 2px rgb(19 47 54 / 4%); }
+    .cover { position: relative; min-height: var(--preview); background: linear-gradient(135deg, #a9c7c8, #e7eeed 44%, #6c9da3); }
+    .cover::after { position: absolute; inset: 16% 14%; content: ""; border: 1px solid rgb(255 255 255 / 60%); transform: rotate(-8deg); }
+    .language-flag { position: absolute; z-index: 2; right: 8px; bottom: 8px; display: grid; place-items: center; width: 30px; height: 22px; padding: 3px; background: rgb(255 255 255 / 90%); border-radius: 6px; }
+    .language-flag img { width: 100%; height: 100%; object-fit: contain; }
+    .status-pill { position: absolute; z-index: 3; top: 8px; left: 8px; padding: 4px 7px; color: #fff; font-size: 11px; font-weight: 700; background: #d96f21; border: 0; border-radius: 999px; }
+    .status-pill.duplicate { background: #b04478; }
+    .card-content { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; padding: 12px; container: review-card / inline-size; }
+    .card-title { min-width: 0; overflow: hidden; font-size: 16px; line-height: 20px; }
+    .card-title strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+    .card-title small { display: block; overflow: hidden; color: #52676e; font-size: 12px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
+    @container review-card (min-width: 300px) { .card-title { font-size: 18px; line-height: 22px; } }
+    .byline { min-width: 0; margin-top: 8px; overflow: hidden; color: #52717a; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+    .tag-list { display: flex; flex-wrap: wrap; align-content: start; gap: 4px 6px; min-width: 0; min-height: 0; height: 100%; margin-top: 8px; overflow: hidden; }
+    .tag { display: inline-flex; align-items: center; min-width: 0; max-width: min(150px, 100%); height: 24px; padding: 0 8px; overflow: hidden; color: #566b71; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; background: #f3f7f6; border-radius: 999px; }
+    .tag::before { margin-right: 4px; font-size: 11px; font-weight: 700; }
+    .tag.female::before { content: "F"; color: #cb2b68; }
+    .tag.male::before { content: "M"; color: #1674bc; }
+    .tag.favorite { color: #e47d17; background: #fff7eb; }
+    .tag.favorite::before { content: "★"; color: #e47d17; }
+    .case-label { display: block; margin-top: 4px; color: #819197; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+    .meta { display: flex; justify-content: end; gap: 5px; padding-top: 8px; color: #64767d; font-size: 12px; }
+    .meta span + span::before { margin-right: 5px; color: #a2b0b2; content: "·"; }
+    @media (max-width: 1180px) { .gallery-grid { grid-template-columns: repeat(min(var(--columns), 3), minmax(0, 1fr)); } }
+    @media (max-width: 780px) { .gallery-grid { grid-template-columns: repeat(min(var(--columns), 2), minmax(0, 1fr)); } }
+    @media (max-width: 560px) { .gallery-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>GalleryCard adaptive layout review</h1><p>Canonical title stays intact; visible title and secondary line are display-only.</p></div>
+    <div class="controls" aria-label="Preview controls">
+      <label for="preview">Preview</label><select id="preview"><option>160</option><option selected>220</option><option>280</option><option>360</option></select>
+      <span aria-hidden="true">px</span>
+      <button type="button" data-columns="1" aria-pressed="false">1</button><button type="button" data-columns="2" aria-pressed="false">2</button><button type="button" data-columns="3" aria-pressed="false">3</button><button type="button" data-columns="4" aria-pressed="true">4</button>
+    </div>
+  </header>
+  <main id="gallery-grid" class="gallery-grid" style="--columns:4; --preview:220px" aria-label="GalleryCard examples"></main>
+  <script>
+    const galleries = [
+      { label: "3 tags · author only", title: "Archive of Rain | 비 내리는 도시의 기록", artist: "serein", pages: 64, id: "#4051038", language: "kr", tags: ["female:glasses", "male:suit", "mystery"], favoriteTags: ["female:glasses", "male:suit"] },
+      { label: "10 tags · author + group", title: "Summer Pool Notes | 수영부 기록", subtitle: "여름 수영부 노트", artist: "mizuno", group: "blue hour", pages: 84, id: "#4051027", language: "jp", tags: ["female:swimsuit", "male:swimsuit", "female:short hair", "school", "full color", "sports", "pool", "summer", "long hair", "short hair"], favoriteTags: ["female:swimsuit", "male:swimsuit"] },
+      { label: "25+ tags · long chip", title: "A deliberately long canonical title demonstrates tooltip and bounded two-line display | Longer secondary text | English translation", subtitle: "명시된 번역 자막", artist: "paperlane", group: "night studio", pages: 42, id: "#4050974", language: "cn", tags: ["female:schoolgirl uniform", "male:uniform", "an extraordinarily long tag label that measures", "library", "mystery", "night", "full color", "rain", "outdoors", "glasses", "long hair", "short hair", "school", "制服", "adult", "story", "monochrome", "solo", "group", "sports", "summer", "winter", "festival", "city", "translation", "bonus"], favoriteTags: ["female:schoolgirl uniform", "male:uniform"] },
+      { label: "favorite F/M + downloading", title: "Platform 19", artist: "railbird", pages: 55, id: "#4050932", language: "us", tags: ["male:uniform", "female:short hair", "science fiction", "train"], favoriteTags: ["male:uniform", "female:short hair"], status: "downloading" },
+      { label: "duplicate review · CN", title: "Twin Copies | 중복 검토", subtitle: "검토 화면으로 이동", artist: "archivebot", group: "imports", pages: 20, id: "#4050901", language: "cn", tags: ["female:glasses", "male:suit", "duplicate", "full color"], favoriteTags: ["female:glasses"], status: "duplicate" },
+    ];
+    const tagParts = (tag) => { const [namespace, ...rest] = tag.split(":"); return { namespace: rest.length ? namespace : "", label: (rest.length ? rest.join(":") : tag).replaceAll("_", " ") }; };
+    const titleParts = (title, subtitle) => {
+      const [primary, ...piped] = title.split("|");
+      const safePrimary = primary.trim();
+      const parts = [...piped.flatMap((part) => part.split("|")), subtitle || ""].map((part) => part.trim()).filter(Boolean);
+      return { primary: safePrimary, secondary: [...new Set(parts.filter((part) => part !== safePrimary))].join(" · ") };
+    };
+    const flag = (language) => language === "cn" ? "../src/assets/flags/cn.svg" : language === "kr" ? "../src/assets/flags/classic-runtime/kr.png" : language === "us" ? "../src/assets/flags/classic-runtime/us.png" : "../src/assets/flags/classic-runtime/jp.png";
+    const languageLabel = (language) => ({ cn: "중국어", kr: "한국어", us: "영어", jp: "일본어" }[language]);
+    const fitTagChips = (tagList) => {
+      const tags = [...tagList.querySelectorAll(".tag")];
+      const style = getComputedStyle(tagList);
+      const gapX = parseFloat(style.columnGap) || 0;
+      const gapY = parseFloat(style.rowGap) || 0;
+      if (!tagList.clientWidth || !tagList.clientHeight) return;
+      let count = 0, rowWidth = 0, rowHeight = 0, usedHeight = 0;
+      for (const tag of tags) {
+        const rect = tag.getBoundingClientRect();
+        const nextRow = rowWidth > 0 && rowWidth + gapX + rect.width > tagList.clientWidth;
+        if (nextRow) { usedHeight += rowHeight + gapY; rowWidth = 0; rowHeight = 0; }
+        if (usedHeight + rect.height > tagList.clientHeight) break;
+        rowWidth = rowWidth ? rowWidth + gapX + rect.width : rect.width;
+        rowHeight = Math.max(rowHeight, rect.height); count += 1;
+      }
+      tags.slice(count).forEach((tag) => tag.remove());
+    };
+    const grid = document.querySelector("#gallery-grid");
+    const render = () => {
+      const preview = document.querySelector("#preview").value;
+      grid.style.setProperty("--preview", `${preview}px`);
+      grid.innerHTML = galleries.map((gallery) => {
+        const title = titleParts(gallery.title, gallery.subtitle);
+        const status = gallery.status ? `<span class="status-pill ${gallery.status === "duplicate" ? "duplicate" : ""}">${gallery.status === "duplicate" ? "중복 후보" : "다운로드 중"}</span>` : "";
+        const group = gallery.group ? ` <span aria-label="그룹">· ${gallery.group}</span>` : "";
+        const tags = gallery.tags.map((tag) => { const parts = tagParts(tag); const favorite = gallery.favoriteTags?.includes(tag); return `<span class="tag ${parts.namespace}${favorite ? " favorite" : ""}">${parts.label}</span>`; }).join("");
+        return `<article class="gallery-card" aria-label="${gallery.title}" title="${gallery.title}"><div class="cover">${status}<span class="language-flag"><img src="${flag(gallery.language)}" alt="${languageLabel(gallery.language)}"></span></div><div class="card-content"><div class="card-title" title="${gallery.title}"><strong>${title.primary}</strong>${title.secondary ? `<small>${title.secondary}</small>` : ""}<span class="case-label">${gallery.label}</span></div><div class="byline">${gallery.artist}${group}</div><div class="tag-list" aria-label="태그: ${gallery.tags.join(", ")}">${tags}</div><div class="meta"><span>${gallery.pages}p</span><span>${gallery.id}</span></div></div></article>`;
+      }).join("");
+      grid.querySelectorAll(".tag-list").forEach(fitTagChips);
+    };
+    document.querySelector("#preview").addEventListener("change", render);
+    document.querySelectorAll("[data-columns]").forEach((button) => button.addEventListener("click", () => { grid.style.setProperty("--columns", button.dataset.columns); document.querySelectorAll("[data-columns]").forEach((item) => item.setAttribute("aria-pressed", String(item === button))); requestAnimationFrame(() => grid.querySelectorAll(".tag-list").forEach(fitTagChips)); }));
+    new ResizeObserver(() => grid.querySelectorAll(".tag-list").forEach(fitTagChips)).observe(grid);
+    render();
+  </script>
+</body>
+</html>
