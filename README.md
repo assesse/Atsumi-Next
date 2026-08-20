@@ -4,17 +4,23 @@
 
 Atsumi Next는 기존 Atsumi를 보존하면서 새 구조로 재작성하는 독립 프로젝트다.
 
-승인된 UX prototype과 V2 계약을 기준으로 Phase 3의 실제 다운로드 흐름, Phase 4의 영속 즐겨찾기·검색 이력·Auto Find, Phase 5의 작품 중복 Review, Phase 6의 앨범 내부 중복 페이지 검토·격리·undo, Phase 7의 Classic read-only 가져오기·rollback을 구현했다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
+승인된 UX prototype과 V2 계약을 기준으로 Phase 3의 실제 다운로드 흐름, Phase 4의 영속 즐겨찾기·검색 이력·Auto Find, Phase 5의 작품 중복 Review, Phase 6의 앨범 내부 중복 페이지 검토·격리·undo, Phase 7의 Classic read-only 가져오기·rollback을 구현했다. 현재 DB schema는 v17이고 manifest schema와 HashProfile은 계속 1이다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
 
 다운로드는 SQLite queue에서 자동 시작해 source page 번호별 `.part` 기록, decode, WebP 저장, SHA-256, atomic rename, versioned manifest 검증을 마친 뒤에만 `completed`가 된다. 강제 종료된 작업은 검증된 page checkpoint부터 재개하며, 시작 시와 Downloads의 수동 명령에서 DB·manifest·실제 파일을 재조정한다. 완료 파일은 Windows 기본 뷰어로 열 수 있고, 삭제 대신 download root 내부의 crash-safe quarantine으로 옮긴 뒤 복원할 수 있다. 자동 영구 삭제는 하지 않는다.
 
-즐겨찾기는 작가·그룹·시리즈·캐릭터·태그를 SQLite에 저장하고 카드·상세·Related에서 같은 상태로 표시한다. 시리즈와 캐릭터도 실제 Hitomi namespace 검색으로 연결한다. Auto Find는 사용자가 `즐겨찾기 작가 갱신`을 명시적으로 실행할 때만 실제 source를 조회하고, 실행 진행률·취소·오류와 후보를 영속해 재시작 뒤에도 복원한다. 검색어를 입력하는 동안에는 원격 요청하지 않으며 검색 제출만 이력에 기록한다. 이미 다운로드했거나 사용자가 제외·숨김·중복 판정한 항목은 후보에서 숨긴다.
+즐겨찾기는 작가·그룹·시리즈·캐릭터·태그를 SQLite에 저장하고 카드·상세·Related에서 같은 상태로 표시한다. 시리즈와 캐릭터도 실제 Hitomi namespace 검색으로 연결한다. Auto Find는 사용자가 `즐겨찾기 작가 갱신`을 명시적으로 실행할 때만 실제 source를 조회하고, 실행 진행률·취소·오류와 후보를 영속해 재시작 뒤에도 복원한다. 실행마다 이력 정책을 snapshot하며 `newer_than_oldest_downloaded`는 검증 완료 또는 격리된 소유 artifact의 작가 증거만 사용한다. cutoff 증거는 `source=verified_owned_artifact`, `policyVersion=1`로 저장하고 provenance가 불명확하면 임의 cutoff를 만들지 않는다. cutoff 뒤 후보가 50,000개를 넘으면 run truncation도 영속한다. 검색어를 입력하는 동안에는 원격 요청하지 않으며 검색 제출만 이력에 기록한다. 이미 다운로드했거나 사용자가 제외·숨김·중복 판정한 항목은 후보에서 숨긴다.
+
+Explore는 query별 최대 5개의 완료 page를 보존하고 현재 page와 앞뒤 2개 창만 유지한다. 인접 page는 낮은 우선순위로 미리 불러오며 query 교체·session reset 때 frontend 요청뿐 아니라 backend `search_page_cancel`까지 전달해 실제 source 작업을 취소한다. 가로 밀도형 앨범 카드는 점수·날짜 없이 기존 정보 종류를 유지하고, 실제 chip 측정과 `ResizeObserver`로 좁은 폭에서도 이미지 비율·여백·텍스트 배치를 보존한다. viewport 이탈 뒤 400ms 안에 돌아온 thumbnail 구독은 같은 작업을 이어 쓰고, 완료 preview는 frontend에서 120초/최대 256개까지 보존해 스크롤 왕복 재요청을 줄인다.
+
+새 다운로드 폴더 이름은 `[{artist}] {title} [{group}] {id}` 기본 template으로 만들며 `{id}`가 반드시 포함된다. Windows 금지 이름·문자, component 길이와 관리 경로 길이를 검증한다. 이 설정은 새 artifact에만 적용되고 기존 `relative_directory`와 `root_snapshot`은 변경하지 않는다. 기존 앨범을 자동으로 이름 변경하거나 이동하는 기능은 없다.
+
+페이지 입력은 WebP/JPEG/PNG와 실험적 AVIF decode를 지원해 검증된 lossless WebP로 저장한다. AVIF는 순수 Rust `avif-rust 0.0.6`/`bin-rs 0.0.10` 고정 버전과 엄격한 크기 제한을 사용한다. JPEG XL 후보는 현재 지원하지 않으며 다른 후보를 모두 시도한 뒤 `IMAGE_FORMAT_UNSUPPORTED`를 비재시도 오류로 남긴다. 2026-08-20 opt-in live 검증에서는 gallery `4113714`의 18/18 page가 WebP로 검증되었고 선택 payload 합계는 12,396,942 bytes였다. 이는 한 gallery의 실데이터 증거이며 AVIF/JXL 전체 corpus 보증은 아니다.
 
 작품 중복 검사는 검증 완료된 로컬 artifact만 읽어 exact SHA-256, 64-bit perceptual hash, 1024-bit detail hash, 밝기 분산·edge gate와 단조 1:1 gap-tolerant 정렬을 versioned evidence로 저장한다. 제목·작가·그룹 metadata는 전수 비교 작업의 우선순위를 정하되 후보를 누락시키지 않는다. Review는 실제 source page 번호의 로컬 artifact preview, confidence와 판정 이력을 보여 주며 숨김·연작 연결/해제·pair 제외를 revision CAS transaction으로 적용한다. 자동 판정만으로 파일을 삭제하지 않는다. E-Hentai relation port는 명시적 적법 세션이 없는 기본 production 설정에서 비활성화된다.
 
 앨범 내부 중복 검사는 같은 verified artifact 안에서 정확한 SHA 반복과 최소 2행의 단조 시각 장면 블록만 Review에 올린다. 사용자는 각 동기화 행에서 유지할 원본 페이지를 고르고 파일 수·용량이 고정된 revision-CAS 계획을 먼저 확인한다. 적용은 앨범 폴더의 `.atsumi-page-quarantine/<plan-id>/`로만 이동하며 manifest와 SQLite가 crash-safe saga로 조정된다. 원본 페이지 번호는 바꾸지 않고 격리 이력에서 복원할 수 있으며 자동 영구 삭제는 없다.
 
-설정의 저장 공간에서 Classic 데이터·다운로드 폴더를 직접 고르면 먼저 읽기 전용 inventory와 충돌 보고서를 만든다. state, manifest, 실제 페이지, legacy hash provenance, 즐겨찾기·검색 이력·제외·연작·오탐 pair를 검토하고 명시적으로 승인한 안전 항목만 Next에 등록한다. Classic 페이지는 이동하지 않고 검증·WebP 변환한 복사본만 `gallery-{id}`에 만들며, rollback은 Next 복사본만 관리 quarantine으로 옮긴다. 중단된 적용도 다음 시작에서 Next 부분 복사본을 격리한다.
+설정의 저장 공간에서 Classic 데이터·다운로드 폴더를 직접 고르면 먼저 읽기 전용 inventory와 충돌 보고서를 만든다. state, manifest, 실제 페이지, legacy hash provenance, 즐겨찾기·검색 이력·제외·연작·오탐 pair를 검토하고 명시적으로 승인한 안전 항목만 Next에 등록한다. Classic 페이지는 이동하지 않고 검증·WebP 변환한 복사본만 현재의 안전한 folder template으로 새로 만들며, rollback은 Next 복사본만 관리 quarantine으로 옮긴다. 중단된 적용도 다음 시작에서 Next 부분 복사본을 격리한다.
 
 ## 실행과 검증
 
@@ -48,7 +54,7 @@ pnpm tauri dev
 이 저장소의 PowerShell 실행기는 시스템 Node.js를 우선 사용하고, 없으면 Codex Desktop의 bundled Node.js를 찾는다.
 일상적인 사용자 검토는 `start-app.vbs`로 앱을 직접 실행한다. `start-dev.cmd`는 오류 진단용으로 남겨 둔다. MSI/Setup 번들은 명시적인 릴리스 요청이 있을 때만 만든다.
 
-GitHub Actions의 `Windows CI`는 push와 pull request마다 `windows-latest`에서 Node.js 24, 정확히 `pnpm` 11.16.0, Rust stable을 사용한다. 로컬과 같은 `tools/verify.ps1`로 frozen lockfile 설치, frontend test/typecheck/build, Rust fmt/check/test/clippy, release no-bundle build, whitespace 검사를 모두 통과해야 한다. CI token 권한은 저장소 읽기로 제한하고 pnpm store와 Cargo 의존성·빌드 출력만 캐시한다. 검증 로그는 Git에서 제외된 `.runtime/verification/`에 남는다.
+GitHub Actions의 `Windows CI`는 `main` push, pull request와 수동 `workflow_dispatch`에서 `windows-latest`를 사용한다. feature branch push와 같은 branch의 pull request가 같은 검증을 중복 실행하지 않도록 push trigger를 `main`으로 제한했다. Node.js 24, 정확히 `pnpm` 11.16.0, Rust stable과 로컬의 `tools/verify.ps1`로 frozen lockfile 설치, frontend test/typecheck/build, Rust fmt/check/test/clippy, release no-bundle build, whitespace 검사를 모두 통과해야 한다. CI token 권한은 저장소 읽기로 제한하고 pnpm store와 Cargo 의존성·빌드 출력만 캐시한다. 검증 로그는 Git에서 제외된 `.runtime/verification/`에 남는다.
 
 ## 절대 원칙
 
@@ -73,7 +79,7 @@ GitHub Actions의 `Windows CI`는 push와 pull request마다 `windows-latest`에
 - Classic 기준선은 frontend production build와 Rust 15개 unit test를 통과했다.
 - Classic 코드는 참조 및 데이터 이전 입력으로만 사용하며 새 구현 코드를 Classic 저장소에 추가하지 않는다.
 - 앱 브랜드에는 Aluminum Classic의 `atsumi.svg`, `atsumi-256.png`, `icon.ico` 원본만 복사해 사용한다. Pupil APK 추출 자원은 사용하지 않는다.
-- 국가 표시는 Aluminum Classic 릴리스가 실제 UI에서 사용한 FlagCDN `kr.png`, `jp.png`, `us.png` 바이트를 로컬 번들로 고정한다. Classic에 없던 중국어 badge는 표시하지 않는다.
+- 국가 표시는 Aluminum Classic 릴리스가 실제 UI에서 사용한 FlagCDN `kr.png`, `jp.png`, `us.png` 바이트를 로컬 번들로 고정한다. 중국어는 네트워크 요청 없는 로컬 `cn.svg`와 `CN` fallback을 사용한다.
 
 ## 문서 지도
 
@@ -91,6 +97,7 @@ GitHub Actions의 `Windows CI`는 push와 pull request마다 `windows-latest`에
 - [DECISION_REGISTER.md](docs/DECISION_REGISTER.md): 확정 사항과 사용자 승인 대기 사항
 - [DELIVERY_PLAN.md](docs/DELIVERY_PLAN.md): 단계별 산출물과 구현 진입 조건
 - [IMPLEMENTATION_HANDOFF.md](docs/IMPLEMENTATION_HANDOFF.md): 실제 구현·검증·복구·Git 전달 상태
+- [KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md): 현재 제한, 남은 실데이터 위험과 rollback 경계
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md): 앱에 포함된 외부 자산과 라이선스 고지
 
 ## 기존 명세와의 관계

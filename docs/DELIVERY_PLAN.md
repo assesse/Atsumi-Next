@@ -1,143 +1,110 @@
 # 전달 계획
 
-## Phase 0: 기준선과 명세
+2026-08-20 현재 Phase 0~7 구현과 안정화가 완료됐다. 이 문서의 `완료`는 아래 gate와 실제 검증 증거를 통과했다는 뜻이며, 외부 source 전체 호환성이나 자동 영구 삭제처럼 구현하지 않은 범위를 포함하지 않는다.
 
-완료했다.
+## 공통 completion gate
 
-산출물:
+각 Phase는 다음 조건을 모두 만족해야 완료로 유지한다.
 
-- Classic 기준선 감사
-- 제품 범위와 기능 행렬
-- UX 정보 구조
-- 시스템 구조와 데이터 이전 초안
-- 사건 이력과 golden fixture 후보
-- 사용자 승인 대기 결정
+1. Rust/TypeScript DTO와 stable error code가 문서 계약과 일치한다.
+2. canonical state는 SQLite이고 event/frontend state는 복원 가능한 projection이다.
+3. filesystem 변경은 download root containment, 검증, revision 또는 saga 기록과 복구 경로를 가진다.
+4. 취소는 표시만 바꾸지 않고 background 작업에 도달하며 늦은 완료가 최신 상태를 덮지 않는다.
+5. migration은 additive하고 적용 전 backup, 순서/idempotency, future-schema write 거부 테스트가 있다.
+6. fixture 기반 자동 검증과 별도의 opt-in live 증거를 구분한다.
+7. Classic 원본과 사용자가 이미 가진 artifact를 추측해서 이동·이름 변경·삭제하지 않는다.
 
-종료 조건:
+## Phase 3 — production 수직 다운로드
 
-- Classic 기준선이 Git과 파일 snapshot으로 복원 가능하다.
-- 유지, 재설계, 보류 기능이 사용자에게 승인된다.
-- 첫 수직 기능의 acceptance criteria가 확정된다.
+상태: 완료.
 
-## Phase 1: UX prototype과 계약
+Gate:
 
-완료했다. 승인된 clickable prototype은 `prototype/`에 보존하고, 구현은 공통 component와 reducer로 옮긴다.
+- `Explore -> Detail -> Queue -> Download -> Resume -> Complete -> Open`이 production `HitomiLiveAdapter`와 같은 pooled HTTP scheduler를 사용한다.
+- source page identity, `.part`, bounded decode, lossless WebP, SHA-256, atomic rename과 manifest schema 1이 모두 맞은 뒤에만 completed가 된다.
+- retry/cancel은 같은 entry/job attempt graph를 사용하고 restart는 verified checkpoint부터 재개한다.
+- 전역 `ThumbnailCoordinator` 하나가 gallery/page/artifact preview를 dedupe·우선순위·취소·cache한다.
 
-산출물:
+추가 안정화:
 
-- 앱 셸과 Explore clickable prototype
-- Downloads 상태 및 오류 detail prototype
-- Detail tab prototype
-- 작품/내부 중복 Review prototype
-- `API_CONTRACT_V2.md`
-- `UX_INTERACTION_MATRIX.md`
-- `ERROR_CATALOG.md`
+- viewport churn은 400ms orphan grace와 완료 asset 120초/256개 retention으로 같은 preview를 재사용한다.
+- Hitomi image candidate diagnostic은 형식/status/content-type/retryability를 남긴다. WebP/JPEG/PNG와 experimental AVIF를 지원하고 JPEG XL은 typed unsupported다.
+- 2026-08-20 opt-in live smoke는 gallery `4113714`의 18/18 page를 WebP로 검증했으며 선택 payload 합계는 12,396,942 bytes였다.
 
-종료 조건:
+## Phase 4 — 즐겨찾기·검색 이력·Auto Find
 
-- 핵심 8개 작업을 mock data로 수행할 수 있다.
-- 사용자가 기능 위치와 상호작용을 승인한다.
-- backend command와 event payload가 type으로 확정된다.
+상태: 완료(명시된 대형 작가 제한 포함).
 
-## Phase 2: Core foundation
+Gate:
 
-완료했다. 앱 셸, SQLite 기반 설정·창 배치, Gallery/Artifact model, typed command client, revision event projection, fixture event foundation, structured logging을 구현하고 검증했다. 실제 원격 기능은 Phase 3 command로 확장한다.
+- 5개 namespace 즐겨찾기, 성공한 명시적 검색 이력, run/candidate/exclusion을 SQLite에서 복원한다.
+- 작가 갱신은 사용자 명령으로만 시작하고 동시에 하나의 run만 허용하며 cancel/exit/interruption 뒤 부분 후보를 보존한다.
+- download entry, 명시적 제외, hidden/resolved duplicate/pair 제외를 canonical record로 후보에서 제거한다.
 
-산출물:
+추가 안정화:
 
-- 새 Tauri workspace와 React frontend
-- SQLite migration runner
-- Gallery, DownloadJob, Artifact domain model
-- typed command client
-- event stream과 Activity Center foundation
-- structured logging
+- run마다 `include_all_history|newer_than_oldest_downloaded`를 snapshot한다.
+- cutoff는 검증 소유 artifact만 사용하고 `source=verified_owned_artifact`, `policyVersion=1`을 영속한다. 증거가 없으면 cutoff하지 않는다.
+- source Nozomi ID에 cutoff를 먼저 적용한 뒤 최대 50,000 candidate를 처리하며 초과는 `candidate_limit_after_cutoff`로 기록한다. 예전 작가당 250-page 상한은 폐기했다.
 
-종료 조건:
+## Phase 5 — 작품 단위 중복 Review
 
-- 앱 셸이 실행된다.
-- 설정과 window placement가 SQLite에서 저장 및 복원된다.
-- fixture event의 상태 변경이 전체 목록 재렌더 없이 표시된다.
+상태: 완료.
 
-## Phase 3: 첫 수직 기능
+Gate:
 
-완료했다. 실제 Hitomi read adapter와 공용 HTTP scheduler를 검색·상세·미리보기·페이지 다운로드에 연결했다. requestId/active-gallery 멱등 queue, retry/cancel과 attempt 이력, bounded gallery worker, source page별 checkpoint를 SQLite에 영속한다. 페이지는 bounded body read와 `.part` write, MIME/signature/decode 검증, WebP 정규화, SHA-256, atomic rename을 거치며 versioned manifest와 DB snapshot이 모두 맞을 때만 완료된다. 시작 시 active job을 `interrupted`로 바꾼 뒤 verified checkpoint부터 재개하고, startup/manual reconcile은 누락·hash·manifest 문제를 안전 상태로 표시한다. 완료 첫 페이지는 canonical root 확인 뒤 Windows 기본 viewer로 열며, 제거는 crash-safe quarantine saga와 undo로 처리하고 자동 영구 삭제하지 않는다.
+- 최신 verified local artifact만 versioned SHA/perceptual/detail/edge evidence 대상으로 삼는다.
+- metadata는 전수 pair 작업 우선순위일 뿐 recall을 제한하지 않고, page matching은 monotonic one-to-one이다.
+- candidate/evidence/decision/history는 SQLite에 남으며 hide/series/pair-exclude는 revision CAS transaction이다.
+- Review는 live URL이 아니라 root-bound `artifactPage(entryId, sourcePage)`를 사용하고 자동 파일 삭제하지 않는다.
 
-범위:
+## Phase 6 — 앨범 내부 페이지 중복
 
-`Explore -> Detail -> Queue -> Download -> Resume -> Complete -> Open`
+상태: 완료.
 
-필수 검증:
+Gate:
 
-- Recent와 tag 검색 fixture
-- 20, 50, 200개 카드 resize와 scroll
-- 같은 ID queue 멱등성
-- 단일 및 복수 gallery 다운로드
-- HTTP 404, 503, timeout 재시도
-- 다운로드 중 강제 종료와 복구
-- 실제 파일과 DB reconciliation
-- Windows 기본 viewer 열기
+- exact 반복 또는 최소 2행의 단조 visual block만 Review 후보가 된다.
+- original source page number와 검증 metadata를 유지하며 제거 전 plan이 revision, 파일 수와 byte 합계를 고정한다.
+- apply/undo는 artifact 내부 quarantine, manifest atomic replace와 SQLite saga로 crash 후 수렴한다.
+- 모호한 원본/격리 위치는 overwrite/delete하지 않는다.
 
-검증 근거:
+## Phase 7 — Classic read-only import와 rollback
 
-- synthetic 실제 PNG 입력을 WebP·SHA-256·manifest로 완료하는 filesystem/SQLite 통합 테스트
-- 두 번째 페이지 중단 뒤 첫 verified page를 다시 받지 않는 resume 테스트
-- 파일 이동과 DB commit 사이 강제 종료를 재조정하는 quarantine fault-injection 테스트
-- quarantine/undo 후 manifest path·상태와 실제 폴더 복원 테스트
+상태: 완료.
 
-## Phase 4: Auto Find와 운영 UX
+Gate:
 
-Milestone D의 즐겨찾기·검색 이력·Auto Find workflow를 실제 SQLite와 production source adapter에 연결했다. Classic 데이터 import는 원본을 읽는 Phase 7 workflow 전에는 수행하지 않는다.
+- 사용자가 고른 Classic data/download root만 read-only inventory하고 source fingerprint와 typed conflict를 보고한다.
+- 승인된 eligible page는 apply 직전 다시 검증해 Next에 copy하고, 실제 WebP/manifest 확인 뒤 한 transaction으로 등록한다.
+- legacy hash는 provenance일 뿐 현재 HashProfile 판정에 쓰지 않는다.
+- rollback은 해당 import가 새로 만든 Next row/copy만 다루며 Classic 원본을 수정·이동·삭제하지 않는다.
 
-구현 범위:
+## v15~v17 안정화 gate
 
-- 작가·그룹·시리즈·캐릭터·태그 즐겨찾기 영속, namespace 검색 serializer와 카드·상세·Related의 공통 favorite projection
-- 성공한 명시적 검색 이력과 최근 suggestion 복원
-- 사용자가 시작하는 `즐겨찾기 작가 갱신`; 입력 중 원격 요청 없음
-- run·후보·진행률·취소·오류의 영속 상태와 restart snapshot 복원
-- 이미 download entry가 있거나 명시적으로 제외한 gallery의 후보 제거
-- 전체/작가별 보기와 결과 문자열·언어 local filter
-- 선택 또는 현재 filter 결과의 기존 download queue 일괄 추가
-- source 실패·중단·취소 상태 표시와 명시적 재갱신
+- v15: 새 artifact용 folder template과 기존 relative path immutability. `{id}` 필수와 Windows path 한도를 테스트했다. 기존 artifact 자동 rename은 없다.
+- v16: page candidate diagnostic과 immutable artifact root snapshot. v15 legacy path/root backfill을 보존한다.
+- v17: Auto Find history mode, verified-owned artist/cutoff evidence와 truncation. v14→latest migration이 15/16/17 순서와 immutability를 검증한다.
+- Explore: query별 settled cache 최대 5, 현재 page ±2, 인접 prefetch, page scroll restore. `search_page_cancel`은 active token과 최대 256 cancel-before-start tombstone으로 실제 backend 작업을 취소한다.
+- UI: 가로 밀도형 adaptive card는 점수·날짜를 제거하고 원본 이미지 비율과 실제 chip 측정을 유지한다.
 
-현재 경계:
+## 현재 검증 증거
 
-- source pagination은 전체 기간을 순회하되 한 작가당 250 page 안전 상한을 둔다.
-- 작품 숨김·resolved duplicate decision·pair 제외는 schema v12의 canonical record를 Auto Find 후보 조건에 결합한다.
-- Classic 즐겨찾기·검색 기록 import와 충돌 보고는 Phase 7 read-only workflow로 완료했다.
-- 최종 운영 polish는 구현된 설정만 노출하고, cache purge·영구 삭제처럼 안전 계약이 없는 작업을 설명 있는 disabled 상태로 고정했다.
+`tools/verify.ps1`의 최신 성공 로그는 `.runtime/verification/verify-20260820-193449.log`다. 아래 test/type/build/fmt/check/clippy/whitespace와 Tauri release `--no-bundle` gate를 통과했다.
 
-## Phase 5: 작품 중복
+- frontend: 21 files, 130 tests
+- Rust library: 137 passed, opt-in live 1 ignored
+- startup binary: 2 passed
+- typecheck, Vite production build, Rust fmt/check/clippy, Tauri release `--no-bundle`, whitespace: 통과
 
-완료했다. 검증된 최신 local artifact만 대상으로 versioned SHA/perceptual/detail/edge evidence를 만들고, metadata-prioritized exhaustive pair worklist와 monotonic one-to-one gap alignment로 exact·contains·partial·translation 후보를 저장한다. scan 진행률·취소·앱 종료/비정상 종료 복구, candidate revision CAS와 append-only 판정 이력, 숨김·양쪽 연작 연결/해제·pair 제외를 SQLite transaction으로 처리한다. 대형 Review는 전역 thumbnail coordinator의 root-bound `artifactPage`로 정확한 원본 page pair와 근거를 표시한다. blank/B&W, 실제 장면 변화, 일부 공통 panel 오판 금지와 재압축·해상도/번역형 positive를 회귀 테스트로 고정했다. 자동 파일 삭제는 없다. E-Hentai relation은 port와 evidence type만 두고 명시적 session이 없는 production에서는 비활성화한다.
+live gallery 4113714의 18/18 WebP·12,396,942 bytes 결과는 일반 fixture CI와 별도 증거다. AVIF 대표 corpus와 JPEG XL decode 완료를 뜻하지 않는다.
 
-## Phase 6: 내부 페이지 중복
+## 다음 작업
 
-완료했다. 작품 중복과 같은 verified local page hash cache를 재사용하되 한 artifact 안에서만 exact 반복 또는 최소 2행의 단조 gap-tolerant visual scene block을 만든다. synchronized Review는 실제 `artifactPage(entryId, sourcePage)`를 표시하고 각 행에서 유지할 원본 page를 선택한다. revision CAS와 현재 byte snapshot으로 removal plan을 먼저 고정하며, 적용은 page별 pending DB intent → artifact 내부 quarantine move → manifest atomic replace → page/artifact/group/plan transaction 순서다. undo는 원래 relative path와 immutable source page number를 복원한다. 앱 종료가 filesystem/DB 사이에 발생해도 시작 시 pending saga를 재개하며 모호한 경로는 덮어쓰거나 삭제하지 않는다. 자동 영구 삭제는 없다.
+1. 실제 사용자 download root에서 새 folder template 결과와 기존 artifact 불변을 수동 확인한다.
+2. 대표 AVIF gallery corpus를 수집하지 않고도 재현 가능한 합법 fixture/opt-in test 경계를 정한다.
+3. JPEG XL decoder 도입 여부를 memory/supply-chain/maintenance 평가 뒤 결정한다. 현재는 unsupported를 유지한다.
+4. 기존 artifact relocation/rename이 정말 필요하면 별도의 dry-run, revisioned journal, rollback 설계를 먼저 승인한다.
+5. quarantine 영구 비우기는 대상/용량/복구 불가 확인 UX가 승인되기 전까지 구현하지 않는다.
 
-## Phase 7: Classic import와 전환
-
-완료했다. 사용자가 고른 Classic data/download root에서 state, 선택적 localStorage export, manifest, numbered page, quarantine과 legacy hash DB를 읽기 전용으로 조사한다. gallery ID 연결과 typed conflict, eligible copy byte를 revisioned dry-run으로 저장하고 모든 경고와 최종 적용을 명시적으로 승인받는다. eligible page는 apply 직전에 source fingerprint·SHA·length·decode를 다시 검사한 뒤 Next `gallery-{id}`에 WebP 복사·manifest 검증하고 metadata와 함께 transaction으로 등록한다. rollback은 이 import의 Next copy만 관리 quarantine으로 옮기고 journal에 기록된 새 DB row만 제거한다. 중단된 apply/rollback은 시작 시 안전하게 수렴한다. Classic 원본은 이동·수정·삭제하지 않는다.
-
-## 작업 규칙
-
-- 각 Phase는 실행 가능한 얇은 결과를 남긴다.
-- 승인되지 않은 UX를 production component로 만들지 않는다.
-- remote site 응답에 의존하는 test는 fixture test와 분리한다.
-- 문제 수정은 Incident와 regression test를 같이 남긴다.
-- Classic에 필요한 최소 수정은 별도 승인과 별도 commit으로 격리한다.
-
-## 다음 즉시 작업
-
-1. 완료: `search_submit`, `search_page_get`, `gallery_detail_get` adapter, metadata/thumbnail DTO, App projection과 저장 fixture.
-2. 완료: 같은 gallery ID의 queue 멱등성, revision snapshot, 다운로드 상태 복구 기반과 production mock 완료 경로 제거.
-3. 완료: 중앙 상태 전이, attempt/error/timestamp schema, `download_retry`/`download_cancel`, `cancelled`와 batch/CAS 회귀 검증.
-4. 완료: 공용 thumbnail key/component와 프로세스 전역 coordinator, priority, in-flight dedupe, 취소, 성공/실패 cache 기반.
-5. 완료: 실제 Hitomi metadata/thumbnail resolver, 공용 HTTP gate, 저장 fixture 기반 404/429/503/timeout 정책과 이미지 안전 검증.
-6. 완료: 앱 내부 single-instance 계약과 migration 전 SQLite backup/future-schema 거부. repository open은 WAL·busy timeout을 사용하고 job 복구는 single-instance를 획득한 app setup에서만 명시적으로 실행한다.
-7. 완료: 정식 queue runner와 artifact 저장·검증·resume·reconcile, 첫 이미지 열기와 Phase 3 filesystem/SQLite 통합 검증.
-8. 완료: 영속 즐겨찾기·검색 이력, 명시적 작가 갱신, Auto Find 진행·취소·복원과 local grouping/filter/batch queue 연결.
-9. 완료: 실제 artifact evidence를 사용하는 작품 단위 중복 후보·판정·Review와 Auto Find decision 제외 연동.
-10. 완료: 완료 artifact 내부의 반복 장면 block, synchronized source-page Review, removal plan, page quarantine·undo와 manifest/DB 일관성.
-11. 완료: Classic read-only inventory, typed dry-run conflict report, 승인형 verified copy/import, crash recovery와 Next-only rollback.
-12. 완료: 최종 운영 polish, 실제 page 확대, dialog focus 복원, production fixture fallback 제거, 사용자 오류와 내부 detail 분리, launcher/startup log redaction, dependency·third-party 고지와 일치 version 검증.
-13. 최종 전달: 전체 Windows 검증, Git push와 PR 갱신, 실제 Tauri 앱 수동 검토를 수행한다.
+세부 제한과 rollback은 [KNOWN_ISSUES.md](KNOWN_ISSUES.md), 계약은 [API_CONTRACT_V2.md](API_CONTRACT_V2.md), 실제 인계 상태는 [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md)를 기준으로 한다.

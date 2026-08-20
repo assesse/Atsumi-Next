@@ -103,7 +103,7 @@
       grid.querySelectorAll(".tag-list").forEach(fitTagChips);
     };
     document.querySelector("#preview").addEventListener("change", render);
-    document.querySelectorAll("[data-columns]").forEach((button) => button.addEventListener("click", () => { grid.style.setProperty("--columns", button.dataset.columns); document.querySelectorAll("[data-columns]").forEach((item) => item.setAttribute("aria-pressed", String(item === button))); requestAnimationFrame(() => grid.querySelectorAll(".tag-list").forEach(fitTagChips)); }));
+    document.querySelectorAll("[data-columns]").forEach((button) => button.addEventListener("click", () => { grid.style.setProperty("--columns", button.dataset.columns); document.querySelectorAll("[data-columns]").forEach((item) => item.setAttribute("aria-pressed", String(item === button))); requestAnimationFrame(render); }));
     new ResizeObserver(() => grid.querySelectorAll(".tag-list").forEach(fitTagChips)).observe(grid);
     render();
   </script>

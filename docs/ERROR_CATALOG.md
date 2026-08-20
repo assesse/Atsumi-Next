@@ -20,6 +20,7 @@
 | `IMAGE_CANDIDATES_EXHAUSTED` | 이미지 서버에서 파일을 찾지 못했습니다 | 조건부 | URL 진단 또는 재조회 |
 | `IMAGE_RESPONSE_INVALID` | 이미지가 아닌 응답을 받았습니다 | 아니오 | 다른 후보를 모두 시도한 뒤 상세 확인 |
 | `IMAGE_DECODE_FAILED` | 이미지 처리에 실패했습니다 | 조건부 | 원본 보존, 상세 확인 |
+| `IMAGE_FORMAT_UNSUPPORTED` | 현재 지원하지 않는 이미지 형식입니다 | 아니오 | 다른 후보 진단 확인; decoder 지원 전 자동 재시도 금지 |
 | `DOWNLOAD_ROOT_REQUIRED` | 다운로드 폴더를 먼저 선택하세요 | 아니오 | 첫 다운로드에서 선택 |
 | `DOWNLOAD_ROOT_SELECTION_CANCELLED` | 폴더 선택을 취소해 대기열을 만들지 않았습니다 | 아니오 | 원할 때 다시 실행 |
 | `DOWNLOAD_ROOT_UNAVAILABLE` | 선택한 다운로드 폴더를 사용할 수 없습니다 | 아니오 | 권한·경로 확인 |
@@ -67,6 +68,10 @@ elapsed_ms, app_version, schema_version
 URL query, cookie, session token, 로컬 사용자 이름은 기본 로그에서 제거한다.
 
 Thumbnail event는 같은 원인을 camelCase code(`candidatesExhausted`, `responseInvalid`, `decodeFailed`)와 명시적 `retryable`로 전달한다. WebView는 이 값을 보존해 사용자 문구와 재시도를 결정하며 raw source 오류 문자열을 분기 조건으로 사용하지 않는다.
+
+`IMAGE_FORMAT_UNSUPPORTED`는 현재 JPEG XL 후보와 안전하게 decode할 수 없는 source 형식에 사용한다. Hitomi adapter는 JXL diagnostic을 기록하고 지원하는 WebP/JPEG/PNG/AVIF 후보를 계속 시도한다. 모든 fallback이 끝난 뒤에만 non-retryable 오류가 download envelope에 나타난다. AVIF decode 자체의 손상·한도 초과는 원인에 따라 `IMAGE_DECODE_FAILED` 또는 같은 unsupported 계약 오류로 정규화하며 raw decoder panic/message는 사용자 오류에 넣지 않는다.
+
+Explore의 `search_page_cancel`은 정상적인 수명 종료다. active token과 cancel-before-start tombstone이 source 작업을 취소하면 `REQUEST_CANCELLED`로 정규화할 수 있지만 UI는 이를 오류 toast나 retry 대상으로 취급하지 않고 현재 query의 늦은 결과를 폐기한다.
 
 ## Auto Find run 오류
 

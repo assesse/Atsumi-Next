@@ -34,7 +34,7 @@
 | D-114 | 최대 열 수는 고정 열 수가 아니라 상한이며, 실제 container 폭과 미리보기 폭이 부족하면 더 적은 열을 사용한다. | 2026-08-12 사용자 피드백 |
 | D-115 | 상세 대표·페이지 preview는 fixture/실제 source가 제공한 이미지 비율을 사용하고 잘린 중첩 viewport에 가두지 않으며 Related 표지는 식별 가능한 크기로 제공한다. 실제 source별 width/height는 Phase 3 thumbnail 계약에 포함한다. | 2026-08-12 사용자 피드백 |
 | D-116 | 별도 선택 mode 상태를 만들지 않는다. Ctrl/Shift 또는 선택 개수로 선택 문맥을 파생하며, 문맥 안의 일반 좌클릭은 대상 하나로 교체하고 Ctrl만 toggle, Shift만 범위 선택으로 동작한다. | 2026-08-12 사용자 승인 |
-| D-117 | 국가 아이콘은 Classic이 실제 UI에서 사용한 FlagCDN KR/JP/US PNG를 byte-identical 로컬 자산으로 묶는다. Classic에 없던 중국어 badge는 생략한다. | 2026-08-13 사용자 승인 및 Classic 런타임 감사 |
+| D-117 | 국가 아이콘은 Classic이 실제 UI에서 사용한 FlagCDN KR/JP/US PNG를 byte-identical 로컬 자산으로 묶는다. 중국어는 런타임 네트워크 요청 없는 로컬 CN SVG와 텍스트 fallback을 사용한다. | 2026-08-13 사용자 승인 및 2026-08-20 로컬 CN 보완 |
 | D-118 | 구현 검토 단계에서는 MSI/Setup 패키징을 반복하지 않고 검증 후 Tauri 개발 앱을 직접 실행한다. 배포 패키지는 명시적인 릴리스 시점에만 만든다. | 2026-08-12 사용자 승인 |
 | D-119 | Esc는 열린 상세의 active tab 하나를 먼저 닫고, 상세가 없으면 선택 해제, 선택도 없으면 트레이 최소화/프로그램 종료 선택창을 연다. 진행 중 다운로드 수와 종료 시 중단 복구를 함께 안내한다. | 2026-08-13 사용자 승인 |
 | D-120 | 카드 표지의 hover `+`/`…` command를 제거하고, sole selection 일반 재클릭은 선택 해제한다. 선택 0의 첫 일반 metadata/status 클릭은 원래 action을 수행한다. | 2026-08-13 사용자 승인 |
@@ -67,6 +67,13 @@
 | D-147 | Classic rollback은 해당 import가 새로 만든 Next DB row와 복사본만 대상으로 하며 파일은 영구 삭제하지 않고 import 전용 quarantine으로 이동한다. 적용/rollback 중단도 시작 시 같은 상태로 수렴한다. | 2026-08-16 Milestone G 구현 |
 | D-148 | production thumbnail client는 앱 composition root가 반드시 명시적으로 주입한다. React context가 브라우저 fixture로 암묵 fallback하지 않으며 browser review mode만 명시적인 fixture adapter를 사용한다. | 2026-08-16 Milestone H 보안 경계 |
 | D-149 | 설정에는 실제 구현된 일반·저장 공간만 노출한다. 안전한 plan·undo가 없는 cache/영구 삭제는 이유를 표시한 disabled 상태로 두며, 상세 page 확대는 전역 thumbnail coordinator를 사용하는 실제 dialog로 제공한다. | 2026-08-16 Milestone H 운영 UX |
+| D-150 | 앨범 카드는 포스터형 대신 가로 밀도형을 유지한다. 점수·날짜는 제거하고 기존 metadata 종류는 보존하되, 실제 chip 측정·font 준비·container resize와 원본 이미지 비율로 배치를 적응시킨다. | 2026-08-20 사용자 지시 및 adaptive card 구현 |
+| D-151 | frontend thumbnail 구독은 마지막 이탈 뒤 400ms grace를 두고, 완료 display asset은 120초·최대 256개 보존한다. 이는 전역 Rust cache와 별개이며 최종 eviction 때만 Blob URL을 해제한다. | 2026-08-20 viewport churn 회귀 수정 |
+| D-152 | Explore는 query별 완료 page를 최대 5개, 현재 page ±2로 제한하고 인접 page를 prefetch한다. query reset은 requestId별 backend 작업도 `search_page_cancel`로 실제 취소하며 late completion은 projection을 바꾸지 않는다. | 2026-08-20 Explore cache·취소 구현 |
+| D-153 | artifact folder template은 새 artifact에만 적용하고 `{id}`를 필수로 한다. 이미 등록된 `relative_directory`와 `root_snapshot`은 immutable이며 자동 rename·move·일괄 migration은 제공하지 않는다. | 2026-08-20 schema v15/v16 안전 경계 |
+| D-154 | AVIF는 `avif-rust=0.0.6`, `bin-rs=0.0.10`의 순수 Rust bounded decoder로 실험 지원한다. JPEG XL은 형식 diagnostic만 보존하고 decoder가 없으므로 fallback 뒤 `IMAGE_FORMAT_UNSUPPORTED`로 종료한다. | 2026-08-20 source recovery 구현 |
+| D-155 | Auto Find history mode는 run 시작 시 snapshot한다. `newer_than_oldest_downloaded` cutoff는 검증 소유 artifact만 근거로 하고 `source=verified_owned_artifact`, `policyVersion=1`을 영속한다. 증거가 없으면 cutoff하지 않는다. | 2026-08-20 schema v17 안전 경계 |
+| D-156 | Auto Find는 Nozomi ID에 cutoff를 먼저 적용한 뒤 최대 50,000 candidate를 처리하고 초과 시 `candidate_limit_after_cutoff`를 기록한다. 기존 작가당 250-page 상한은 폐기한다. | 2026-08-20 Auto Find source 정책 |
 
 ## 제안
 

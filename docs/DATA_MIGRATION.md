@@ -4,26 +4,29 @@
 
 새 버전의 영속 데이터 기준은 SQLite 하나로 통합한다. 파일 시스템은 artifact의 실제 존재를 증명하며, DB와 불일치하면 reconciliation job이 해결한다.
 
-## 현재 구현 schema (v14)
+## 현재 구현 schema (v17)
 
 | 테이블 | 책임 |
 |---|---|
-| `settings` | versioned 사용자 설정 |
+| `settings` | versioned 사용자 설정; v15 folder template, v17 Auto Find history mode 포함 |
 | `window_placement` | 창 위치·크기 revision snapshot |
 | `galleries` | 정규화된 gallery metadata snapshot |
 | `download_entries` | 사용자가 관리하는 다운로드 항목 |
 | `download_jobs` | 영속 job과 현재 단계 |
 | `download_attempts` | job attempt와 종료 상태·오류 기록 |
 | `download_queue_requests`·`download_queue_request_entries` | idempotent queue 응답 snapshot |
-| `download_artifacts` | gallery artifact·manifest revision |
+| `download_artifacts` | gallery artifact·manifest revision, immutable `relative_directory`와 `root_snapshot` |
 | `download_pages` | source page와 local artifact 상태 |
-| `download_page_attempts` | job attempt 안의 source page/candidate 결과 |
+| `download_page_attempts` | job attempt 안의 source page/candidate 형식·HTTP/content-type·retryability 진단 |
 | `quarantine_records` | 원본·격리 상대 경로와 crash-safe move/restore saga |
 | `favorites` | 작가·그룹·시리즈·캐릭터·태그의 정규화 key와 revision |
 | `search_history` | 성공한 명시적 검색의 전체 정규화 요청 fingerprint, 사용 횟수와 최근 시각 |
 | `auto_find_runs` | 명시적 작가 갱신의 상태·revision·진행률·안전 오류 |
 | `auto_find_candidates` | run별 `GallerySummary` snapshot(시리즈·캐릭터 포함)과 일치한 즐겨찾기 key |
 | `auto_find_exclusions` | gallery ID별 영속 후보 제외와 이유 |
+| `owned_gallery_artists` | 검증 artifact의 보수적 작가 소유 증거 |
+| `auto_find_run_cutoffs` | 작가별 oldest gallery, qualified count, 고정 source/policy version |
+| `auto_find_run_truncations` | cutoff 뒤 candidate limit 초과 증거 |
 | `duplicate_hash_profiles` | versioned 작품 중복 hash·threshold 계약 |
 | `duplicate_page_hashes` | 검증 artifact page의 SHA-256·coarse/detail dHash·pHash·분산/edge feature cache |
 | `duplicate_scan_runs` | full scan 상태·revision·hash/pair 진행률·안전 오류 |
@@ -95,6 +98,29 @@
 - Classic hash DB는 `READ_ONLY + query_only`로 열고 row 수만 provenance로 저장한다. Next HashProfile duplicate blocking에는 사용하지 않는다.
 - v1~v13 의미와 manifest/HashProfile version을 바꾸지 않는 additive migration이며 기존 DB는 migration 전 일관 backup을 만든다.
 
+### v15 추가 규칙
+
+- migration 이름은 `artifact_folder_template_and_immutable_path`다.
+- `settings.folder_name_template`을 기본 `[{artist}] {title} [{group}] {id}`로 추가한다. application validation은 빈 값/512 bytes 초과/control 문자/중괄호 오류/알 수 없는 token을 거부하고 `{id}`를 필수로 한다.
+- 새 artifact의 folder component는 Windows 금지 문자·reserved device name·trailing dot/space를 제거하고 gallery ID를 보존하면서 component 180 UTF-16 units, 관리 절대 경로 240 UTF-16 units 안으로 제한한다.
+- `download_artifacts.relative_directory` update trigger가 기존 artifact 위치 변경을 거부한다. migration은 기존 `gallery-<id>` 또는 다른 legacy 상대 경로를 다시 계산하거나 이름 변경하지 않는다.
+
+### v16 추가 규칙
+
+- migration 이름은 `download_candidate_diagnostics_and_artifact_root_snapshot`이다.
+- `download_jobs.last_error_retryable`, `download_attempts.error_retryable`과 `download_page_attempts.candidate_format/http_status/content_type/retryable`을 additive하게 추가한다. candidate 형식은 `unknown|webp|jpeg|png|avif|jxl`이다.
+- `download_artifacts.root_snapshot`을 기존 `settings.download_root`로 backfill하고 immutable update trigger로 보호한다. resume/reconcile/Review가 현재 설정값이 아니라 artifact 최초 예약 root를 사용하게 한다.
+- v15→v16은 artifact 파일을 이동하거나 manifest 경로를 다시 쓰지 않는다.
+
+### v17 추가 규칙
+
+- migration 이름은 `auto_find_history_cutoff_evidence`다.
+- `settings.auto_find_history_mode`와 `auto_find_runs.history_mode`를 `include_all_history|newer_than_oldest_downloaded` enum으로 추가하고 기본값을 `include_all_history`로 둔다. 실행 중 설정 변경은 현재 run에 섞이지 않는다.
+- `owned_gallery_artists`는 completed/quarantined entry와 complete/quarantined artifact가 모두 있는 경우만 소유 증거로 인정한다. legacy backfill은 저장된 `galleries.primary_artist`만 사용하며 추가 artist를 추측하지 않는다.
+- `auto_find_run_cutoffs`는 `source='verified_owned_artifact'`, `policy_version=1` CHECK를 가지며 작가별 optional oldest ID와 qualified count를 저장한다. 증거가 없으면 cutoff가 없다.
+- `auto_find_run_truncations`는 `reason='candidate_limit_after_cutoff'`, eligible count와 limit을 저장한다. 현재 application limit은 cutoff 적용 뒤 50,000 candidate다.
+- v14→latest migration 회귀 테스트는 v15/v16/v17의 순서, legacy relative directory 보존, `root_snapshot` backfill과 두 경로의 immutability를 검증한다.
+
 ## Classic 입력원
 
 - `AtsumiData/state.json`
@@ -133,27 +159,28 @@ localStorage 값은 Classic 원본을 수정하지 않고 사용자가 별도로
 
 ## 폴더 구조
 
-Next가 새로 만드는 관리 구조는 gallery ID로 결정론적으로 고정한다. 사용자 제목이나 frontend 문자열로 경로를 만들지 않는다.
+Next가 새로 만드는 artifact 폴더는 backend가 검증한 `folder_name_template`으로 결정한다. frontend는 최종 경로를 계산하지 않으며 gallery ID token을 항상 포함한다. 아래는 기본 template 예시이고 기존 `gallery-<id>` 폴더는 그대로 유지된다.
 
 ```text
-D:\Atsumi\gallery-4051027\
+D:\Atsumi\[artist] Gallery title [group] 4051027\
   0001.webp
   0002.webp
   manifest.json
-D:\Atsumi\.atsumi-quarantine\<record-id>\gallery-4051027\
+D:\Atsumi\.atsumi-quarantine\<record-id>\[artist] Gallery title [group] 4051027\
   0001.webp
   manifest.json
 ```
 
-폴더명을 만드는 canonical 함수는 backend 한 곳에만 둔다. 프론트는 최종 경로를 계산하지 않는다.
+폴더명을 만드는 canonical 함수는 backend 한 곳에만 둔다. template 변경은 이후 새 artifact에만 적용되고 기존 `relative_directory`/`root_snapshot`을 자동 rename·move하지 않는다.
 
 ## rollback
 
 - Next는 Classic 원본 DB와 state를 수정하지 않는다.
 - import 시 모든 파일 작업은 dry-run report를 먼저 만든다.
 - 실제 Classic 다운로드 파일은 import를 위해 이동하지 않는다. 검증된 Next 복사본만 만든다.
-- rollback은 해당 import의 Next `gallery-{id}`만 import 전용 quarantine으로 이동하고, journal에 기록된 새 DB row만 제거한다. 격리본과 Classic 원본을 자동 삭제하지 않는다.
+- rollback은 해당 import가 기록한 Next artifact 폴더만 import 전용 quarantine으로 이동하고, journal에 기록된 새 DB row만 제거한다. 격리본과 Classic 원본을 자동 삭제하지 않는다.
 - Next가 생성한 새 manifest는 schema와 writer version을 가진다.
+- schema v15~v17 downgrade는 지원하지 않는다. 오래된 binary는 future-schema를 쓰기 전에 거부하며 실제 downgrade는 migration 전 backup과 호환 binary를 함께 복원해야 한다.
 
 ## 승인 필요
 

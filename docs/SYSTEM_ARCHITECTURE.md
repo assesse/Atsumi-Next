@@ -134,7 +134,7 @@ type JobEvent = {
 
 ## 데이터 소유권
 
-- SQLite: 설정, Gallery snapshot, 다운로드, job, page, 판정, 제외, 즐겨찾기, 검색 이력과 Auto Find run/후보의 canonical source
+- SQLite(schema v17): 설정, Gallery snapshot, 다운로드, immutable artifact 위치, job/page attempt 진단, 판정, 제외, 즐겨찾기, 검색 이력과 Auto Find run/후보/cutoff/truncation의 canonical source
 - 실제 폴더: 다운로드 artifact
 - 폴더 manifest: 이식성과 복구를 위한 파생 metadata
 - thumbnail cache: 언제든 재생성 가능한 cache
@@ -152,18 +152,30 @@ type JobEvent = {
 - 대기·backoff·body read는 cancellation token을 확인하며, 취소 뒤 도착한 결과는 cache에 넣지 않는다.
 - telemetry는 host, attempt, elapsed와 분류 code만 기록하고 URL query·cookie·검색어는 기록하지 않는다.
 
+## Explore query session
+
+- UI에는 동시에 하나의 `ExplorePageSession`만 둔다. query별 완료 page는 최대 5개이고 현재 page와 앞뒤 2개 창만 유지하며, 인접 page는 foreground 결과 뒤 낮은 우선순위로 prefetch한다. page별 scroll offset도 session projection에 저장한다.
+- foreground와 prefetch가 같은 page를 요청하면 하나의 in-flight promise를 공유하고 prefetch를 foreground로 승격한다. 실패한 prefetch는 자동 반복하지 않으며 사용자의 foreground retry만 새 요청을 만든다.
+- `search_page_get`은 query/page뿐 아니라 고유 requestId를 받는다. query 교체·reset·창 밖 eviction은 `search_page_cancel`로 backend active token을 실제 취소한다.
+- cancel이 start보다 먼저 도착하는 race는 최대 256개의 bounded tombstone으로 흡수한다. 뒤늦은 start는 이미 cancelled token을 받고 source metadata loop를 진행하지 않으며, 늦은 completion도 새 query projection에 합쳐지지 않는다.
+
+## 앨범 카드 projection
+
+- Explore/Auto Find/Downloads는 점수·날짜를 제거한 가로 밀도형 카드를 공유한다. title/subtitle, artist/group, language, tags, page count와 gallery ID라는 정보 종류는 유지하되 화면별 상태 action과 선택 규칙만 projection한다.
+- image는 source가 제공한 width/height 비율을 사용하고 preview width를 가용 content rect에 맞춘다. `ResizeObserver`, `document.fonts.ready`와 실제 chip width/height 측정으로 열 수·폰트·폭 변경 뒤 다시 배치한다.
+
 ## Thumbnail coordinator
 
 - 앱 프로세스에는 탭별 worker가 아니라 `ThumbnailCoordinator` 하나만 둔다.
-- Explore, Downloads, Detail, Review는 `GalleryCover(galleryId)` 또는 `GalleryPage(galleryId, sourcePage)` key만 요청한다.
+- Explore, Downloads, Detail은 `GalleryCover(galleryId)`/`GalleryPage(galleryId, sourcePage)`, gallery·internal Review는 root-bound `ArtifactPage(entryId, sourcePage)` key를 요청한다.
 - coordinator가 `critical > visible > prefetch` queue, 동시성, 요청 시작 간격, in-flight 병합, 성공 cache와 짧은 실패 cache를 소유한다.
-- 각 UI 구독은 고유 requestId를 가진다. 마지막 구독 취소 시 resolver cancellation token을 중단하고 늦은 결과를 cache에 넣지 않는다.
+- 각 UI 구독은 고유 requestId를 가진다. 마지막 구독 취소 뒤 frontend는 400ms orphan grace를 두고 같은 key의 빠른 재구독을 공유한다. grace 뒤에도 구독이 없을 때 resolver cancellation token을 중단하고 늦은 결과를 cache에 넣지 않는다.
 - worker 완료는 하나의 process-wide completion channel을 거쳐 `thumbnail:ready`로 전달한다. 카드 수만큼 대기 thread/task를 만들지 않는다.
-- WebView는 전달된 byte payload를 짧게 유지되는 Blob URL로 표시하고 마지막 frontend 구독에서 해제한다. 실제 원본 URL과 cache path는 backend 경계 밖으로 노출하지 않는다.
+- WebView는 전달된 byte payload를 Blob URL로 표시한다. 완료 asset은 마지막 구독 뒤 120초·최대 256개까지 frontend retention cache에 두며 최종 eviction에서만 revoke한다. 실제 원본 URL과 cache path는 backend 경계 밖으로 노출하지 않는다.
 - 카드 preview는 `IntersectionObserver`의 near-viewport 경계 안에서만 구독하고, 경계를 벗어나면 frontend 구독과 Blob URL을 해제한다. Detail/Review의 현재 작업은 `critical`, 화면 안 카드는 `visible`, 나머지는 `prefetch`로 분류한다.
-- retryable failure는 짧은 negative-cache TTL 뒤 한정 재시도하고, permanent failure는 더 긴 negative cache로 반복 원격 호출을 막는다. WebView decode 실패는 해당 key cache를 무효화한 뒤 한 번만 재해석한다.
+- backend success cache 기본값은 512 entries/64MiB/30분이다. retryable failure는 3초, permanent failure는 5분 negative-cache TTL로 반복 원격 호출을 막는다. WebView decode 실패는 해당 key cache를 무효화한 뒤 한 번만 재해석한다.
 - production Tauri는 `HitomiLiveAdapter` 하나를 `SearchRepository`와 `ThumbnailResolver` 양쪽에 공유 주입한다. 브라우저 review mode와 단위 테스트만 fixture resolver를 사용한다.
-- resolver는 HTTPS allowlist·redirect 재검증·응답 크기·MIME/signature·decode dimension/allocation을 검사하고 WebP 후보를 순서대로 시도한다. thumbnail은 재생성 가능한 bounded memory cache이며, 영속 파일은 검증된 download artifact만 소유한다.
+- resolver는 HTTPS allowlist·redirect 재검증·응답 크기·MIME/signature·decode dimension/allocation을 검사하고 지원 후보를 순서대로 시도한다. thumbnail은 재생성 가능한 bounded memory cache이며, 영속 파일은 검증된 download artifact만 소유한다.
 
 ## 즐겨찾기·검색 이력·Auto Find
 
@@ -176,14 +188,16 @@ type JobEvent = {
 - cancel token과 DB run state를 함께 확인해 취소 뒤 늦은 page를 저장하지 않는다. 정상 앱 종료는 active run을 `cancelled/AUTO_FIND_APP_EXIT`, 비정상 종료 뒤 startup recovery는 남은 run을 `failed/AUTO_FIND_INTERRUPTED`로 종결하고 부분 후보를 보존한다.
 - 후보 insert와 snapshot은 모든 download entry, 명시적 Auto Find exclusion, 작품 숨김, resolved duplicate decision과 pair 제외를 제외한다. 이 판정은 frontend flag가 아니라 schema v12의 SQLite record를 조회한다.
 - 전체/작가별 묶음, 결과 문자열 검색과 언어 filter는 이미 저장된 후보에 대한 frontend local projection이다. 이 조작은 source request를 만들지 않는다. 후보 일괄 다운로드는 기존 idempotent download queue use case를 재사용한다.
-- 전체 기간 조회는 source가 보고한 page를 순회하되 안전 상한은 작가당 250 page, page size는 200이다. 상한을 넘는 초대형 작가 결과는 명시된 현재 제한이다.
+- run은 설정의 `include_all_history|newer_than_oldest_downloaded`를 snapshot한다. 후자는 complete/quarantined 상태의 실제 소유 artifact만 근거로 작가별 oldest gallery ID를 계산하고 `source=verified_owned_artifact`, `policyVersion=1`, qualified count를 저장한다. 증거가 없으면 임의 cutoff하지 않는다.
+- production source는 언어별 Nozomi ID를 교집합·dedupe·내림차순 정렬한 뒤 cutoff를 metadata fetch 전에 적용한다. cutoff 뒤 candidate limit은 50,000개이고 초과는 `candidate_limit_after_cutoff` truncation으로 영속한다. 과거의 작가당 250-page 상한은 더 이상 현재 계약이 아니다.
 
 ## Download artifact pipeline
 
 - queue commit 뒤 bounded gallery worker가 자동 시작하며, source metadata와 이미지 I/O 중에는 SQLite transaction을 잡지 않는다.
 - 원본 `source_page_number`와 source revision을 immutable identity로 사용한다. source payload의 identity가 계획과 다르면 저장 전에 거부한다.
 - 각 page는 bounded HTTP body read, `.part` 64KiB chunk write, flush/sync, decode/WebP 검증, SHA-256 후 atomic rename 순서를 따른다.
-- 검증된 원본 WebP는 byte를 보존하고 JPEG/PNG는 RGBA lossless WebP로 변환한다. alpha는 보존하며, 변환 입력의 animation은 첫 frame 정책이다. 이 정책과 writer/app version은 manifest에 기록한다.
+- 검증된 원본 WebP는 byte를 보존하고 JPEG/PNG/AVIF는 RGBA lossless WebP로 변환한다. AVIF는 pinned `avif-rust 0.0.6`/`bin-rs 0.0.10`과 dimension/allocation 제한을 사용하는 experimental 경로다. JPEG XL은 현재 decode하지 않고 후보 diagnostic 뒤 fallback을 계속하며 최종 실패는 non-retryable `IMAGE_FORMAT_UNSUPPORTED`다. alpha는 보존하며, 변환 입력의 animation은 첫 frame 정책이다. 이 정책과 writer/app version은 manifest에 기록한다.
+- 새 artifact의 상대 폴더는 backend가 `folder_name_template`을 검증·sanitize해 최초 예약한다. `{id}`는 필수이고 기존 `relative_directory`와 최초 `root_snapshot`은 schema v15/v16 trigger로 immutable이다. 설정 변경은 이후 새 artifact에만 적용되며 자동 rename/move가 없다.
 - manifest schema 1은 gallery snapshot, source page mapping, relative path, byte length, SHA-256, storage format, exclusion/quarantine, 완료 시각과 HashProfile version을 가진다.
 - 모든 page 파일과 DB checkpoint를 다시 검증하고 manifest temp write/sync/atomic replace를 마친 뒤에만 DB artifact/job/entry를 `completed`로 바꾼다.
 - startup/manual reconcile은 pending quarantine saga를 먼저 마무리하고, 완료 artifact의 파일·hash·manifest를 검사한 뒤 interrupted job을 verified checkpoint부터 재개한다.
