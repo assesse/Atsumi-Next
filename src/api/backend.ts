@@ -131,6 +131,7 @@ export interface BackendClient {
 const defaultSettings: SettingsSnapshot = {
   revision: 0,
   downloadRoot: "",
+  folderNameTemplate: "[{artist}] {title} [{group}] {id}",
   maxColumns: 3,
   previewWidth: 220,
   cacheLimitGb: 10,
@@ -189,6 +190,42 @@ const validateIntegerRange = (
     return validationError(field, `${minimum} 이상 ${maximum} 이하의 정수여야 합니다.`);
   }
   return null;
+};
+
+const validateFolderNameTemplate = (template: string): ApiResult<never> | null => {
+  if (!template.trim()) return validationError("folderNameTemplate", "비어 있을 수 없습니다.");
+  if (new TextEncoder().encode(template).length > 512) {
+    return validationError("folderNameTemplate", "UTF-8 기준 512바이트 이하여야 합니다.");
+  }
+  if ([...template].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+  })) {
+    return validationError("folderNameTemplate", "제어 문자를 포함할 수 없습니다.");
+  }
+
+  const allowed = new Set(["artist", "title", "group", "id"]);
+  let hasId = false;
+  for (let index = 0; index < template.length;) {
+    if (template[index] === "}") {
+      return validationError("folderNameTemplate", "중괄호가 올바르게 닫혀야 합니다.");
+    }
+    if (template[index] !== "{") {
+      index += 1;
+      continue;
+    }
+    const end = template.indexOf("}", index + 1);
+    if (end < 0 || template.slice(index + 1, end).includes("{")) {
+      return validationError("folderNameTemplate", "중괄호가 올바르게 닫혀야 합니다.");
+    }
+    const token = template.slice(index + 1, end);
+    if (!allowed.has(token)) {
+      return validationError("folderNameTemplate", "artist/title/group/id 토큰만 사용할 수 있습니다.");
+    }
+    hasId ||= token === "id";
+    index = end + 1;
+  }
+  return hasId ? null : validationError("folderNameTemplate", "{id} 토큰이 필요합니다.");
 };
 
 const activeDownloadStates: ReadonlySet<DownloadEntry["state"]> = new Set([
@@ -449,6 +486,7 @@ class BrowserMockBackend implements BackendClient {
     if (expectedRevision !== this.settings.revision) return conflict("설정");
     const next = { ...this.settings, ...patch };
     const invalid =
+      validateFolderNameTemplate(next.folderNameTemplate) ??
       validateIntegerRange(next.maxColumns, "maxColumns", 1, 4) ??
       validateIntegerRange(next.previewWidth, "previewWidth", 160, 360) ??
       validateIntegerRange(next.cacheLimitGb, "cacheLimitGb", 1, 30) ??
@@ -1393,6 +1431,7 @@ class BrowserMockBackend implements BackendClient {
         title: "Archive of Rain",
         artist: "serein",
         sourceFolder: "Archive of Rain",
+        relativeDirectory: "[serein] Archive of Rain 4051038",
         expectedPages: 12,
         pages: [],
         plannedBytes: 4_194_304,

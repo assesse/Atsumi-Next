@@ -10,9 +10,9 @@ use serde_json::json;
 
 use crate::{
     application::{
-        ApplicationService, ArtifactStore, AutomationRepository, ClassicImportRepository,
-        ClassicImportService, ClassicImportTransitionOutcome, ClassicSourceInspector,
-        DownloadRepository, StateRepository,
+        ApplicationError, ApplicationService, ArtifactStore, AutomationRepository,
+        ClassicImportRepository, ClassicImportService, ClassicImportTransitionOutcome,
+        ClassicSourceInspector, DownloadRepository, StateRepository,
     },
     domain::{
         ClassicConflictCode, ClassicImportApplyRequest, ClassicImportDryRunRequest,
@@ -20,6 +20,40 @@ use crate::{
     },
     infrastructure::{FilesystemArtifactStore, FilesystemClassicSource, SqliteRepository},
 };
+
+#[test]
+fn classic_v1_dry_run_requires_a_new_typed_plan_before_any_copy() {
+    let temporary = tempfile::tempdir().expect("create Classic import fixture");
+    let fixture = create_classic_fixture(temporary.path());
+    let (repository, _application, importer) =
+        import_services(temporary.path(), &fixture.next_root);
+    let inspector = FilesystemClassicSource::new();
+    let mut inventory = inspector
+        .inspect(&fixture.data_root, Some(&fixture.download_root))
+        .expect("inspect Classic fixture");
+    inventory.plan.schema_version = 1;
+    let stored = repository
+        .classic_import_save_dry_run(
+            &path_text(&fixture.data_root),
+            Some(&path_text(&fixture.download_root)),
+            &inventory.data_root_label,
+            inventory.download_root_label.as_deref(),
+            &inventory.plan,
+        )
+        .expect("store legacy dry-run");
+
+    let error = importer
+        .apply(ClassicImportApplyRequest {
+            import_id: stored.report.import_id,
+            expected_revision: stored.report.revision,
+            accepted_conflict_ids: Vec::new(),
+        })
+        .expect_err("v1 dry-run must be rerun");
+
+    assert!(matches!(error, ApplicationError::ClassicImportPlanOutdated));
+    assert!(fs::read_dir(&fixture.next_root).unwrap().next().is_none());
+    assert_classic_unchanged(&fixture);
+}
 
 struct ClassicFixture {
     data_root: PathBuf,
@@ -46,6 +80,11 @@ fn classic_import_is_read_only_applies_verified_copies_and_rolls_back_only_next_
     assert_eq!(dry_run.counts.galleries_eligible, 1);
     assert_eq!(dry_run.counts.page_files, 2);
     assert!(dry_run.conflicts.is_empty());
+    let relative_directory = dry_run.galleries[0]
+        .relative_directory
+        .as_deref()
+        .expect("v2 dry-run stores the planned relative directory")
+        .to_owned();
 
     let applied = importer
         .apply(ClassicImportApplyRequest {
@@ -59,10 +98,19 @@ fn classic_import_is_read_only_applies_verified_copies_and_rolls_back_only_next_
     assert_eq!(applied.copied_files, 2);
     assert!(fixture
         .next_root
-        .join("gallery-123/manifest.json")
+        .join(&relative_directory)
+        .join("manifest.json")
         .is_file());
-    assert!(fixture.next_root.join("gallery-123/0001.webp").is_file());
-    assert!(fixture.next_root.join("gallery-123/0002.webp").is_file());
+    assert!(fixture
+        .next_root
+        .join(&relative_directory)
+        .join("0001.webp")
+        .is_file());
+    assert!(fixture
+        .next_root
+        .join(&relative_directory)
+        .join("0002.webp")
+        .is_file());
     assert_classic_unchanged(&fixture);
 
     let favorites = application
@@ -88,13 +136,14 @@ fn classic_import_is_read_only_applies_verified_copies_and_rolls_back_only_next_
         })
         .expect("rollback Classic import");
     assert_eq!(rolled_back.state, ClassicImportState::RolledBack);
-    assert!(!fixture.next_root.join("gallery-123").exists());
+    assert!(!fixture.next_root.join(&relative_directory).exists());
     assert!(fixture
         .next_root
         .join(format!(
-            ".atsumi-quarantine/classic-import/{}/gallery-123",
+            ".atsumi-quarantine/classic-import/{}",
             rolled_back.import_id
         ))
+        .join(&relative_directory)
         .is_dir());
     assert!(application
         .favorites_list()

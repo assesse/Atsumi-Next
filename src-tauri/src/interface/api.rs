@@ -227,6 +227,14 @@ impl From<ApplicationError> for ApiError {
                 action: Some(ApiAction::Review),
                 details: None,
             },
+            ApplicationError::ClassicImportPlanOutdated => Self {
+                code: "CLASSIC_IMPORT_PLAN_OUTDATED".into(),
+                message: "이 Classic 가져오기 계획은 이전 형식입니다. dry-run을 다시 실행하세요."
+                    .into(),
+                retryable: false,
+                action: Some(ApiAction::Review),
+                details: None,
+            },
             ApplicationError::ClassicImportConflict(conflict_id) => Self {
                 code: "CLASSIC_IMPORT_CONFLICT".into(),
                 message: "확인이 필요한 Classic 충돌을 모두 검토한 뒤 다시 적용하세요.".into(),
@@ -246,6 +254,7 @@ impl From<ApplicationError> for ApiError {
                         | crate::application::DownloadPipelineErrorCode::HashMismatch
                         | crate::application::DownloadPipelineErrorCode::ManifestInvalid
                         | crate::application::DownloadPipelineErrorCode::QuarantineConflict
+                        | crate::application::DownloadPipelineErrorCode::DestinationOccupied
                 ) {
                     ApiAction::Review
                 } else {

@@ -252,16 +252,18 @@ impl StateRepository for SqliteRepository {
                     UPDATE settings
                     SET revision = ?1,
                         download_root = ?2,
-                        max_columns = ?3,
-                        preview_width = ?4,
-                        cache_limit_gb = ?5,
-                        concurrent_image_requests = ?6,
-                        request_start_interval_ms = ?7
-                    WHERE singleton = 1 AND revision = ?8
+                        folder_name_template = ?3,
+                        max_columns = ?4,
+                        preview_width = ?5,
+                        cache_limit_gb = ?6,
+                        concurrent_image_requests = ?7,
+                        request_start_interval_ms = ?8
+                    WHERE singleton = 1 AND revision = ?9
                 "#,
                 params![
                     to_sql_integer(next.revision, "settings revision")?,
                     next.download_root,
+                    next.folder_name_template,
                     i64::from(next.max_columns),
                     i64::from(next.preview_width),
                     i64::from(next.cache_limit_gb),
@@ -1431,6 +1433,23 @@ impl ArtifactRepository for SqliteRepository {
             }
         }
 
+        let stored_artifact_path = transaction
+            .query_row(
+                "SELECT relative_directory FROM download_artifacts WHERE entry_id = ?1",
+                [bundle.artifact.entry_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(map_sqlite_error)?;
+        if stored_artifact_path
+            .as_deref()
+            .is_some_and(|path| path != bundle.artifact.relative_directory.as_str())
+        {
+            return Err(RepositoryError::Other(
+                "download artifact relative directory is immutable".into(),
+            ));
+        }
+
         transaction
             .execute(
                 r#"
@@ -1443,10 +1462,8 @@ impl ArtifactRepository for SqliteRepository {
                     ON CONFLICT (entry_id) DO UPDATE SET
                         gallery_id = excluded.gallery_id,
                         revision = excluded.revision,
-                        relative_directory = excluded.relative_directory,
                         expected_page_count = excluded.expected_page_count,
                         state = excluded.state,
-                        manifest_relative_path = excluded.manifest_relative_path,
                         manifest_schema_version = excluded.manifest_schema_version,
                         writer_version = excluded.writer_version,
                         hash_profile_version = excluded.hash_profile_version,
@@ -1751,18 +1768,40 @@ impl DownloadPipelineRepository for SqliteRepository {
             )
             .map_err(map_sqlite_error)?;
 
-        let previous_artifact_revision = transaction
+        let previous_artifact = transaction
             .query_row(
-                "SELECT revision FROM download_artifacts WHERE entry_id = ?1",
+                "SELECT revision, relative_directory, manifest_relative_path FROM download_artifacts WHERE entry_id = ?1",
                 [&plan.descriptor.entry_id],
-                |row| row.get::<_, i64>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(map_sqlite_error)?;
-        let artifact_revision = previous_artifact_revision
-            .map(|revision| next_stored_revision(revision, "artifact revision"))
+        let artifact_created = previous_artifact.is_none();
+        let artifact_revision = previous_artifact
+            .as_ref()
+            .map(|(revision, _, _)| next_stored_revision(*revision, "artifact revision"))
             .transpose()?
             .unwrap_or(0);
+        let relative_directory = previous_artifact
+            .as_ref()
+            .map(|(_, path, _)| ArtifactRelativePath::new(path).map_err(domain_corruption))
+            .transpose()?
+            .unwrap_or_else(|| plan.relative_directory.clone());
+        let manifest_relative_path = previous_artifact
+            .as_ref()
+            .and_then(|(_, _, path)| path.as_ref())
+            .map(|path| ArtifactRelativePath::new(path).map_err(domain_corruption))
+            .transpose()?
+            .unwrap_or_else(|| {
+                ArtifactRelativePath::new(format!("{}/manifest.json", relative_directory.as_str()))
+                    .expect("stored artifact directory produces a relative manifest path")
+            });
         transaction
             .execute(
                 r#"
@@ -1774,10 +1813,8 @@ impl DownloadPipelineRepository for SqliteRepository {
                     ON CONFLICT (entry_id) DO UPDATE SET
                         gallery_id = excluded.gallery_id,
                         revision = excluded.revision,
-                        relative_directory = excluded.relative_directory,
                         expected_page_count = excluded.expected_page_count,
                         state = 'incomplete',
-                        manifest_relative_path = excluded.manifest_relative_path,
                         manifest_schema_version = NULL,
                         writer_version = NULL,
                         completed_at = NULL
@@ -1786,11 +1823,11 @@ impl DownloadPipelineRepository for SqliteRepository {
                     plan.descriptor.entry_id,
                     plan.gallery.id.get(),
                     to_sql_integer(artifact_revision, "artifact revision")?,
-                    plan.relative_directory.as_str(),
+                    relative_directory.as_str(),
                     i64::try_from(plan.source_pages.len()).map_err(|_| {
                         RepositoryError::Other("source page count exceeds SQLite range".into())
                     })?,
-                    plan.manifest_relative_path.as_str(),
+                    manifest_relative_path.as_str(),
                 ],
             )
             .map_err(map_sqlite_error)?;
@@ -1798,7 +1835,7 @@ impl DownloadPipelineRepository for SqliteRepository {
         for source_page in &plan.source_pages {
             let relative_path = ArtifactRelativePath::new(format!(
                 "{}/{:04}.webp",
-                plan.relative_directory.as_str(),
+                relative_directory.as_str(),
                 source_page.source_page_number.get()
             ))
             .map_err(|error| RepositoryError::Other(error.to_string()))?;
@@ -1936,6 +1973,9 @@ impl DownloadPipelineRepository for SqliteRepository {
         Ok(DownloadPrepared {
             projection,
             checkpoints,
+            relative_directory,
+            manifest_relative_path,
+            artifact_created,
         })
     }
 
@@ -5448,7 +5488,7 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
     let values = connection
         .query_row(
             r#"
-                SELECT revision, download_root, max_columns, preview_width,
+                SELECT revision, download_root, folder_name_template, max_columns, preview_width,
                        cache_limit_gb, concurrent_image_requests,
                        request_start_interval_ms
                 FROM settings
@@ -5459,11 +5499,12 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
                 ))
             },
         )
@@ -5472,11 +5513,12 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
     Ok(SettingsSnapshot {
         revision: stored_u64(values.0, "settings revision")?,
         download_root: values.1,
-        max_columns: stored_u32(values.2, "max columns")?,
-        preview_width: stored_u32(values.3, "preview width")?,
-        cache_limit_gb: stored_u32(values.4, "cache limit")?,
-        concurrent_image_requests: stored_u32(values.5, "concurrent image requests")?,
-        request_start_interval_ms: stored_u64(values.6, "request start interval")?,
+        folder_name_template: values.2,
+        max_columns: stored_u32(values.3, "max columns")?,
+        preview_width: stored_u32(values.4, "preview width")?,
+        cache_limit_gb: stored_u32(values.5, "cache limit")?,
+        concurrent_image_requests: stored_u32(values.6, "concurrent image requests")?,
+        request_start_interval_ms: stored_u64(values.7, "request start interval")?,
     })
 }
 

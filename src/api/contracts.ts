@@ -15,6 +15,7 @@ export type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError 
 export type SettingsSnapshot = {
   revision: number;
   downloadRoot: string;
+  folderNameTemplate: string;
   maxColumns: number;
   previewWidth: number;
   cacheLimitGb: number;
@@ -597,6 +598,7 @@ export type ClassicImportGalleryPlan = {
   artist?: string;
   group?: string;
   sourceFolder: string;
+  relativeDirectory?: string;
   expectedPages: number;
   pages: ClassicImportPagePlan[];
   plannedBytes: number;

@@ -1111,6 +1111,27 @@ pub const MIGRATIONS: &[Migration] = &[
             ) STRICT;
         "#,
     },
+    Migration {
+        version: 15,
+        name: "artifact_folder_template_and_immutable_path",
+        sql: r#"
+            ALTER TABLE settings
+            ADD COLUMN folder_name_template TEXT NOT NULL
+                DEFAULT '[{artist}] {title} [{group}] {id}'
+                CHECK (
+                    length(trim(folder_name_template)) > 0
+                    AND length(folder_name_template) <= 512
+                );
+
+            CREATE TRIGGER download_artifacts_relative_directory_immutable
+            BEFORE UPDATE OF relative_directory ON download_artifacts
+            FOR EACH ROW
+            WHEN NEW.relative_directory <> OLD.relative_directory
+            BEGIN
+                SELECT RAISE(ABORT, 'download artifact relative_directory is immutable');
+            END;
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1343,6 +1364,82 @@ mod tests {
     }
 
     #[test]
+    fn folder_template_migration_defaults_settings_and_locks_existing_artifact_paths() {
+        let mut connection = Connection::open_in_memory().expect("open v14 migration database");
+        connection
+            .execute_batch(
+                r#"
+                    PRAGMA foreign_keys = ON;
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT (
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    ) STRICT;
+                "#,
+            )
+            .unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 14)
+        {
+            connection.execute_batch(migration.sql).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                    params![migration.version, migration.name],
+                )
+                .unwrap();
+        }
+        connection
+            .execute_batch(
+                r#"
+                    INSERT INTO galleries (
+                        gallery_id, revision, title, source_page_count
+                    ) VALUES (42, 0, 'Legacy title', 1);
+                    INSERT INTO download_entries (
+                        entry_id, gallery_id, revision, state, progress,
+                        created_at, updated_at
+                    ) VALUES (
+                        'legacy-entry', 42, 0, 'completed', 100.0,
+                        '2026-08-20T00:00:00Z', '2026-08-20T00:00:00Z'
+                    );
+                    INSERT INTO download_artifacts (
+                        entry_id, gallery_id, revision, relative_directory,
+                        expected_page_count, state
+                    ) VALUES (
+                        'legacy-entry', 42, 0, 'gallery-42', 1, 'complete'
+                    );
+                "#,
+            )
+            .unwrap();
+
+        let report = MigrationRunner::run(&mut connection).expect("migrate v14 to v15");
+        assert_eq!(report.applied_versions, vec![15]);
+        let template: String = connection
+            .query_row("SELECT folder_name_template FROM settings", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(template, "[{artist}] {title} [{group}] {id}");
+        let stored_path: String = connection
+            .query_row(
+                "SELECT relative_directory FROM download_artifacts WHERE entry_id='legacy-entry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_path, "gallery-42");
+        assert!(connection
+            .execute(
+                "UPDATE download_artifacts SET relative_directory='renamed-42' WHERE entry_id='legacy-entry'",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
     fn duplicate_evidence_migration_is_additive_from_v11() {
         let mut connection = Connection::open_in_memory().expect("open v11 migration database");
         connection
@@ -1383,8 +1480,8 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
-        assert_eq!(report.applied_versions, vec![12, 13, 14]);
-        assert_eq!(report.current_version, 14);
+        assert_eq!(report.applied_versions, vec![12, 13, 14, 15]);
+        assert_eq!(report.current_version, 15);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",

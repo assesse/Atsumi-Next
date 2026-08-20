@@ -172,6 +172,22 @@ impl ClassicImportRepository for SqliteRepository {
         copied_bytes: u64,
     ) -> Result<(), RepositoryError> {
         let connection = self.connection()?;
+        let stored_path = connection
+            .query_row(
+                "SELECT relative_directory FROM classic_import_artifact_copies WHERE import_id=?1 AND gallery_id=?2",
+                params![import_id, gallery_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(map_sqlite_error)?;
+        if stored_path
+            .as_deref()
+            .is_some_and(|path| path != relative_directory)
+        {
+            return Err(RepositoryError::Other(
+                "Classic import copy relative directory is immutable".into(),
+            ));
+        }
         connection
             .execute(
                 r#"
@@ -185,7 +201,6 @@ impl ClassicImportRepository for SqliteRepository {
                     )
                     ON CONFLICT(import_id, gallery_id) DO UPDATE SET
                         entry_id = excluded.entry_id,
-                        relative_directory = excluded.relative_directory,
                         copied_files = excluded.copied_files,
                         copied_bytes = excluded.copied_bytes,
                         state = 'copied',

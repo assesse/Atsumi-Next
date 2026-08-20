@@ -13,9 +13,10 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ArtifactManifest, ArtifactRelativePath, ArtifactStorageFormat, DownloadArtifactState,
-        DownloadEntry, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection, JobRef,
-        JobState, PageArtifactState, ARTIFACT_MANIFEST_SCHEMA_VERSION, HASH_PROFILE_VERSION,
+        plan_artifact_relative_directory, ArtifactManifest, ArtifactRelativePath,
+        ArtifactStorageFormat, DownloadArtifactState, DownloadEntry, DownloadEntryId,
+        DownloadJobDescriptor, DownloadJobProjection, JobRef, JobState, PageArtifactState,
+        ARTIFACT_MANIFEST_SCHEMA_VERSION, HASH_PROFILE_VERSION,
     },
     source::{SourceContractError, SourceErrorCode},
     thumbnail::CancellationToken,
@@ -766,14 +767,50 @@ fn run_download(
         .gallery_snapshot(descriptor.gallery_id, cancellation)?;
     check_cancelled(cancellation)?;
     let root = PathBuf::from(settings.download_root);
-    let layout = inner.store.prepare_layout(&root, &snapshot.gallery)?;
+    let planned_relative_directory =
+        plan_artifact_relative_directory(&settings.folder_name_template, &snapshot.gallery)
+            .map_err(|error| {
+                DownloadPipelineError::new(
+                    DownloadPipelineErrorCode::PathOutsideRoot,
+                    format!("The configured artifact folder template is invalid: {error}"),
+                    false,
+                )
+            })?;
+    let planned_manifest_relative_path = ArtifactRelativePath::new(format!(
+        "{}/manifest.json",
+        planned_relative_directory.as_str()
+    ))
+    .map_err(|error| {
+        DownloadPipelineError::new(
+            DownloadPipelineErrorCode::PathOutsideRoot,
+            format!("The planned manifest path is invalid: {error}"),
+            false,
+        )
+    })?;
     let prepared = inner.repository.pipeline_prepare(&DownloadArtifactPlan {
         descriptor: descriptor.clone(),
         gallery: snapshot.gallery,
-        relative_directory: layout.relative_directory.clone(),
-        manifest_relative_path: layout.manifest_relative_path.clone(),
+        relative_directory: planned_relative_directory,
+        manifest_relative_path: planned_manifest_relative_path,
         source_pages: snapshot.pages.clone(),
     })?;
+    // An existing database row alone is not proof that a pre-existing directory belongs
+    // to Atsumi: the first DB reservation intentionally happens before the filesystem write.
+    // A verified page checkpoint is the durable ownership evidence used for resume.
+    let allow_existing_directory = !prepared.artifact_created && !prepared.checkpoints.is_empty();
+    let layout = inner.store.prepare_layout(
+        &root,
+        &prepared.relative_directory,
+        allow_existing_directory,
+    )?;
+    if layout.manifest_relative_path != prepared.manifest_relative_path {
+        return Err(DownloadPipelineError::new(
+            DownloadPipelineErrorCode::ManifestInvalid,
+            "The persisted artifact manifest path does not match its immutable directory",
+            false,
+        )
+        .into());
+    }
     emit(inner, prepared.projection);
     let checkpoints = prepared
         .checkpoints
@@ -1428,11 +1465,14 @@ mod tests {
             Some("0001.webp")
         );
         assert_eq!(source.calls(), vec![1, 2]);
-        let part_files = std::fs::read_dir(root.join("downloads").join("gallery-42"))
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".part"))
-            .count();
+        let part_files = std::fs::read_dir(
+            root.join("downloads")
+                .join(bundle.artifact.relative_directory.as_str()),
+        )
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".part"))
+        .count();
         assert_eq!(part_files, 0);
     }
 
@@ -1452,6 +1492,24 @@ mod tests {
         first_supervisor.shutdown_and_wait();
         assert_eq!(blocking_source.calls(), vec![1, 2]);
 
+        let entry_key = DownloadEntryId::new(entry_id.clone()).unwrap();
+        let reserved_directory = repository
+            .pipeline_artifact_bundle(&entry_key)
+            .unwrap()
+            .unwrap()
+            .artifact
+            .relative_directory;
+        let settings = service.settings_get().unwrap();
+        service
+            .settings_update(
+                SettingsPatch {
+                    folder_name_template: Some("{id} renamed".into()),
+                    ..SettingsPatch::default()
+                },
+                settings.revision,
+            )
+            .unwrap();
+
         assert_eq!(service.download_recover_interrupted().unwrap(), 1);
         let resumed_source = Arc::new(FakeDownloadSource::new(2, None));
         let (second_supervisor, _events) = launch(&repository, resumed_source.clone());
@@ -1465,9 +1523,50 @@ mod tests {
             .pipeline_artifact_bundle(&DownloadEntryId::new(entry_id).unwrap())
             .unwrap()
             .unwrap();
+        assert_eq!(bundle.artifact.relative_directory, reserved_directory);
+        assert!(!root.join("downloads/77 renamed").exists());
         assert_eq!(bundle.pages.len(), 2);
         assert_eq!(bundle.pages[0].page_id.source_page_number.get(), 1);
         assert_eq!(bundle.pages[1].page_id.source_page_number.get(), 2);
+    }
+
+    #[test]
+    fn occupied_first_destination_stays_typed_and_unmodified_across_retry() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let (repository, service) = configured_repository(&root);
+        let occupied = root
+            .join("downloads")
+            .join("[fixture artist] Synthetic download fixture [fixture group] 66");
+        std::fs::create_dir_all(&occupied).unwrap();
+        std::fs::write(occupied.join("user-owned.txt"), b"keep").unwrap();
+        let source = Arc::new(FakeDownloadSource::new(1, None));
+        let (supervisor, _events) = launch(&repository, source.clone());
+        let queued = service
+            .download_queue_add(vec![66], "pipeline-collision".into())
+            .unwrap();
+        let entry_id = queued.entries[0].entry_id.to_string();
+        supervisor.enqueue_all(queued.jobs).unwrap();
+
+        let first = wait_for_state(&service, &entry_id, JobState::Failed, 0.0);
+        assert_eq!(
+            first.error_code.as_deref(),
+            Some("ARTIFACT_DESTINATION_OCCUPIED")
+        );
+        let retry = service.download_retry(vec![entry_id.clone()]).unwrap();
+        supervisor.enqueue_retries(&retry).unwrap();
+        let second = wait_for_state(&service, &entry_id, JobState::Failed, 0.0);
+        assert_eq!(second.attempt, Some(2));
+        assert_eq!(
+            second.error_code.as_deref(),
+            Some("ARTIFACT_DESTINATION_OCCUPIED")
+        );
+        assert_eq!(
+            std::fs::read(occupied.join("user-owned.txt")).unwrap(),
+            b"keep"
+        );
+        assert!(source.calls().is_empty());
+        supervisor.shutdown_and_wait();
     }
 
     #[test]
@@ -1488,14 +1587,19 @@ mod tests {
             .quarantine_entries(vec![entry_id.clone()], "integration test quarantine".into())
             .unwrap();
         assert_eq!(quarantined[0].state, JobState::Quarantined);
-        assert!(!root.join("downloads/gallery-88").exists());
+        let bundle = repository
+            .pipeline_artifact_bundle(&DownloadEntryId::new(entry_id.clone()).unwrap())
+            .unwrap()
+            .unwrap();
+        let relative_directory = bundle.artifact.relative_directory.as_str();
+        assert!(!root.join("downloads").join(relative_directory).exists());
         let record_directory = std::fs::read_dir(root.join("downloads/.atsumi-quarantine"))
             .unwrap()
             .next()
             .unwrap()
             .unwrap()
             .path();
-        let quarantine_directory = record_directory.join("gallery-88");
+        let quarantine_directory = record_directory.join(relative_directory);
         assert!(quarantine_directory.join("0001.webp").is_file());
         let manifest: ArtifactManifest = serde_json::from_reader(
             std::fs::File::open(quarantine_directory.join("manifest.json")).unwrap(),
@@ -1509,17 +1613,26 @@ mod tests {
 
         let restored = supervisor.restore_entries(vec![entry_id.clone()]).unwrap();
         assert_eq!(restored[0].state, JobState::Completed);
-        assert!(root.join("downloads/gallery-88/0001.webp").is_file());
+        assert!(root
+            .join("downloads")
+            .join(relative_directory)
+            .join("0001.webp")
+            .is_file());
         assert!(!quarantine_directory.exists());
         let restored_manifest: ArtifactManifest = serde_json::from_reader(
-            std::fs::File::open(root.join("downloads/gallery-88/manifest.json")).unwrap(),
+            std::fs::File::open(
+                root.join("downloads")
+                    .join(relative_directory)
+                    .join("manifest.json"),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(restored_manifest.pages.iter().all(|page| !page.quarantined));
         assert!(restored_manifest
             .pages
             .iter()
-            .all(|page| page.relative_path.starts_with("gallery-88/")));
+            .all(|page| page.relative_path.starts_with(relative_directory)));
         supervisor.shutdown_and_wait();
     }
 

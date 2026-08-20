@@ -5,6 +5,7 @@ import type { ApiError, ApiResult, SettingsPatch, SettingsSnapshot } from "../ap
 const fallback: SettingsSnapshot = {
   revision: 0,
   downloadRoot: "",
+  folderNameTemplate: "[{artist}] {title} [{group}] {id}",
   maxColumns: 3,
   previewWidth: 220,
   cacheLimitGb: 10,

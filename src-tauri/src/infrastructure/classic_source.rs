@@ -809,6 +809,7 @@ fn scan_download_galleries(
                 .or_else(|| manifest.and_then(|value| optional_string(value.get("artist")))),
             group: state.and_then(|state| state.group.clone()),
             source_folder: folder.relative_path,
+            relative_directory: None,
             expected_pages,
             pages,
             planned_bytes,

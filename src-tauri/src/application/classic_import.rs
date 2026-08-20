@@ -7,10 +7,10 @@ use std::{
 
 use crate::{
     domain::{
-        ArtifactBundle, ArtifactManifest, ArtifactRelativePath, DownloadArtifact,
-        DownloadArtifactState, DownloadEntryId, Gallery, GalleryId, GalleryMetadata, PageArtifact,
-        PageArtifactState, SourcePageNumber, StoredClassicImport, ARTIFACT_MANIFEST_SCHEMA_VERSION,
-        HASH_PROFILE_VERSION,
+        plan_artifact_relative_directory, ArtifactBundle, ArtifactManifest, ArtifactRelativePath,
+        DownloadArtifact, DownloadArtifactState, DownloadEntryId, Gallery, GalleryId,
+        GalleryMetadata, PageArtifact, PageArtifactState, SourcePageNumber, StoredClassicImport,
+        ARTIFACT_MANIFEST_SCHEMA_VERSION, CLASSIC_IMPORT_SCHEMA_VERSION, HASH_PROFILE_VERSION,
     },
     thumbnail::CancellationToken,
 };
@@ -135,6 +135,16 @@ impl ClassicImportService {
                 "only a current dry-run report can be applied".into(),
             ));
         }
+        if stored.plan.schema_version != CLASSIC_IMPORT_SCHEMA_VERSION
+            || stored
+                .plan
+                .galleries
+                .iter()
+                .filter(|gallery| gallery.eligible)
+                .any(|gallery| gallery.relative_directory.is_none())
+        {
+            return Err(ApplicationError::ClassicImportPlanOutdated);
+        }
         let accepted = request
             .accepted_conflict_ids
             .iter()
@@ -233,18 +243,21 @@ impl ClassicImportService {
                 )
             })?;
             let entry_id = classic_entry_id(&applying.report.import_id, gallery.gallery_id)?;
-            let relative_directory = format!("gallery-{}", gallery.gallery_id);
+            let relative_directory = gallery
+                .relative_directory
+                .as_deref()
+                .ok_or(ApplicationError::ClassicImportPlanOutdated)?;
             // Record the intended destination before the first filesystem write. If the
             // process exits mid-copy, startup recovery can quarantine the partial folder.
             self.repository.classic_import_copy_mark(
                 &applying.report.import_id,
                 gallery.gallery_id,
                 entry_id.as_str(),
-                &relative_directory,
+                relative_directory,
                 0,
                 0,
             )?;
-            let bundle = self.copy_gallery(applying, root, gallery)?;
+            let bundle = self.copy_gallery(applying, root, gallery, relative_directory)?;
             copied_files = copied_files.saturating_add(bundle.pages.len() as u32);
             copied_bytes = copied_bytes.saturating_add(
                 bundle
@@ -307,6 +320,7 @@ impl ClassicImportService {
         applying: &StoredClassicImport,
         next_root: &Path,
         plan: &ClassicImportGalleryPlan,
+        relative_directory: &str,
     ) -> Result<ArtifactBundle, ApplicationError> {
         let gallery_id = GalleryId::new(plan.gallery_id)?;
         let gallery = Gallery::new(
@@ -320,7 +334,10 @@ impl ClassicImportService {
             )?,
         );
         let entry_id = classic_entry_id(&applying.report.import_id, plan.gallery_id)?;
-        let layout = self.store.prepare_layout(next_root, &gallery)?;
+        let relative_directory = ArtifactRelativePath::new(relative_directory)?;
+        let layout = self
+            .store
+            .prepare_layout(next_root, &relative_directory, false)?;
         let cancellation = CancellationToken::new();
         let mut pages = Vec::with_capacity(plan.pages.len());
         for source in &plan.pages {
@@ -440,8 +457,8 @@ impl ClassicImportService {
             for copy in copies {
                 let source = ArtifactRelativePath::new(&copy.relative_directory)?;
                 let destination = ArtifactRelativePath::new(format!(
-                    ".atsumi-quarantine/classic-import/{}/gallery-{}",
-                    rolling_back.report.import_id, copy.gallery_id
+                    ".atsumi-quarantine/classic-import/{}/{}",
+                    rolling_back.report.import_id, copy.relative_directory
                 ))?;
                 let source_exists = self.store.managed_path_exists(&root, &source)?;
                 let destination_exists = self.store.managed_path_exists(&root, &destination)?;
@@ -538,6 +555,19 @@ impl ClassicImportService {
             )
         };
         for gallery in &mut plan.galleries {
+            let gallery_model = Gallery::new(
+                GalleryId::new(gallery.gallery_id)?,
+                0,
+                GalleryMetadata::new(
+                    gallery.title.clone(),
+                    gallery.artist.clone(),
+                    gallery.group.clone(),
+                    gallery.expected_pages,
+                )?,
+            );
+            let destination =
+                plan_artifact_relative_directory(&settings.folder_name_template, &gallery_model)?;
+            gallery.relative_directory = Some(destination.as_str().to_owned());
             if existing.contains(&gallery.gallery_id) {
                 let conflict_id = format!("existing-next-gallery:{}", gallery.gallery_id);
                 gallery.eligible = false;
@@ -554,8 +584,6 @@ impl ClassicImportService {
                 });
             }
             if let Some(root) = next_root.as_deref() {
-                let destination =
-                    ArtifactRelativePath::new(format!("gallery-{}", gallery.gallery_id))?;
                 if self.store.managed_path_exists(root, &destination)? {
                     let conflict_id = format!("existing-next-destination:{}", gallery.gallery_id);
                     gallery.eligible = false;
@@ -653,6 +681,9 @@ fn safe_import_error(error: &ApplicationError) -> String {
     match error {
         ApplicationError::ClassicImportSourceChanged => {
             "Classic source changed after the dry run".into()
+        }
+        ApplicationError::ClassicImportPlanOutdated => {
+            "The Classic dry-run plan must be regenerated".into()
         }
         ApplicationError::ClassicImportInvalid(message)
         | ApplicationError::ClassicImportConflict(message) => message.clone(),

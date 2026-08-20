@@ -19,8 +19,8 @@ use crate::{
     },
     domain::{
         ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
-        ArtifactStorageFormat, DownloadArtifactState, Gallery, PageArtifact, PageArtifactState,
-        SourcePageNumber,
+        ArtifactStorageFormat, DownloadArtifactState, PageArtifact, PageArtifactState,
+        SourcePageNumber, MAX_MANAGED_ABSOLUTE_PATH_UTF16,
     },
     thumbnail::CancellationToken,
 };
@@ -89,14 +89,30 @@ impl ArtifactStore for FilesystemArtifactStore {
     fn prepare_layout(
         &self,
         root: &Path,
-        gallery: &Gallery,
+        relative_directory: &ArtifactRelativePath,
+        allow_existing: bool,
     ) -> Result<ArtifactLayout, DownloadPipelineError> {
         let root = self.validate_download_root(root)?;
-        let relative_directory = ArtifactRelativePath::new(format!("gallery-{}", gallery.id.get()))
-            .map_err(|error| invalid_path(error.to_string()))?;
         let directory = root.join(relative_directory.as_str());
-        fs::create_dir_all(&directory)
-            .map_err(|_| filesystem_error("The gallery folder could not be created"))?;
+        if directory.as_os_str().encode_wide_units() > MAX_MANAGED_ABSOLUTE_PATH_UTF16 {
+            return Err(DownloadPipelineError::new(
+                DownloadPipelineErrorCode::PathOutsideRoot,
+                "The planned artifact path is too long for the Windows safety budget",
+                false,
+            ));
+        }
+        if directory.exists() {
+            if !allow_existing || !directory.is_dir() {
+                return Err(DownloadPipelineError::new(
+                    DownloadPipelineErrorCode::DestinationOccupied,
+                    "The planned artifact folder already exists and was not modified",
+                    false,
+                ));
+            }
+        } else {
+            fs::create_dir(&directory)
+                .map_err(|_| filesystem_error("The gallery folder could not be created"))?;
+        }
         let canonical_directory = directory
             .canonicalize()
             .map_err(|_| filesystem_error("The gallery folder could not be resolved"))?;
@@ -109,7 +125,7 @@ impl ArtifactStore for FilesystemArtifactStore {
         .map_err(|error| invalid_path(error.to_string()))?;
         Ok(ArtifactLayout {
             root,
-            relative_directory,
+            relative_directory: relative_directory.clone(),
             manifest_relative_path,
         })
     }
@@ -544,6 +560,16 @@ impl ArtifactStore for FilesystemArtifactStore {
     }
 }
 
+trait OsStrUtf16Units {
+    fn encode_wide_units(&self) -> usize;
+}
+
+impl OsStrUtf16Units for std::ffi::OsStr {
+    fn encode_wide_units(&self) -> usize {
+        self.to_string_lossy().encode_utf16().count()
+    }
+}
+
 fn resolve_existing_download_root(root: &Path) -> Result<PathBuf, DownloadPipelineError> {
     if root.as_os_str().is_empty() || !root.is_absolute() {
         return Err(DownloadPipelineError::new(
@@ -862,4 +888,31 @@ fn invalid_path(_detail: String) -> DownloadPipelineError {
         "The artifact path is outside the configured download folder",
         false,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_layout_reports_an_occupied_destination_without_modifying_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("downloads");
+        fs::create_dir(&root).unwrap();
+        let relative = ArtifactRelativePath::new("Existing 42").unwrap();
+        let occupied = root.join(relative.as_str());
+        fs::create_dir(&occupied).unwrap();
+        fs::write(occupied.join("owned-by-user.txt"), b"keep").unwrap();
+
+        let error = FilesystemArtifactStore::new()
+            .prepare_layout(&root, &relative, false)
+            .unwrap_err();
+
+        assert_eq!(error.code, DownloadPipelineErrorCode::DestinationOccupied);
+        assert!(!error.retryable);
+        assert_eq!(
+            fs::read(occupied.join("owned-by-user.txt")).unwrap(),
+            b"keep"
+        );
+    }
 }

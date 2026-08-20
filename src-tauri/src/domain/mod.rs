@@ -1,4 +1,5 @@
 mod artifact;
+mod artifact_path;
 mod auto_find;
 mod classic_import;
 mod download;
@@ -15,6 +16,10 @@ pub use artifact::{
     ArtifactManifestPage, ArtifactRelativePath, ArtifactSha256, ArtifactStorageFormat,
     DownloadArtifact, DownloadArtifactState, DownloadEntryId, PageArtifact, PageArtifactState,
     ARTIFACT_MANIFEST_SCHEMA_VERSION, HASH_PROFILE_VERSION,
+};
+pub use artifact_path::{
+    plan_artifact_relative_directory, validate_folder_name_template, DEFAULT_FOLDER_NAME_TEMPLATE,
+    MAX_FOLDER_COMPONENT_UTF16, MAX_MANAGED_ABSOLUTE_PATH_UTF16,
 };
 pub use auto_find::{
     AutoFindCandidate, AutoFindCandidateRecord, AutoFindExclusionResult, AutoFindRun,

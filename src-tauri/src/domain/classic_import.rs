@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{FavoriteKey, SearchRequest};
 
-pub const CLASSIC_IMPORT_SCHEMA_VERSION: u32 = 1;
+pub const CLASSIC_IMPORT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -136,6 +136,8 @@ pub struct ClassicImportGalleryPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub source_folder: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_directory: Option<String>,
     pub expected_pages: u32,
     pub pages: Vec<ClassicImportPagePlan>,
     pub planned_bytes: u64,

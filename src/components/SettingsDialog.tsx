@@ -14,6 +14,17 @@ type SettingsDialogProps = {
 };
 
 const sections = ["일반", "저장 공간"];
+const DEFAULT_FOLDER_NAME_TEMPLATE = "[{artist}] {title} [{group}] {id}";
+
+const previewFolderName = (template: string) => template
+  .replaceAll("{artist}", "작가")
+  .replaceAll("{title}", "작품 제목")
+  .replaceAll("{group}", "그룹")
+  .replaceAll("{id}", "4113714")
+  .replace(/[<>:\"/\\|?*\u0000-\u001f\u007f-\u009f]/g, "_")
+  .replace(/\s+/g, " ")
+  .trim()
+  .replace(/[ .]+$/g, "");
 
 export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onClassicImport, onPreviewLayout }: SettingsDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -63,6 +74,7 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
     setSaving(true);
     const success = await onSave({
       downloadRoot: draft.downloadRoot,
+      folderNameTemplate: draft.folderNameTemplate,
       maxColumns: draft.maxColumns,
       previewWidth: draft.previewWidth,
       cacheLimitGb: draft.cacheLimitGb,
@@ -127,6 +139,28 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                 <div className="setting-row">
                   <div><strong>다운로드 폴더</strong><span>완료된 갤러리를 저장할 위치</span></div>
                   <input value={draft.downloadRoot} placeholder="폴더를 선택하세요" aria-label="다운로드 폴더" onChange={(event) => patch("downloadRoot", event.target.value)} />
+                </div>
+                <div className="setting-row">
+                  <div>
+                    <strong>갤러리 폴더 이름</strong>
+                    <span>{"{artist}, {title}, {group}, {id}를 사용할 수 있으며 {id}는 필수입니다."}</span>
+                    <span aria-live="polite">미리보기: {previewFolderName(draft.folderNameTemplate) || "(유효한 이름 없음)"}</span>
+                  </div>
+                  <div>
+                    <input
+                      value={draft.folderNameTemplate}
+                      aria-label="갤러리 폴더 이름 템플릿"
+                      maxLength={512}
+                      onChange={(event) => patch("folderNameTemplate", event.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => patch("folderNameTemplate", DEFAULT_FOLDER_NAME_TEMPLATE)}
+                    >
+                      기본값 복원
+                    </button>
+                  </div>
                 </div>
                 <div className="setting-row">
                   <div><strong>앨범 카드 최대 열 수</strong><span>창이 넓어도 설정한 열 수를 넘지 않습니다</span></div>

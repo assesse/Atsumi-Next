@@ -107,7 +107,8 @@ pub trait ArtifactStore: Send + Sync {
     fn prepare_layout(
         &self,
         root: &Path,
-        gallery: &Gallery,
+        relative_directory: &ArtifactRelativePath,
+        allow_existing: bool,
     ) -> Result<ArtifactLayout, DownloadPipelineError>;
 
     fn verify_existing_page(
@@ -194,6 +195,9 @@ pub struct DownloadCheckpoint {
 pub struct DownloadPrepared {
     pub projection: DownloadJobProjection,
     pub checkpoints: Vec<DownloadCheckpoint>,
+    pub relative_directory: ArtifactRelativePath,
+    pub manifest_relative_path: ArtifactRelativePath,
+    pub artifact_created: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +385,7 @@ pub enum DownloadPipelineErrorCode {
     Cancelled,
     WorkerUnavailable,
     QuarantineConflict,
+    DestinationOccupied,
 }
 
 impl DownloadPipelineErrorCode {
@@ -399,6 +404,7 @@ impl DownloadPipelineErrorCode {
             Self::Cancelled => "REQUEST_CANCELLED",
             Self::WorkerUnavailable => "DOWNLOAD_WORKER_UNAVAILABLE",
             Self::QuarantineConflict => "QUARANTINE_CONFLICT",
+            Self::DestinationOccupied => "ARTIFACT_DESTINATION_OCCUPIED",
         }
     }
 }

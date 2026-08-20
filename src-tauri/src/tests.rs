@@ -90,7 +90,7 @@ fn primary_group_migration_preserves_existing_gallery_rows() {
     let report = MigrationRunner::run(&mut connection).expect("apply v4 migration");
     assert_eq!(
         report.applied_versions,
-        vec![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        vec![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
     let stored: (String, Option<String>) = connection
         .query_row(
@@ -170,7 +170,10 @@ fn lifecycle_migration_preserves_v6_download_graph_and_enables_cancelled() {
         .expect("seed v6 download graph");
 
     let report = MigrationRunner::run(&mut connection).expect("apply lifecycle migration");
-    assert_eq!(report.applied_versions, vec![7, 8, 9, 10, 11, 12, 13, 14]);
+    assert_eq!(
+        report.applied_versions,
+        vec![7, 8, 9, 10, 11, 12, 13, 14, 15]
+    );
     let lifecycle: (i64, String, Option<String>, i64) = connection
         .query_row(
             r#"
@@ -275,7 +278,7 @@ fn visible_metadata_migration_defaults_existing_auto_find_candidates() {
         .expect("seed v10 Auto Find candidate");
 
     let report = MigrationRunner::run(&mut connection).expect("apply visible metadata migration");
-    assert_eq!(report.applied_versions, vec![11, 12, 13, 14]);
+    assert_eq!(report.applied_versions, vec![11, 12, 13, 14, 15]);
     let metadata: (String, String) = connection
         .query_row(
             r#"
@@ -335,7 +338,7 @@ fn settings_constraint_migration_clamps_legacy_values() {
     let report = MigrationRunner::run(&mut connection).expect("upgrade legacy schema");
     assert_eq!(
         report.applied_versions,
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
     let tightened: (i64, i64, i64, i64, i64, i64) = connection
         .query_row(
@@ -374,6 +377,7 @@ fn default_settings_match_the_approved_foundation_values() {
         json!({
             "revision": 0,
             "downloadRoot": "",
+            "folderNameTemplate": "[{artist}] {title} [{group}] {id}",
             "maxColumns": 3,
             "previewWidth": 220,
             "cacheLimitGb": 10,
@@ -388,6 +392,7 @@ fn settings_validation_matches_the_approved_ui_ranges() {
     let limits = SettingsSnapshot {
         revision: 0,
         download_root: String::new(),
+        folder_name_template: "[{artist}] {title} [{group}] {id}".into(),
         max_columns: 4,
         preview_width: 360,
         cache_limit_gb: 30,
@@ -408,6 +413,11 @@ fn settings_validation_matches_the_approved_ui_ranges() {
     invalid = limits.clone();
     invalid.cache_limit_gb = 31;
     assert!(invalid.validate().is_err());
+    for template in ["{title}", "{unknown} {id}", "{title {id}", "x\ny {id}"] {
+        invalid = limits.clone();
+        invalid.folder_name_template = template.into();
+        assert!(invalid.validate().is_err(), "{template:?}");
+    }
     invalid = limits;
     invalid.request_start_interval_ms = 5_001;
     assert!(invalid.validate().is_err());

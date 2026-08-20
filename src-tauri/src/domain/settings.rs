@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::ValidationError;
+use super::{validate_folder_name_template, ValidationError, DEFAULT_FOLDER_NAME_TEMPLATE};
 
 pub const DEFAULT_MAX_COLUMNS: u32 = 3;
 pub const DEFAULT_PREVIEW_WIDTH: u32 = 220;
@@ -13,6 +13,7 @@ pub const DEFAULT_REQUEST_START_INTERVAL_MS: u64 = 25;
 pub struct SettingsSnapshot {
     pub revision: u64,
     pub download_root: String,
+    pub folder_name_template: String,
     pub max_columns: u32,
     pub preview_width: u32,
     pub cache_limit_gb: u32,
@@ -25,6 +26,7 @@ impl Default for SettingsSnapshot {
         Self {
             revision: 0,
             download_root: String::new(),
+            folder_name_template: DEFAULT_FOLDER_NAME_TEMPLATE.to_owned(),
             max_columns: DEFAULT_MAX_COLUMNS,
             preview_width: DEFAULT_PREVIEW_WIDTH,
             cache_limit_gb: DEFAULT_CACHE_LIMIT_GB,
@@ -38,6 +40,7 @@ impl Default for SettingsSnapshot {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettingsPatch {
     pub download_root: Option<String>,
+    pub folder_name_template: Option<String>,
     pub max_columns: Option<u32>,
     pub preview_width: Option<u32>,
     pub cache_limit_gb: Option<u32>,
@@ -51,6 +54,9 @@ impl SettingsSnapshot {
 
         if let Some(value) = patch.download_root {
             next.download_root = value;
+        }
+        if let Some(value) = patch.folder_name_template {
+            next.folder_name_template = value;
         }
         if let Some(value) = patch.max_columns {
             next.max_columns = value;
@@ -77,6 +83,7 @@ impl SettingsSnapshot {
     }
 
     pub fn validate(&self) -> Result<(), ValidationError> {
+        validate_folder_name_template(&self.folder_name_template)?;
         if !(1..=4).contains(&self.max_columns) {
             return Err(ValidationError::new(
                 "maxColumns",

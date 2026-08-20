@@ -40,6 +40,19 @@ describe("browser backend settings contract", () => {
     if (!result.ok) return;
     expect(revisions).toEqual([result.data.revision]);
   });
+
+  it("rejects unsafe folder templates and requires the gallery id token", async () => {
+    const current = await backend.settingsGet();
+    if (!current.ok) throw new Error(current.error.message);
+
+    for (const folderNameTemplate of ["{title}", "{unknown} {id}", "{title {id}", "x\ny {id}"]) {
+      const result = await backend.settingsUpdate({ folderNameTemplate }, current.data.revision);
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "VALIDATION_ERROR", details: { field: "folderNameTemplate" } },
+      });
+    }
+  });
 });
 
 describe("browser backend Classic import contract", () => {
