@@ -282,6 +282,69 @@ fn classic_inventory_reports_conflicts_without_guessing_or_merging_folders() {
         .all(|gallery| !gallery.eligible));
 }
 
+#[test]
+fn classic_unknown_source_manifest_schema_is_a_blocking_conflict() {
+    let temporary = tempfile::tempdir().expect("create unknown-schema fixture");
+    let fixture = create_classic_fixture(temporary.path());
+    let manifest = fixture
+        .download_root
+        .join("legacy-gallery")
+        .join(".atsumi-download.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    value["schema"] = json!(999);
+    fs::write(&manifest, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let (_repository, _application, importer) =
+        import_services(temporary.path(), &fixture.next_root);
+
+    let report = importer
+        .dry_run(ClassicImportDryRunRequest {
+            data_root: path_text(&fixture.data_root),
+            download_root: Some(path_text(&fixture.download_root)),
+        })
+        .unwrap();
+
+    assert_eq!(report.counts.galleries_eligible, 0);
+    assert!(report
+        .conflicts
+        .iter()
+        .any(|conflict| conflict.code == ClassicConflictCode::ManifestInvalid));
+}
+
+#[test]
+fn classic_rollback_fails_if_copied_artifact_and_quarantine_are_both_missing() {
+    let temporary = tempfile::tempdir().expect("create rollback-loss fixture");
+    let fixture = create_classic_fixture(temporary.path());
+    let (_repository, _application, importer) =
+        import_services(temporary.path(), &fixture.next_root);
+    let dry_run = importer
+        .dry_run(ClassicImportDryRunRequest {
+            data_root: path_text(&fixture.data_root),
+            download_root: Some(path_text(&fixture.download_root)),
+        })
+        .unwrap();
+    let relative_directory = dry_run.galleries[0].relative_directory.clone().unwrap();
+    let applied = importer
+        .apply(ClassicImportApplyRequest {
+            import_id: dry_run.import_id,
+            expected_revision: dry_run.revision,
+            accepted_conflict_ids: Vec::new(),
+        })
+        .unwrap();
+    fs::remove_dir_all(fixture.next_root.join(relative_directory)).unwrap();
+
+    let error = importer
+        .rollback(ClassicImportRollbackRequest {
+            import_id: applied.report.import_id,
+            expected_revision: applied.report.revision,
+        })
+        .expect_err("missing copied data must not be reported as rolled back");
+
+    assert!(
+        matches!(error, ApplicationError::ClassicImportInvalid(message) if message.contains("both missing"))
+    );
+}
+
 fn import_services(
     root: &Path,
     next_root: &Path,

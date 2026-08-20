@@ -105,10 +105,10 @@ impl ExpectedContent {
                     "application/x-nozomi" | "application/octet-stream"
                 )
             }
-            Self::Image => matches!(
-                mime.as_str(),
-                "image/webp" | "image/avif" | "image/jpeg" | "image/jpg" | "image/png"
-            ),
+            Self::Image => {
+                matches!(mime.as_str(), "" | "application/octet-stream")
+                    || mime.starts_with("image/")
+            }
         }
     }
 }
@@ -127,6 +127,7 @@ pub(super) struct HttpRequest {
 pub(super) struct HttpPayload {
     pub bytes: Vec<u8>,
     pub content_type: String,
+    pub status: u16,
 }
 
 pub(super) trait HttpTransport: Send + Sync {
@@ -262,10 +263,17 @@ impl ReqwestTransport {
 
         read_payload(
             response,
+            status,
             request.expected,
             request.max_bytes,
             request.cancellation.as_ref(),
         )
+        .map_err(|mut error| {
+            if error.http_status.is_none() {
+                error.http_status = Some(status);
+            }
+            error
+        })
     }
 }
 
@@ -327,6 +335,7 @@ impl HttpTransport for ReqwestTransport {
 
 fn read_payload(
     mut response: Response,
+    status: u16,
     expected: ExpectedContent,
     max_bytes: usize,
     cancellation: Option<&CancellationToken>,
@@ -344,7 +353,9 @@ fn read_payload(
         } else {
             format!("HTTP Content-Type has unexpected value {content_type:?}")
         };
-        return Err(invalid_response(expected, detail));
+        let mut error = invalid_response(expected, detail);
+        error.diagnostic_content_type = diagnostic_content_type(&content_type);
+        return Err(error);
     }
 
     if let Some(content_length) = response
@@ -354,10 +365,12 @@ fn read_payload(
         .and_then(|value| value.parse::<u64>().ok())
     {
         if content_length > max_bytes as u64 {
-            return Err(invalid_response(
+            let mut error = invalid_response(
                 expected,
                 format!("declared payload exceeds the {max_bytes}-byte limit"),
-            ));
+            );
+            error.diagnostic_content_type = diagnostic_content_type(&content_type);
+            return Err(error);
         }
     }
 
@@ -376,17 +389,41 @@ fn read_payload(
         }
         bytes.extend_from_slice(&chunk[..read]);
         if bytes.len() > max_bytes {
-            return Err(invalid_response(
+            let mut error = invalid_response(
                 expected,
                 format!("payload exceeds the {max_bytes}-byte limit"),
-            ));
+            );
+            error.diagnostic_content_type = diagnostic_content_type(&content_type);
+            error.diagnostic_bytes_received = u64::try_from(bytes.len()).ok();
+            return Err(error);
         }
     }
 
     Ok(HttpPayload {
         bytes,
         content_type,
+        status,
     })
+}
+
+fn diagnostic_content_type(content_type: &str) -> Option<String> {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if mime.is_empty() {
+        None
+    } else if mime.len() <= 127
+        && mime
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'+' | b'-'))
+    {
+        Some(mime)
+    } else {
+        Some("invalid".into())
+    }
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> SourceContractError {
@@ -749,6 +786,7 @@ pub(super) fn stable_thumbnail_error(error: &SourceContractError) -> (&'static s
         SourceErrorCode::ImageDecodeFailed => {
             ("thumbnail image could not be decoded safely", false)
         }
+        SourceErrorCode::ImageFormatUnsupported => ("thumbnail image format is unsupported", false),
         SourceErrorCode::Validation | SourceErrorCode::Protocol | SourceErrorCode::InvalidData => {
             ("thumbnail source returned invalid data", false)
         }

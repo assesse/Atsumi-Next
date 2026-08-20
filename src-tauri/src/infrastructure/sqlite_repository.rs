@@ -894,7 +894,8 @@ impl DownloadRepository for SqliteRepository {
                     SELECT
                         d.entry_id, d.gallery_id, d.revision, d.state, d.progress,
                         d.review_kind, d.review_id,
-                        j.attempt, j.last_error_code, j.last_error_message
+                        j.attempt, j.last_error_code, j.last_error_message,
+                        j.last_error_retryable
                     FROM download_entries d
                     JOIN download_jobs j
                       ON j.entry_id = d.entry_id AND j.gallery_id = d.gallery_id
@@ -1457,8 +1458,11 @@ impl ArtifactRepository for SqliteRepository {
                         entry_id, gallery_id, revision, relative_directory,
                         expected_page_count, state, manifest_relative_path,
                         manifest_schema_version, writer_version,
-                        hash_profile_version, completed_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                        hash_profile_version, completed_at, root_snapshot
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                        (SELECT download_root FROM settings WHERE singleton = 1)
+                    )
                     ON CONFLICT (entry_id) DO UPDATE SET
                         gallery_id = excluded.gallery_id,
                         revision = excluded.revision,
@@ -1770,13 +1774,14 @@ impl DownloadPipelineRepository for SqliteRepository {
 
         let previous_artifact = transaction
             .query_row(
-                "SELECT revision, relative_directory, manifest_relative_path FROM download_artifacts WHERE entry_id = ?1",
+                "SELECT revision, relative_directory, manifest_relative_path, root_snapshot FROM download_artifacts WHERE entry_id = ?1",
                 [&plan.descriptor.entry_id],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -1785,31 +1790,35 @@ impl DownloadPipelineRepository for SqliteRepository {
         let artifact_created = previous_artifact.is_none();
         let artifact_revision = previous_artifact
             .as_ref()
-            .map(|(revision, _, _)| next_stored_revision(*revision, "artifact revision"))
+            .map(|(revision, _, _, _)| next_stored_revision(*revision, "artifact revision"))
             .transpose()?
             .unwrap_or(0);
         let relative_directory = previous_artifact
             .as_ref()
-            .map(|(_, path, _)| ArtifactRelativePath::new(path).map_err(domain_corruption))
+            .map(|(_, path, _, _)| ArtifactRelativePath::new(path).map_err(domain_corruption))
             .transpose()?
             .unwrap_or_else(|| plan.relative_directory.clone());
         let manifest_relative_path = previous_artifact
             .as_ref()
-            .and_then(|(_, _, path)| path.as_ref())
+            .and_then(|(_, _, path, _)| path.as_ref())
             .map(|path| ArtifactRelativePath::new(path).map_err(domain_corruption))
             .transpose()?
             .unwrap_or_else(|| {
                 ArtifactRelativePath::new(format!("{}/manifest.json", relative_directory.as_str()))
                     .expect("stored artifact directory produces a relative manifest path")
             });
+        let root_snapshot = previous_artifact
+            .as_ref()
+            .map(|(_, _, _, root)| PathBuf::from(root))
+            .unwrap_or_else(|| plan.root_snapshot.clone());
         transaction
             .execute(
                 r#"
                     INSERT INTO download_artifacts (
                         entry_id, gallery_id, revision, relative_directory,
                         expected_page_count, state, manifest_relative_path,
-                        hash_profile_version
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, 'incomplete', ?6, 1)
+                        hash_profile_version, root_snapshot
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, 'incomplete', ?6, 1, ?7)
                     ON CONFLICT (entry_id) DO UPDATE SET
                         gallery_id = excluded.gallery_id,
                         revision = excluded.revision,
@@ -1828,6 +1837,7 @@ impl DownloadPipelineRepository for SqliteRepository {
                         RepositoryError::Other("source page count exceeds SQLite range".into())
                     })?,
                     manifest_relative_path.as_str(),
+                    root_snapshot.to_string_lossy(),
                 ],
             )
             .map_err(map_sqlite_error)?;
@@ -1975,6 +1985,7 @@ impl DownloadPipelineRepository for SqliteRepository {
             checkpoints,
             relative_directory,
             manifest_relative_path,
+            root_snapshot,
             artifact_created,
         })
     }
@@ -1990,9 +2001,9 @@ impl DownloadPipelineRepository for SqliteRepository {
                 r#"
                     INSERT INTO download_page_attempts (
                         job_id, job_attempt, source_page_number,
-                        candidate_index, started_at
+                        candidate_index, candidate_format, started_at
                     ) VALUES (
-                        ?1, ?2, ?3, ?4,
+                        ?1, ?2, ?3, ?4, ?5,
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                     )
                     ON CONFLICT (
@@ -2004,6 +2015,7 @@ impl DownloadPipelineRepository for SqliteRepository {
                     to_sql_integer(attempt.descriptor.worker_attempt, "download attempt")?,
                     i64::from(attempt.source_page_number.get()),
                     i64::from(attempt.candidate_index),
+                    attempt.candidate_format,
                 ],
             )
             .map_err(map_sqlite_error)?;
@@ -2021,13 +2033,14 @@ impl DownloadPipelineRepository for SqliteRepository {
                 r#"
                     INSERT INTO download_page_attempts (
                         job_id, job_attempt, source_page_number,
-                        candidate_index, started_at, finished_at,
-                        outcome, error_code, error_message, bytes_received
+                        candidate_index, candidate_format, started_at, finished_at,
+                        outcome, error_code, error_message, bytes_received,
+                        http_status, content_type, retryable
                     ) VALUES (
-                        ?1, ?2, ?3, ?4,
+                        ?1, ?2, ?3, ?4, ?5,
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                        ?5, ?6, ?7, ?8
+                        ?6, ?7, ?8, ?9, ?10, ?11, ?12
                     )
                     ON CONFLICT (
                         job_id, job_attempt, source_page_number, candidate_index
@@ -2036,13 +2049,18 @@ impl DownloadPipelineRepository for SqliteRepository {
                         outcome = excluded.outcome,
                         error_code = excluded.error_code,
                         error_message = excluded.error_message,
-                        bytes_received = excluded.bytes_received
+                        bytes_received = excluded.bytes_received,
+                        candidate_format = excluded.candidate_format,
+                        http_status = excluded.http_status,
+                        content_type = excluded.content_type,
+                        retryable = excluded.retryable
                 "#,
                 params![
                     result.attempt.descriptor.job_id,
                     to_sql_integer(result.attempt.descriptor.worker_attempt, "download attempt")?,
                     i64::from(result.attempt.source_page_number.get()),
                     i64::from(result.attempt.candidate_index),
+                    result.attempt.candidate_format,
                     result.outcome.as_str(),
                     result.error_code,
                     result.error_message,
@@ -2050,6 +2068,9 @@ impl DownloadPipelineRepository for SqliteRepository {
                         .bytes_received
                         .map(|bytes| to_sql_integer(bytes, "received page bytes"))
                         .transpose()?,
+                    result.http_status.map(i64::from),
+                    result.content_type,
+                    i64::from(u8::from(result.retryable)),
                 ],
             )
             .map_err(map_sqlite_error)?;
@@ -2263,7 +2284,7 @@ impl DownloadPipelineRepository for SqliteRepository {
         descriptor: &DownloadJobDescriptor,
         code: &str,
         message: &str,
-        _retryable: bool,
+        retryable: bool,
     ) -> Result<Option<DownloadJobProjection>, RepositoryError> {
         let mut connection = self.connection()?;
         let transaction = connection
@@ -2290,20 +2311,43 @@ impl DownloadPipelineRepository for SqliteRepository {
         )?;
         transaction
             .execute(
+                "UPDATE download_jobs SET last_error_retryable = ?1 WHERE job_id = ?2",
+                params![i64::from(u8::from(retryable)), descriptor.job_id],
+            )
+            .map_err(map_sqlite_error)?;
+        transaction
+            .execute(
                 r#"
                     UPDATE download_attempts
                     SET finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                        outcome_state = 'failed', error_code = ?1, error_message = ?2
-                    WHERE job_id = ?3 AND attempt = ?4
+                        outcome_state = 'failed', error_code = ?1, error_message = ?2,
+                        error_retryable = ?3
+                    WHERE job_id = ?4 AND attempt = ?5
                 "#,
                 params![
                     code,
                     message,
+                    i64::from(u8::from(retryable)),
                     descriptor.job_id,
                     to_sql_integer(descriptor.worker_attempt, "download attempt")?,
                 ],
             )
             .map_err(map_sqlite_error)?;
+        if code == "ARTIFACT_DESTINATION_OCCUPIED" {
+            transaction
+                .execute(
+                    r#"
+                        DELETE FROM download_artifacts
+                        WHERE entry_id = ?1
+                          AND NOT EXISTS (
+                              SELECT 1 FROM download_pages
+                              WHERE entry_id = ?1 AND state = 'present'
+                          )
+                    "#,
+                    [&descriptor.entry_id],
+                )
+                .map_err(map_sqlite_error)?;
+        }
         transaction.commit().map_err(map_sqlite_error)?;
         Ok(Some(projection))
     }
@@ -2453,7 +2497,7 @@ impl DownloadPipelineRepository for SqliteRepository {
                 [entry_id.as_str()],
             )
             .map_err(map_sqlite_error)?;
-        if target.state != JobState::Completed {
+        if !target.state.allows_transition_to(JobState::ReviewRequired) {
             transaction.commit().map_err(map_sqlite_error)?;
             return Ok(None);
         }
@@ -2467,7 +2511,7 @@ impl DownloadPipelineRepository for SqliteRepository {
         let projection = transition_pipeline_target(
             &transaction,
             pipeline_target,
-            JobState::Failed,
+            JobState::ReviewRequired,
             None,
             None,
             Some(code),
@@ -2483,6 +2527,26 @@ impl DownloadPipelineRepository for SqliteRepository {
         entry_id: &DownloadEntryId,
     ) -> Result<Option<ArtifactBundle>, RepositoryError> {
         <Self as ArtifactRepository>::artifact_bundle_get(self, entry_id)
+    }
+
+    fn pipeline_artifact_root(
+        &self,
+        entry_id: &DownloadEntryId,
+    ) -> Result<PathBuf, RepositoryError> {
+        let connection = self.connection()?;
+        let stored: String = connection
+            .query_row(
+                "SELECT root_snapshot FROM download_artifacts WHERE entry_id = ?1",
+                [entry_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite_error)?;
+        if stored.trim().is_empty() {
+            return Err(RepositoryError::Other(
+                "artifact root snapshot is missing".into(),
+            ));
+        }
+        Ok(PathBuf::from(stored))
     }
 
     fn pipeline_artifact_bundles(&self) -> Result<Vec<ArtifactBundle>, RepositoryError> {
@@ -4501,6 +4565,8 @@ fn transition_pipeline_target(
                 SET revision = ?1, state = ?2,
                     completed_units = ?3, total_units = ?4,
                     last_error_code = ?5, last_error_message = ?6,
+                    last_error_retryable = CASE
+                        WHEN ?5 IS NULL THEN NULL ELSE last_error_retryable END,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                     started_at = CASE
                         WHEN ?2 != 'queued' THEN COALESCE(
@@ -4675,6 +4741,7 @@ impl StoredDownloadTarget {
             attempt: Some(stored_u64(self.attempt, "download attempt")?),
             error_code: self.error_code,
             error_message: self.error_message,
+            error_retryable: None,
             review_kind,
             review_id: self.review_id,
         })
@@ -4878,6 +4945,7 @@ fn read_request_entries(
                     NULL AS attempt,
                     NULL AS error_code,
                     NULL AS error_message
+                    , NULL AS error_retryable
                 FROM download_queue_request_entries request_entry
                 WHERE request_entry.request_id = ?1
                 ORDER BY request_entry.position ASC
@@ -4905,6 +4973,7 @@ struct StoredDownloadEntry {
     attempt: Option<i64>,
     error_code: Option<String>,
     error_message: Option<String>,
+    error_retryable: Option<i64>,
 }
 
 impl StoredDownloadEntry {
@@ -4931,6 +5000,7 @@ impl StoredDownloadEntry {
                 .transpose()?,
             error_code: self.error_code,
             error_message: self.error_message,
+            error_retryable: self.error_retryable.map(|value| value != 0),
             review_kind,
             review_id: self.review_id,
         })
@@ -4963,6 +5033,7 @@ fn stored_download_entry(row: &Row<'_>) -> rusqlite::Result<StoredDownloadEntry>
         attempt: row.get(7)?,
         error_code: row.get(8)?,
         error_message: row.get(9)?,
+        error_retryable: row.get(10)?,
     })
 }
 

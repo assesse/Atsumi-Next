@@ -2,6 +2,6 @@ mod error;
 pub mod hitomi;
 
 pub use error::{
-    map_http_status, map_transport_failure, SourceContractError, SourceErrorCategory,
-    SourceErrorCode, TransportFailureKind,
+    map_http_status, map_transport_failure, SourceCandidateDiagnostic, SourceContractError,
+    SourceErrorCategory, SourceErrorCode, TransportFailureKind,
 };

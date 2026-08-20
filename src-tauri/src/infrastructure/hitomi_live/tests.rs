@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     io::Cursor,
     sync::{Arc, Mutex},
     time::Duration,
@@ -8,8 +8,9 @@ use std::{
 use reqwest::Url;
 
 use crate::{
-    application::SearchRepository,
-    domain::{Language, SearchRequest, SearchSort},
+    application::{ArtifactStore, DownloadSourcePort, ExistingPageVerification, SearchRepository},
+    domain::{ArtifactRelativePath, GalleryId, Language, SearchRequest, SearchSort},
+    infrastructure::FilesystemArtifactStore,
     source::{
         hitomi::{
             galleryinfo_script_url, gg_script_url, parse_galleryinfo_script, parse_gg_routing,
@@ -21,10 +22,44 @@ use crate::{
 };
 
 use super::{
+    decode_download_payload,
     http::{validate_source_url, HttpPayload, HttpRequest, HttpTransport},
     search::{prefixed_nozomi_path, tag_nozomi_path},
     HitomiLiveAdapter, HitomiLiveConfig,
 };
+
+#[test]
+fn download_decode_accepts_empty_or_octet_stream_only_when_magic_matches() {
+    let page = crate::domain::SourcePageNumber::new(1).unwrap();
+    for content_type in ["", "application/octet-stream"] {
+        let decoded = decode_download_payload(
+            HttpPayload {
+                status: 200,
+                bytes: one_pixel_png(),
+                content_type: content_type.into(),
+            },
+            page,
+            "fixture-v1".into(),
+            0,
+            crate::source::hitomi::HitomiImageFormat::Png,
+        )
+        .unwrap();
+        assert_eq!(decoded.source_format.as_str(), "png");
+    }
+    let mismatch = decode_download_payload(
+        HttpPayload {
+            status: 200,
+            bytes: one_pixel_png(),
+            content_type: "image/png".into(),
+        },
+        page,
+        "fixture-v1".into(),
+        0,
+        crate::source::hitomi::HitomiImageFormat::Webp,
+    )
+    .unwrap_err();
+    assert_eq!(mismatch.code.as_str(), "image_response_invalid");
+}
 
 const GALLERY_SCRIPT: &str = include_str!("../../../fixtures/hitomi/galleryinfo-normal.js");
 const GG_SCRIPT: &str = include_str!("../../../fixtures/hitomi/gg-current.js");
@@ -43,6 +78,7 @@ impl FakeTransport {
             .entry(url)
             .or_default()
             .push_back(Ok(HttpPayload {
+                status: 200,
                 bytes,
                 content_type: content_type.to_owned(),
             }));
@@ -323,8 +359,8 @@ fn gallery_script(id: u64, title: &str, related: &str) -> String {
 }
 
 #[test]
-#[ignore = "opt-in live Hitomi network smoke; run through tools/verify.ps1 -LiveSmoke"]
-fn live_hitomi_smoke() {
+#[ignore = "opt-in live gallery 4113714 full download pipeline smoke"]
+fn live_gallery_4113714_download_pipeline() {
     assert_eq!(
         std::env::var("ATSUMI_ALLOW_LIVE_SMOKE").as_deref(),
         Ok("1"),
@@ -337,18 +373,103 @@ fn live_hitomi_smoke() {
         ..HitomiLiveConfig::default()
     })
     .expect("construct live adapter");
-    let result = adapter
-        .search_submit(&SearchRequest {
-            text: String::new(),
-            include_tags: Vec::new(),
-            exclude_tags: Vec::new(),
-            languages: vec![Language::Korean],
-            sort: SearchSort::Recent,
-            page_size: 1,
-        })
-        .expect("live recent search");
-    assert_eq!(result.first_page.items.len(), 1);
-    assert!(result.first_page.items[0].id.get() > 0);
+    let gallery_id = GalleryId::new(4_113_714).expect("fixed live gallery id");
+    let cancellation = CancellationToken::new();
+    let snapshot = adapter
+        .gallery_snapshot(gallery_id, &cancellation)
+        .unwrap_or_else(|error| {
+            panic!(
+                "live gallery 4113714 metadata failed: {}",
+                error.code.as_str()
+            )
+        });
+    assert_eq!(
+        snapshot.pages.len(),
+        18,
+        "gallery 4113714 page count changed"
+    );
+    let temporary = tempfile::tempdir().expect("temporary live download root");
+    let store = FilesystemArtifactStore::new();
+    let relative = ArtifactRelativePath::new("live-4113714").unwrap();
+    let layout = store
+        .prepare_layout(temporary.path(), &relative, false)
+        .expect("prepare isolated live artifact");
+    let mut selected_format_counts = BTreeMap::<&'static str, u32>::new();
+    let mut selected_total_bytes = 0_u64;
+    let mut verified_pages = 0_u32;
+
+    for source_page in &snapshot.pages {
+        let payload = adapter
+            .download_page(gallery_id, source_page.source_page_number, &cancellation)
+            .unwrap_or_else(|error| {
+                for diagnostic in &error.candidate_diagnostics {
+                    eprintln!(
+                        "sourcePage={} format={} status={:?} contentType={:?} bytes={:?} errorCode={:?} retryable={}",
+                        source_page.source_page_number.get(),
+                        diagnostic.format,
+                        diagnostic.http_status,
+                        diagnostic.content_type,
+                        diagnostic.bytes_received,
+                        diagnostic.error_code.map(|code| code.as_str()),
+                        diagnostic.retryable,
+                    );
+                }
+                panic!(
+                    "live gallery 4113714 page {} download failed: {}",
+                    source_page.source_page_number.get(),
+                    error.code.as_str()
+                );
+            });
+        for diagnostic in &payload.candidate_diagnostics {
+            eprintln!(
+                "sourcePage={} format={} status={:?} contentType={:?} bytes={:?} errorCode={:?} retryable={}",
+                source_page.source_page_number.get(),
+                diagnostic.format,
+                diagnostic.http_status,
+                diagnostic.content_type,
+                diagnostic.bytes_received,
+                diagnostic.error_code.map(|code| code.as_str()),
+                diagnostic.retryable,
+            );
+        }
+        assert!(
+            payload.source_page_number == source_page.source_page_number,
+            "source page identity mismatch at page {}",
+            source_page.source_page_number.get()
+        );
+        assert!(
+            payload.source_revision == source_page.source_revision,
+            "source revision mismatch at page {}",
+            source_page.source_page_number.get()
+        );
+        selected_total_bytes = selected_total_bytes
+            .checked_add(u64::try_from(payload.bytes.len()).expect("selected page size fits u64"))
+            .expect("selected live byte total fits u64");
+        *selected_format_counts
+            .entry(payload.source_format.as_str())
+            .or_default() += 1;
+        let stored = store
+            .store_page(&layout, &payload, &cancellation)
+            .expect("store verified live WebP");
+        assert!(matches!(
+            store
+                .verify_existing_page(
+                    &layout,
+                    source_page.source_page_number,
+                    &source_page.source_revision,
+                    Some(&stored),
+                )
+                .expect("verify stored live page"),
+            ExistingPageVerification::Verified(_)
+        ));
+        verified_pages += 1;
+    }
+
+    eprintln!(
+        "verifiedPages={} selectedFormatCounts={:?} selectedTotalBytes={}",
+        verified_pages, selected_format_counts, selected_total_bytes,
+    );
+    assert_eq!(verified_pages, 18);
 }
 
 fn one_pixel_png() -> Vec<u8> {

@@ -1132,6 +1132,45 @@ pub const MIGRATIONS: &[Migration] = &[
             END;
         "#,
     },
+    Migration {
+        version: 16,
+        name: "download_candidate_diagnostics_and_artifact_root_snapshot",
+        sql: r#"
+            ALTER TABLE download_jobs
+            ADD COLUMN last_error_retryable INTEGER
+                CHECK (last_error_retryable IS NULL OR last_error_retryable IN (0, 1));
+            ALTER TABLE download_attempts
+            ADD COLUMN error_retryable INTEGER
+                CHECK (error_retryable IS NULL OR error_retryable IN (0, 1));
+
+            ALTER TABLE download_page_attempts
+            ADD COLUMN candidate_format TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (candidate_format IN ('unknown', 'webp', 'jpeg', 'png', 'avif', 'jxl'));
+            ALTER TABLE download_page_attempts
+            ADD COLUMN http_status INTEGER
+                CHECK (http_status IS NULL OR http_status BETWEEN 100 AND 599);
+            ALTER TABLE download_page_attempts
+            ADD COLUMN content_type TEXT
+                CHECK (content_type IS NULL OR length(content_type) BETWEEN 1 AND 127);
+            ALTER TABLE download_page_attempts
+            ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0
+                CHECK (retryable IN (0, 1));
+
+            ALTER TABLE download_artifacts
+            ADD COLUMN root_snapshot TEXT NOT NULL DEFAULT '';
+            UPDATE download_artifacts
+            SET root_snapshot = (SELECT download_root FROM settings WHERE singleton = 1)
+            WHERE root_snapshot = '';
+
+            CREATE TRIGGER download_artifacts_root_snapshot_immutable
+            BEFORE UPDATE OF root_snapshot ON download_artifacts
+            FOR EACH ROW
+            WHEN NEW.root_snapshot <> OLD.root_snapshot
+            BEGIN
+                SELECT RAISE(ABORT, 'download artifact root_snapshot is immutable');
+            END;
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1398,6 +1437,7 @@ mod tests {
                     INSERT INTO galleries (
                         gallery_id, revision, title, source_page_count
                     ) VALUES (42, 0, 'Legacy title', 1);
+                    UPDATE settings SET download_root = 'C:\legacy-root' WHERE singleton = 1;
                     INSERT INTO download_entries (
                         entry_id, gallery_id, revision, state, progress,
                         created_at, updated_at
@@ -1416,7 +1456,7 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v14 to v15");
-        assert_eq!(report.applied_versions, vec![15]);
+        assert_eq!(report.applied_versions, vec![15, 16]);
         let template: String = connection
             .query_row("SELECT folder_name_template FROM settings", [], |row| {
                 row.get(0)
@@ -1431,9 +1471,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored_path, "gallery-42");
+        let root_snapshot: String = connection
+            .query_row(
+                "SELECT root_snapshot FROM download_artifacts WHERE entry_id='legacy-entry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(root_snapshot, r"C:\legacy-root");
         assert!(connection
             .execute(
                 "UPDATE download_artifacts SET relative_directory='renamed-42' WHERE entry_id='legacy-entry'",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                r"UPDATE download_artifacts SET root_snapshot='C:\new-root' WHERE entry_id='legacy-entry'",
                 [],
             )
             .is_err());
@@ -1480,8 +1534,8 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
-        assert_eq!(report.applied_versions, vec![12, 13, 14, 15]);
-        assert_eq!(report.current_version, 15);
+        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16]);
+        assert_eq!(report.current_version, 16);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",

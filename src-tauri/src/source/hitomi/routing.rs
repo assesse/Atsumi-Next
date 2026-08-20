@@ -390,12 +390,45 @@ pub enum HitomiImageKind {
     Full,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HitomiImageFormat {
+    Webp,
+    Jpeg,
+    Png,
+    Avif,
+    Jxl,
+}
+
+impl HitomiImageFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Webp => "webp",
+            Self::Jpeg => "jpeg",
+            Self::Png => "png",
+            Self::Avif => "avif",
+            Self::Jxl => "jxl",
+        }
+    }
+
+    const fn content_type(self) -> &'static str {
+        match self {
+            Self::Webp => "image/webp",
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Avif => "image/avif",
+            Self::Jxl => "image/jxl",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HitomiImageCandidate {
     pub url: String,
     pub kind: HitomiImageKind,
     pub content_type: String,
+    pub format: HitomiImageFormat,
     pub source_revision: SourceRevision,
 }
 
@@ -481,6 +514,35 @@ pub fn download_full_candidates(
 ) -> Result<Vec<HitomiImageCandidate>, SourceContractError> {
     validate_file_hash(&file.hash, "Hitomi page file hash")?;
     let mut candidates = webp_full_candidates(file, routing)?;
+    let route = routing.route_for_hash(&file.hash)?;
+    let real_path = real_path(&file.hash);
+    let full_path = full_path(&file.hash, routing)?;
+    if file.has_avif {
+        for host in [webp_host(route), "a", "b"] {
+            candidates.push(candidate_for_format(
+                format!("https://{host}.{HITOMI_CONTENT_DOMAIN}/avif/{real_path}.avif"),
+                HitomiImageKind::Full,
+                HitomiImageFormat::Avif,
+                &file.source_revision,
+            ));
+            candidates.push(candidate_for_format(
+                format!("https://{host}.{HITOMI_CONTENT_DOMAIN}/{full_path}.avif"),
+                HitomiImageKind::Full,
+                HitomiImageFormat::Avif,
+                &file.source_revision,
+            ));
+        }
+    }
+    if file.has_jxl {
+        for host in ["a", "b"] {
+            candidates.push(candidate_for_format(
+                format!("https://{host}.{HITOMI_CONTENT_DOMAIN}/jxl/{real_path}.jxl"),
+                HitomiImageKind::Full,
+                HitomiImageFormat::Jxl,
+                &file.source_revision,
+            ));
+        }
+    }
     let extension = file
         .name
         .rsplit_once('.')
@@ -491,10 +553,12 @@ pub fn download_full_candidates(
                 "does not contain a supported extension",
             )
         })?;
-    let (extension, content_type) = match extension.as_str() {
-        "jpg" | "jpeg" => (extension, "image/jpeg"),
-        "png" => (extension, "image/png"),
-        "webp" => (extension, "image/webp"),
+    let (extension, format) = match extension.as_str() {
+        "jpg" | "jpeg" => (extension, HitomiImageFormat::Jpeg),
+        "png" => (extension, HitomiImageFormat::Png),
+        "webp" => (extension, HitomiImageFormat::Webp),
+        "avif" if file.has_avif => (extension, HitomiImageFormat::Avif),
+        "jxl" if file.has_jxl => (extension, HitomiImageFormat::Jxl),
         _ => {
             return if candidates.is_empty() {
                 Err(SourceContractError::invalid_data(
@@ -506,19 +570,17 @@ pub fn download_full_candidates(
             }
         }
     };
-    let full_path = full_path(&file.hash, routing)?;
-    let real_path = real_path(&file.hash);
     for host in ["a", "b"] {
-        candidates.push(candidate_with_content_type(
+        candidates.push(candidate_for_format(
             format!("https://{host}.{HITOMI_CONTENT_DOMAIN}/images/{full_path}.{extension}"),
             HitomiImageKind::Full,
-            content_type,
+            format,
             &file.source_revision,
         ));
-        candidates.push(candidate_with_content_type(
+        candidates.push(candidate_for_format(
             format!("https://{host}.{HITOMI_CONTENT_DOMAIN}/{extension}/{real_path}.{extension}"),
             HitomiImageKind::Full,
-            content_type,
+            format,
             &file.source_revision,
         ));
     }
@@ -530,19 +592,20 @@ fn candidate(
     kind: HitomiImageKind,
     source_revision: &SourceRevision,
 ) -> HitomiImageCandidate {
-    candidate_with_content_type(url, kind, "image/webp", source_revision)
+    candidate_for_format(url, kind, HitomiImageFormat::Webp, source_revision)
 }
 
-fn candidate_with_content_type(
+fn candidate_for_format(
     url: String,
     kind: HitomiImageKind,
-    content_type: &str,
+    format: HitomiImageFormat,
     source_revision: &SourceRevision,
 ) -> HitomiImageCandidate {
     HitomiImageCandidate {
         url,
         kind,
-        content_type: content_type.to_owned(),
+        content_type: format.content_type().to_owned(),
+        format,
         source_revision: source_revision.clone(),
     }
 }

@@ -6,10 +6,11 @@ use crate::source::{
 };
 
 use super::{
-    galleryinfo_script_url, gg_script_url, index_all_nozomi_url, parse_galleryinfo_script,
-    parse_gg_routing, parse_nozomi_ids, parse_nozomi_range, webp_full_candidates,
-    webp_thumbnail_candidates, HitomiTagKind, NozomiByteRange, ThumbnailSize,
-    HITOMI_METADATA_ORIGIN, HITOMI_PARSER_VERSION, HITOMI_RESOLVER_VERSION, NOZOMI_CONTENT_TYPE,
+    download_full_candidates, galleryinfo_script_url, gg_script_url, index_all_nozomi_url,
+    parse_galleryinfo_script, parse_gg_routing, parse_nozomi_ids, parse_nozomi_range,
+    webp_full_candidates, webp_thumbnail_candidates, HitomiImageFormat, HitomiTagKind,
+    NozomiByteRange, ThumbnailSize, HITOMI_METADATA_ORIGIN, HITOMI_PARSER_VERSION,
+    HITOMI_RESOLVER_VERSION, NOZOMI_CONTENT_TYPE,
 };
 
 const GALLERYINFO_NORMAL: &str = include_str!("../../../fixtures/hitomi/galleryinfo-normal.js");
@@ -169,6 +170,20 @@ fn generates_deterministic_thumbnail_and_full_webp_candidates() {
         full[3].url,
         format!("https://w2.gold-usergeneratedcontent.net/webp/f/de/{hash}.webp")
     );
+    let downloadable = download_full_candidates(page, &routing).unwrap();
+    let formats = downloadable
+        .iter()
+        .map(|candidate| candidate.format)
+        .collect::<Vec<_>>();
+    let first_non_webp = formats
+        .iter()
+        .position(|format| *format != HitomiImageFormat::Webp)
+        .unwrap();
+    assert!(formats[..first_non_webp]
+        .iter()
+        .all(|format| *format == HitomiImageFormat::Webp));
+    assert!(formats[first_non_webp..].contains(&HitomiImageFormat::Avif));
+    assert!(formats.contains(&HitomiImageFormat::Jpeg));
 
     assert!(
         webp_thumbnail_candidates(&metadata.pages[1], &routing, ThumbnailSize::Small)

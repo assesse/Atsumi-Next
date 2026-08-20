@@ -165,7 +165,7 @@ try {
     if ($env:ATSUMI_ALLOW_LIVE_SMOKE -ne "1") {
       throw "Set ATSUMI_ALLOW_LIVE_SMOKE=1 to permit the opt-in Hitomi network smoke test."
     }
-    Invoke-LoggedNative -Label "Opt-in live Hitomi smoke test" -FilePath $cargoCommand.Source -Arguments @("+stable", "test", "--locked", "--manifest-path", "src-tauri/Cargo.toml", "live_hitomi_smoke", "--", "--ignored")
+    Invoke-LoggedNative -Label "Opt-in live Hitomi gallery 4113714 full pipeline smoke" -FilePath $cargoCommand.Source -Arguments @("+stable", "test", "--locked", "--manifest-path", "src-tauri/Cargo.toml", "live_gallery_4113714_download_pipeline", "--", "--ignored", "--nocapture", "--test-threads=1")
   }
 
   if (-not $SkipRelease) {

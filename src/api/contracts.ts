@@ -143,6 +143,7 @@ export type DownloadChangedEvent = {
   attempt?: number;
   errorCode?: string;
   errorMessage?: string;
+  errorRetryable?: boolean;
 };
 
 export type SearchRequest = {
@@ -495,6 +496,7 @@ export type DownloadEntry = {
   attempt?: number;
   errorCode?: string;
   errorMessage?: string;
+  errorRetryable?: boolean;
   reviewKind?: "gallery_duplicate" | "internal_pages";
   reviewId?: string;
 };

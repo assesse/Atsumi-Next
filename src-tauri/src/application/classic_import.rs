@@ -468,7 +468,13 @@ impl ClassicImportService {
                             .move_managed_directory(&root, &source, &destination)?
                     }
                     (false, true) => {}
-                    (false, false) => {}
+                    (false, false) if copy.copied_files == 0 => {}
+                    (false, false) => {
+                        return Err(ApplicationError::ClassicImportInvalid(
+                            "a copied Classic artifact and its rollback quarantine are both missing"
+                                .into(),
+                        ));
+                    }
                     (true, true) => {
                         return Err(ApplicationError::ClassicImportInvalid(
                             "both the imported artifact and rollback quarantine exist; no path was overwritten"

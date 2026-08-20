@@ -1,5 +1,6 @@
 mod artifact_store;
 mod artifact_thumbnail;
+mod avif_decode;
 mod classic_import_repository;
 mod classic_source;
 mod fixture_search;

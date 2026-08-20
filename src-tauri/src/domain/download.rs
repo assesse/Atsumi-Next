@@ -25,6 +25,8 @@ pub struct DownloadEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_retryable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub review_kind: Option<DownloadReviewKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_id: Option<String>,

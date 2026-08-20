@@ -9,7 +9,7 @@ use crate::{
         ArtifactStorageFormat, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
         Gallery, GalleryId, JobRef, JobState, PageArtifact, SourcePageNumber,
     },
-    source::SourceContractError,
+    source::{SourceCandidateDiagnostic, SourceContractError},
     thumbnail::CancellationToken,
 };
 
@@ -56,6 +56,7 @@ pub struct DownloadPagePayload {
     pub width: u32,
     pub height: u32,
     pub candidate_index: u32,
+    pub candidate_diagnostics: Vec<SourceCandidateDiagnostic>,
 }
 
 pub trait DownloadSourcePort: Send + Sync {
@@ -180,6 +181,7 @@ pub trait DownloadRootPicker: Send + Sync {
 pub struct DownloadArtifactPlan {
     pub descriptor: DownloadJobDescriptor,
     pub gallery: Gallery,
+    pub root_snapshot: PathBuf,
     pub relative_directory: ArtifactRelativePath,
     pub manifest_relative_path: ArtifactRelativePath,
     pub source_pages: Vec<DownloadSourcePage>,
@@ -197,6 +199,7 @@ pub struct DownloadPrepared {
     pub checkpoints: Vec<DownloadCheckpoint>,
     pub relative_directory: ArtifactRelativePath,
     pub manifest_relative_path: ArtifactRelativePath,
+    pub root_snapshot: PathBuf,
     pub artifact_created: bool,
 }
 
@@ -205,6 +208,7 @@ pub struct DownloadPageAttempt {
     pub descriptor: DownloadJobDescriptor,
     pub source_page_number: SourcePageNumber,
     pub candidate_index: u32,
+    pub candidate_format: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,8 +216,11 @@ pub struct DownloadPageAttemptResult {
     pub attempt: DownloadPageAttempt,
     pub outcome: DownloadPageAttemptOutcome,
     pub bytes_received: Option<u64>,
+    pub http_status: Option<u16>,
+    pub content_type: Option<String>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,6 +336,11 @@ pub trait DownloadPipelineRepository: Send + Sync {
         &self,
         entry_id: &DownloadEntryId,
     ) -> Result<Option<ArtifactBundle>, RepositoryError>;
+
+    fn pipeline_artifact_root(
+        &self,
+        entry_id: &DownloadEntryId,
+    ) -> Result<PathBuf, RepositoryError>;
 
     fn pipeline_artifact_bundles(&self) -> Result<Vec<ArtifactBundle>, RepositoryError>;
 

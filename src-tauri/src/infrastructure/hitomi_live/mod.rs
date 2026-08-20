@@ -22,9 +22,9 @@ use crate::{
             download_full_candidates, galleryinfo_script_url, gg_script_url,
             parse_galleryinfo_script, parse_gg_routing, parse_nozomi_ids,
             webp_thumbnail_candidates, GgRoutingTable, HitomiGalleryMetadata, HitomiImageCandidate,
-            ThumbnailSize, HITOMI_METADATA_ORIGIN,
+            HitomiImageFormat, ThumbnailSize, HITOMI_METADATA_ORIGIN,
         },
-        SourceContractError, SourceErrorCode,
+        SourceCandidateDiagnostic, SourceContractError, SourceErrorCode,
     },
     thumbnail::{
         CancellationToken, ResolvedThumbnail, ThumbnailFailureCode, ThumbnailKey,
@@ -40,7 +40,8 @@ use self::search::QueryCache;
 
 const SCRIPT_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 const NOZOMI_RESPONSE_LIMIT: usize = 32 * 1024 * 1024;
-const IMAGE_RESPONSE_LIMIT: usize = 12 * 1024 * 1024;
+const THUMBNAIL_RESPONSE_LIMIT: usize = 12 * 1024 * 1024;
+const FULL_IMAGE_RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 16_384;
 const MAX_IMAGE_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 
@@ -237,7 +238,7 @@ impl HitomiLiveAdapter {
         let payload = self.transport.execute(HttpRequest {
             url: candidate.url.clone(),
             expected: ExpectedContent::Image,
-            max_bytes: IMAGE_RESPONSE_LIMIT,
+            max_bytes: THUMBNAIL_RESPONSE_LIMIT,
             range: None,
             priority: priority.into(),
             cancellation: Some(cancellation.clone()),
@@ -391,51 +392,139 @@ impl DownloadSourcePort for HitomiLiveAdapter {
             return Err(SourceContractError::image_candidates_exhausted());
         }
 
-        let mut last_error = None;
+        let mut diagnostics = Vec::new();
         for (candidate_index, candidate) in candidates.iter().enumerate() {
             check_cancelled(cancellation)?;
+            let candidate_index = u32::try_from(candidate_index).unwrap_or(u32::MAX);
+            if candidate.format == HitomiImageFormat::Jxl {
+                diagnostics.push(SourceCandidateDiagnostic {
+                    candidate_index,
+                    format: candidate.format.as_str().to_owned(),
+                    http_status: None,
+                    content_type: None,
+                    bytes_received: None,
+                    error_code: Some(SourceErrorCode::ImageFormatUnsupported),
+                    retryable: false,
+                });
+                continue;
+            }
             let payload = self.transport.execute(HttpRequest {
                 url: candidate.url.clone(),
                 expected: ExpectedContent::Image,
-                max_bytes: IMAGE_RESPONSE_LIMIT,
+                max_bytes: FULL_IMAGE_RESPONSE_LIMIT,
                 range: None,
                 priority: HttpPriority::Download,
                 cancellation: Some(cancellation.clone()),
             });
             let payload = match payload {
                 Ok(payload) => payload,
-                Err(error)
-                    if matches!(
-                        error.code,
-                        SourceErrorCode::NotFound
-                            | SourceErrorCode::ImageResponseInvalid
-                            | SourceErrorCode::ImageDecodeFailed
-                    ) =>
-                {
-                    last_error = Some(error);
-                    continue;
+                Err(mut error) => {
+                    diagnostics.push(candidate_error_diagnostic(
+                        candidate_index,
+                        candidate.format,
+                        &error,
+                    ));
+                    if candidate_fallback_allowed(&error) {
+                        continue;
+                    }
+                    error.candidate_diagnostics = diagnostics;
+                    return Err(error);
                 }
-                Err(error) => return Err(error),
             };
+            let http_status = payload.status;
+            let content_type = sanitized_content_type(&payload.content_type);
+            let bytes_received = u64::try_from(payload.bytes.len()).ok();
             match decode_download_payload(
                 payload,
                 source_page_number,
                 candidate.source_revision.to_string(),
-                u32::try_from(candidate_index).unwrap_or(u32::MAX),
+                candidate_index,
+                candidate.format,
             ) {
-                Ok(page) => return Ok(page),
-                Err(error)
-                    if matches!(
-                        error.code,
-                        SourceErrorCode::ImageResponseInvalid | SourceErrorCode::ImageDecodeFailed
-                    ) =>
-                {
-                    last_error = Some(error);
+                Ok(mut page) => {
+                    diagnostics.push(SourceCandidateDiagnostic {
+                        candidate_index,
+                        format: candidate.format.as_str().to_owned(),
+                        http_status: Some(http_status),
+                        content_type,
+                        bytes_received,
+                        error_code: None,
+                        retryable: false,
+                    });
+                    page.candidate_diagnostics = diagnostics;
+                    return Ok(page);
                 }
-                Err(error) => return Err(error),
+                Err(mut error) => {
+                    diagnostics.push(SourceCandidateDiagnostic {
+                        candidate_index,
+                        format: candidate.format.as_str().to_owned(),
+                        http_status: Some(http_status),
+                        content_type,
+                        bytes_received,
+                        error_code: Some(error.code),
+                        retryable: error.retryable,
+                    });
+                    if candidate_fallback_allowed(&error) {
+                        continue;
+                    }
+                    error.candidate_diagnostics = diagnostics;
+                    return Err(error);
+                }
             }
         }
-        Err(last_error.unwrap_or_else(SourceContractError::image_candidates_exhausted))
+        let retryable = diagnostics.iter().any(|diagnostic| diagnostic.retryable);
+        Err(SourceContractError::image_candidates_exhausted_with(
+            retryable,
+            diagnostics,
+        ))
+    }
+}
+
+fn candidate_fallback_allowed(error: &SourceContractError) -> bool {
+    error.retryable
+        || matches!(
+            error.code,
+            SourceErrorCode::NotFound
+                | SourceErrorCode::ImageResponseInvalid
+                | SourceErrorCode::ImageDecodeFailed
+                | SourceErrorCode::ImageFormatUnsupported
+        )
+}
+
+fn candidate_error_diagnostic(
+    candidate_index: u32,
+    format: HitomiImageFormat,
+    error: &SourceContractError,
+) -> SourceCandidateDiagnostic {
+    SourceCandidateDiagnostic {
+        candidate_index,
+        format: format.as_str().to_owned(),
+        http_status: error.http_status,
+        content_type: error.diagnostic_content_type.clone(),
+        bytes_received: error.diagnostic_bytes_received,
+        error_code: Some(error.code),
+        retryable: error.retryable,
+    }
+}
+
+fn sanitized_content_type(content_type: &str) -> Option<String> {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if mime.is_empty() {
+        return None;
+    }
+    if mime.len() <= 127
+        && mime
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'+' | b'-'))
+    {
+        Some(mime)
+    } else {
+        Some("invalid".into())
     }
 }
 
@@ -449,6 +538,7 @@ fn source_thumbnail_error(error: SourceContractError) -> ThumbnailResolveError {
         SourceErrorCode::ImageCandidatesExhausted => ThumbnailFailureCode::CandidatesExhausted,
         SourceErrorCode::ImageResponseInvalid => ThumbnailFailureCode::ResponseInvalid,
         SourceErrorCode::ImageDecodeFailed => ThumbnailFailureCode::DecodeFailed,
+        SourceErrorCode::ImageFormatUnsupported => ThumbnailFailureCode::InvalidData,
         SourceErrorCode::Unauthorized => ThumbnailFailureCode::Unauthorized,
         SourceErrorCode::RateLimited
         | SourceErrorCode::TemporarilyUnavailable
@@ -502,6 +592,18 @@ fn decode_thumbnail(
 
     let bytes = payload.bytes;
     let decode_result = catch_unwind(AssertUnwindSafe(|| {
+        if format == ImageFormat::Avif {
+            return super::avif_decode::decode_avif_rgba(&bytes).map_err(|_| {
+                image::ImageError::Unsupported(
+                    image::error::UnsupportedError::from_format_and_kind(
+                        image::error::ImageFormatHint::Exact(ImageFormat::Avif),
+                        image::error::UnsupportedErrorKind::GenericFeature(
+                            "bounded AVIF decode".into(),
+                        ),
+                    ),
+                )
+            });
+        }
         let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
         let mut limits = Limits::default();
         limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
@@ -544,21 +646,27 @@ fn decode_download_payload(
     source_page_number: SourcePageNumber,
     source_revision: String,
     candidate_index: u32,
+    expected_format: HitomiImageFormat,
 ) -> Result<DownloadPagePayload, SourceContractError> {
     let format = image::guess_format(&payload.bytes).map_err(|_| {
         SourceContractError::image_response_invalid(
             "download bytes do not contain a supported image signature",
         )
     })?;
+    if !candidate_magic_matches(expected_format, format) {
+        return Err(SourceContractError::image_response_invalid(
+            "download image signature does not match the selected candidate format",
+        ));
+    }
     let source_format = match format {
         ImageFormat::WebP => DownloadSourceImageFormat::Webp,
         ImageFormat::Jpeg => DownloadSourceImageFormat::Jpeg,
         ImageFormat::Png => DownloadSourceImageFormat::Png,
         ImageFormat::Avif => DownloadSourceImageFormat::Avif,
         _ => {
-            return Err(SourceContractError::image_response_invalid(format!(
-                "download image format {format:?} is unsupported"
-            )))
+            return Err(SourceContractError::image_format_unsupported(
+                "download image format",
+            ))
         }
     };
     let declared_type = payload
@@ -568,13 +676,25 @@ fn decode_download_payload(
         .unwrap_or_default()
         .trim();
     if !mime_matches_format(declared_type, format) {
-        return Err(SourceContractError::image_response_invalid(format!(
-            "download Content-Type {declared_type:?} does not match decoded {format:?} data"
-        )));
+        return Err(SourceContractError::image_response_invalid(
+            "download Content-Type does not match the decoded image signature",
+        ));
     }
 
     let bytes = payload.bytes;
     let decode_result = catch_unwind(AssertUnwindSafe(|| {
+        if format == ImageFormat::Avif {
+            return super::avif_decode::decode_avif_rgba(&bytes).map_err(|_| {
+                image::ImageError::Unsupported(
+                    image::error::UnsupportedError::from_format_and_kind(
+                        image::error::ImageFormatHint::Exact(ImageFormat::Avif),
+                        image::error::UnsupportedErrorKind::GenericFeature(
+                            "bounded AVIF decode".into(),
+                        ),
+                    ),
+                )
+            });
+        }
         let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
         let mut limits = Limits::default();
         limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
@@ -585,10 +705,10 @@ fn decode_download_payload(
     }));
     let image = match decode_result {
         Ok(Ok(image)) => image,
-        Ok(Err(error)) => {
-            return Err(SourceContractError::image_decode_failed(format!(
-                "image decoder rejected the download payload: {error}"
-            )))
+        Ok(Err(_)) => {
+            return Err(SourceContractError::image_decode_failed(
+                "image decoder rejected the download payload",
+            ))
         }
         Err(_) => {
             return Err(SourceContractError::image_decode_failed(
@@ -610,7 +730,18 @@ fn decode_download_payload(
         width,
         height,
         candidate_index,
+        candidate_diagnostics: Vec::new(),
     })
+}
+
+fn candidate_magic_matches(expected: HitomiImageFormat, actual: ImageFormat) -> bool {
+    matches!(
+        (expected, actual),
+        (HitomiImageFormat::Webp, ImageFormat::WebP)
+            | (HitomiImageFormat::Jpeg, ImageFormat::Jpeg)
+            | (HitomiImageFormat::Png, ImageFormat::Png)
+            | (HitomiImageFormat::Avif, ImageFormat::Avif)
+    )
 }
 
 fn canonical_image_content_type(format: ImageFormat) -> &'static str {
@@ -624,6 +755,9 @@ fn canonical_image_content_type(format: ImageFormat) -> &'static str {
 }
 
 fn mime_matches_format(mime: &str, format: ImageFormat) -> bool {
+    if mime.is_empty() || mime.eq_ignore_ascii_case("application/octet-stream") {
+        return true;
+    }
     match format {
         ImageFormat::WebP => mime.eq_ignore_ascii_case("image/webp"),
         ImageFormat::Jpeg => {

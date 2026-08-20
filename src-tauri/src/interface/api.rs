@@ -383,6 +383,11 @@ fn source_error(error: SourceContractError) -> ApiError {
             "The image could not be decoded safely",
             ApiAction::Review,
         ),
+        SourceErrorCode::ImageFormatUnsupported => (
+            "IMAGE_FORMAT_UNSUPPORTED",
+            "The image format is not supported safely",
+            ApiAction::Review,
+        ),
     };
 
     let mut details = BTreeMap::from([

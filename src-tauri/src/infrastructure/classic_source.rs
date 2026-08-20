@@ -191,6 +191,7 @@ impl ClassicSourceInspector for FilesystemClassicSource {
             width,
             height,
             candidate_index: 0,
+            candidate_diagnostics: Vec::new(),
         })
     }
 }
@@ -897,7 +898,11 @@ fn discover_gallery_folders(
                 fingerprint.update(relative_text(root, &manifest_path)?.as_bytes());
                 fingerprint.update(Sha256::digest(&bytes));
                 match serde_json::from_slice::<Value>(&bytes) {
-                    Ok(value @ Value::Object(_)) => (Some(value), false),
+                    Ok(value @ Value::Object(_))
+                        if value.get("schema").and_then(Value::as_u64) == Some(2) =>
+                    {
+                        (Some(value), false)
+                    }
                     _ => (None, true),
                 }
             } else {

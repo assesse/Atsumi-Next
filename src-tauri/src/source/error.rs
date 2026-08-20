@@ -39,6 +39,7 @@ pub enum SourceErrorCode {
     ImageCandidatesExhausted,
     ImageResponseInvalid,
     ImageDecodeFailed,
+    ImageFormatUnsupported,
 }
 
 impl SourceErrorCode {
@@ -57,6 +58,7 @@ impl SourceErrorCode {
             Self::ImageCandidatesExhausted => "image_candidates_exhausted",
             Self::ImageResponseInvalid => "image_response_invalid",
             Self::ImageDecodeFailed => "image_decode_failed",
+            Self::ImageFormatUnsupported => "image_format_unsupported",
         }
     }
 
@@ -67,7 +69,8 @@ impl SourceErrorCode {
             Self::Protocol
             | Self::InvalidData
             | Self::ImageResponseInvalid
-            | Self::ImageDecodeFailed => SourceErrorCategory::Contract,
+            | Self::ImageDecodeFailed
+            | Self::ImageFormatUnsupported => SourceErrorCategory::Contract,
             Self::RateLimited
             | Self::TemporarilyUnavailable
             | Self::Timeout
@@ -75,6 +78,18 @@ impl SourceErrorCode {
             | Self::Transport => SourceErrorCategory::Remote,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceCandidateDiagnostic {
+    pub candidate_index: u32,
+    pub format: String,
+    pub http_status: Option<u16>,
+    pub content_type: Option<String>,
+    pub bytes_received: Option<u64>,
+    pub error_code: Option<SourceErrorCode>,
+    pub retryable: bool,
 }
 
 impl fmt::Display for SourceErrorCode {
@@ -93,6 +108,12 @@ pub struct SourceContractError {
     pub retryable: bool,
     pub http_status: Option<u16>,
     pub retry_after_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_diagnostics: Vec<SourceCandidateDiagnostic>,
+    #[serde(skip)]
+    pub diagnostic_content_type: Option<String>,
+    #[serde(skip)]
+    pub diagnostic_bytes_received: Option<u64>,
 }
 
 impl SourceContractError {
@@ -170,6 +191,31 @@ impl SourceContractError {
         )
     }
 
+    pub fn image_format_unsupported(format: impl AsRef<str>) -> Self {
+        Self::new(
+            SourceErrorCode::ImageFormatUnsupported,
+            format!("image format {} is unsupported", format.as_ref()),
+            false,
+            None,
+            None,
+        )
+    }
+
+    pub fn image_candidates_exhausted_with(
+        retryable: bool,
+        candidate_diagnostics: Vec<SourceCandidateDiagnostic>,
+    ) -> Self {
+        let mut error = Self::new(
+            SourceErrorCode::ImageCandidatesExhausted,
+            "all supported image candidates were exhausted",
+            retryable,
+            None,
+            None,
+        );
+        error.candidate_diagnostics = candidate_diagnostics;
+        error
+    }
+
     fn new(
         code: SourceErrorCode,
         message: impl Into<String>,
@@ -184,6 +230,9 @@ impl SourceContractError {
             retryable,
             http_status,
             retry_after_seconds,
+            candidate_diagnostics: Vec::new(),
+            diagnostic_content_type: None,
+            diagnostic_bytes_received: None,
         }
     }
 }

@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufWriter, Cursor, Read, Write},
+    io::{BufWriter, Cursor, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -138,18 +138,47 @@ impl ArtifactStore for FilesystemArtifactStore {
         expected: Option<&StoredPage>,
     ) -> Result<ExistingPageVerification, DownloadPipelineError> {
         let relative_path = page_relative_path(layout, source_page_number)?;
+        let part_relative_path = ArtifactRelativePath::new(format!(
+            "{}/.{:04}.webp.part",
+            layout.relative_directory.as_str(),
+            source_page_number.get()
+        ))
+        .map_err(|error| invalid_path(error.to_string()))?;
         let path = resolve_managed_path(&layout.root, &relative_path, false)?;
-        if !path.exists() {
+        let part_path = resolve_managed_path(&layout.root, &part_relative_path, false)?;
+        let final_exists = fs::symlink_metadata(&path).is_ok();
+        let part_exists = fs::symlink_metadata(&part_path).is_ok();
+        if !final_exists && !part_exists {
             return Ok(ExistingPageVerification::Missing);
         }
-        let stored = verify_webp_file(
+        if expected.is_none()
+            || expected.is_some_and(|checkpoint| checkpoint.source_revision != source_revision)
+            || part_exists
+        {
+            recover_conflicting_page_files(layout, &[relative_path.clone(), part_relative_path])?;
+            return Ok(ExistingPageVerification::Invalid {
+                relative_path,
+                reason: "ambiguous page files were moved to recovery review storage",
+            });
+        }
+        let stored = match verify_webp_file(
             &layout.root,
             relative_path.clone(),
             source_page_number,
             source_revision,
-        )?;
+        ) {
+            Ok(stored) => stored,
+            Err(_) => {
+                recover_conflicting_page_files(layout, std::slice::from_ref(&relative_path))?;
+                return Ok(ExistingPageVerification::Invalid {
+                    relative_path,
+                    reason: "an unverifiable page was moved to recovery review storage",
+                });
+            }
+        };
         if let Some(expected) = expected {
             if expected.byte_length != stored.byte_length || expected.sha256 != stored.sha256 {
+                recover_conflicting_page_files(layout, std::slice::from_ref(&relative_path))?;
                 return Ok(ExistingPageVerification::Invalid {
                     relative_path,
                     reason: "stored page length or SHA-256 does not match the database checkpoint",
@@ -175,12 +204,13 @@ impl ArtifactStore for FilesystemArtifactStore {
         .map_err(|error| invalid_path(error.to_string()))?;
         let final_path = resolve_managed_path(&layout.root, &final_relative_path, false)?;
         let part_path = resolve_managed_path(&layout.root, &part_relative_path, false)?;
+        reject_symlink_leaf(&final_path)?;
+        reject_symlink_leaf(&part_path)?;
         let bytes = normalized_webp_bytes(page)?;
         ensure_not_cancelled(cancellation)?;
 
         let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&part_path)
             .map_err(|_| filesystem_error("The temporary page file could not be created"))?;
@@ -591,6 +621,55 @@ fn resolve_existing_download_root(root: &Path) -> Result<PathBuf, DownloadPipeli
     Ok(root)
 }
 
+fn reject_symlink_leaf(path: &Path) -> Result<(), DownloadPipelineError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DownloadPipelineError::new(
+            DownloadPipelineErrorCode::PathOutsideRoot,
+            "A managed artifact leaf cannot be a symbolic link or reparse point",
+            false,
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(filesystem_error(
+            "The managed artifact leaf could not be inspected safely",
+        )),
+    }
+}
+
+fn recover_conflicting_page_files(
+    layout: &ArtifactLayout,
+    relative_paths: &[ArtifactRelativePath],
+) -> Result<(), DownloadPipelineError> {
+    let recovery_parent = layout.root.join(".atsumi-recovery").join("conflicts");
+    fs::create_dir_all(&recovery_parent)
+        .map_err(|_| filesystem_error("The recovery conflict folder could not be created"))?;
+    let recovery_parent = recovery_parent
+        .canonicalize()
+        .map_err(|_| filesystem_error("The recovery conflict folder could not be resolved"))?;
+    ensure_descendant(&layout.root, &recovery_parent)?;
+    let recovery_directory = recovery_parent.join(Uuid::new_v4().to_string());
+    fs::create_dir(&recovery_directory)
+        .map_err(|_| filesystem_error("A unique recovery conflict folder could not be created"))?;
+    for relative_path in relative_paths {
+        let source = resolve_managed_path(&layout.root, relative_path, false)?;
+        if fs::symlink_metadata(&source).is_err() {
+            continue;
+        }
+        let leaf = source.file_name().ok_or_else(|| {
+            invalid_path("A recovery source did not have a safe file name".into())
+        })?;
+        let destination = recovery_directory.join(leaf);
+        if fs::symlink_metadata(&destination).is_ok() {
+            return Err(filesystem_error(
+                "A recovery destination already exists and was not overwritten",
+            ));
+        }
+        fs::rename(&source, &destination)
+            .map_err(|_| filesystem_error("An ambiguous page could not be moved for review"))?;
+    }
+    Ok(())
+}
+
 fn normalized_webp_bytes(page: &DownloadPagePayload) -> Result<Vec<u8>, DownloadPipelineError> {
     if page.source_format == DownloadSourceImageFormat::Webp {
         decode_image(&page.bytes, ImageFormat::WebP)?;
@@ -600,7 +679,32 @@ fn normalized_webp_bytes(page: &DownloadPagePayload) -> Result<Vec<u8>, Download
         DownloadSourceImageFormat::Webp => ImageFormat::WebP,
         DownloadSourceImageFormat::Jpeg => ImageFormat::Jpeg,
         DownloadSourceImageFormat::Png => ImageFormat::Png,
-        DownloadSourceImageFormat::Avif => ImageFormat::Avif,
+        DownloadSourceImageFormat::Avif => {
+            let image = super::avif_decode::decode_avif_rgba(&page.bytes).map_err(|_| {
+                DownloadPipelineError::new(
+                    DownloadPipelineErrorCode::ImageDecodeFailed,
+                    "The AVIF page could not be decoded safely",
+                    false,
+                )
+            })?;
+            let rgba = image.to_rgba8();
+            let mut output = Vec::new();
+            WebPEncoder::new_lossless(&mut output)
+                .write_image(
+                    rgba.as_raw(),
+                    rgba.width(),
+                    rgba.height(),
+                    ExtendedColorType::Rgba8,
+                )
+                .map_err(|_| {
+                    DownloadPipelineError::new(
+                        DownloadPipelineErrorCode::ImageEncodeFailed,
+                        "The decoded page could not be encoded as WebP",
+                        false,
+                    )
+                })?;
+            return Ok(output);
+        }
     };
     let image = decode_image(&page.bytes, format)?;
     let rgba = image.to_rgba8();
@@ -894,6 +998,22 @@ fn invalid_path(_detail: String) -> DownloadPipelineError {
 mod tests {
     use super::*;
 
+    fn png_page() -> DownloadPagePayload {
+        let image = image::DynamicImage::new_rgba8(1, 1);
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, ImageFormat::Png).unwrap();
+        DownloadPagePayload {
+            source_page_number: SourcePageNumber::new(1).unwrap(),
+            bytes: bytes.into_inner(),
+            source_revision: "fixture-v1".into(),
+            source_format: DownloadSourceImageFormat::Png,
+            width: 1,
+            height: 1,
+            candidate_index: 0,
+            candidate_diagnostics: Vec::new(),
+        }
+    }
+
     #[test]
     fn prepare_layout_reports_an_occupied_destination_without_modifying_it() {
         let temporary = tempfile::tempdir().unwrap();
@@ -914,5 +1034,58 @@ mod tests {
             fs::read(occupied.join("owned-by-user.txt")).unwrap(),
             b"keep"
         );
+    }
+
+    #[test]
+    fn page_without_checkpoint_is_moved_to_unique_recovery_storage() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("downloads");
+        fs::create_dir(&root).unwrap();
+        let relative = ArtifactRelativePath::new("reserved-42").unwrap();
+        let store = FilesystemArtifactStore::new();
+        let layout = store.prepare_layout(&root, &relative, false).unwrap();
+        fs::write(root.join("reserved-42").join("0001.webp"), b"ambiguous").unwrap();
+
+        assert!(matches!(
+            store
+                .verify_existing_page(
+                    &layout,
+                    SourcePageNumber::new(1).unwrap(),
+                    "fixture-v1",
+                    None,
+                )
+                .unwrap(),
+            ExistingPageVerification::Invalid { .. }
+        ));
+        assert!(!root.join("reserved-42").join("0001.webp").exists());
+        let conflicts = fs::read_dir(root.join(".atsumi-recovery").join("conflicts"))
+            .unwrap()
+            .count();
+        assert_eq!(conflicts, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn page_part_symlink_never_truncates_its_external_target() {
+        use std::os::windows::fs::symlink_file;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("downloads");
+        fs::create_dir(&root).unwrap();
+        let store = FilesystemArtifactStore::new();
+        let relative = ArtifactRelativePath::new("reserved-42").unwrap();
+        let layout = store.prepare_layout(&root, &relative, false).unwrap();
+        let outside = temporary.path().join("outside.txt");
+        fs::write(&outside, b"must remain unchanged").unwrap();
+        let part = root.join("reserved-42").join(".0001.webp.part");
+        if symlink_file(&outside, &part).is_err() {
+            return;
+        }
+
+        let error = store
+            .store_page(&layout, &png_page(), &CancellationToken::new())
+            .unwrap_err();
+        assert_eq!(error.code, DownloadPipelineErrorCode::PathOutsideRoot);
+        assert_eq!(fs::read(outside).unwrap(), b"must remain unchanged");
     }
 }

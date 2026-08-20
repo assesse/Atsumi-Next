@@ -18,7 +18,7 @@ use crate::{
         DownloadJobDescriptor, DownloadJobProjection, JobRef, JobState, PageArtifactState,
         ARTIFACT_MANIFEST_SCHEMA_VERSION, HASH_PROFILE_VERSION,
     },
-    source::{SourceContractError, SourceErrorCode},
+    source::{SourceCandidateDiagnostic, SourceContractError, SourceErrorCode},
     thumbnail::CancellationToken,
 };
 
@@ -59,6 +59,8 @@ struct ActiveCancellation {
     token: CancellationToken,
 }
 
+const MAX_FULL_IMAGE_MEMORY_SLOTS: usize = 2;
+
 impl DownloadSupervisor {
     pub fn new(
         repository: Arc<dyn DownloadPipelineRepository>,
@@ -95,7 +97,7 @@ impl DownloadSupervisor {
             inner: Arc::clone(&inner),
         };
         let mut workers = unpoison(inner.workers.lock());
-        for index in 0..gallery_worker_count {
+        for index in 0..gallery_worker_count.min(MAX_FULL_IMAGE_MEMORY_SLOTS) {
             let worker_inner = Arc::clone(&inner);
             let handle = thread::Builder::new()
                 .name(format!("atsumi-download-{index}"))
@@ -185,14 +187,8 @@ impl DownloadSupervisor {
                     false,
                 )
             })?;
-        let settings = self.inner.settings.settings_get()?;
-        if settings.download_root.trim().is_empty() {
-            return Err(DownloadPipelineError::root_required().into());
-        }
-        let path = self
-            .inner
-            .store
-            .first_verified_page_path(PathBuf::from(settings.download_root).as_path(), &bundle)?;
+        let root = self.inner.repository.pipeline_artifact_root(&entry_id)?;
+        let path = self.inner.store.first_verified_page_path(&root, &bundle)?;
         self.inner.store.open_with_default_viewer(&path)?;
         Ok(())
     }
@@ -211,14 +207,6 @@ impl DownloadSupervisor {
             )
             .into());
         }
-        let settings = self.inner.settings.settings_get()?;
-        if settings.download_root.trim().is_empty() {
-            return Err(DownloadPipelineError::root_required().into());
-        }
-        let root = self
-            .inner
-            .store
-            .validate_download_root(PathBuf::from(settings.download_root).as_path())?;
         let mut unique = BTreeMap::new();
         for raw in entry_ids {
             let entry_id = DownloadEntryId::new(raw)?;
@@ -226,6 +214,9 @@ impl DownloadSupervisor {
         }
         let mut entries = Vec::with_capacity(unique.len());
         for entry_id in unique.into_values() {
+            let root = self.inner.store.validate_download_root(
+                &self.inner.repository.pipeline_artifact_root(&entry_id)?,
+            )?;
             let bundle = self
                 .inner
                 .repository
@@ -299,14 +290,6 @@ impl DownloadSupervisor {
         &self,
         entry_ids: Vec<String>,
     ) -> Result<Vec<DownloadEntry>, ApplicationError> {
-        let settings = self.inner.settings.settings_get()?;
-        if settings.download_root.trim().is_empty() {
-            return Err(DownloadPipelineError::root_required().into());
-        }
-        let root = self
-            .inner
-            .store
-            .validate_download_root(PathBuf::from(settings.download_root).as_path())?;
         let mut unique = BTreeMap::new();
         for raw in entry_ids {
             let entry_id = DownloadEntryId::new(raw)?;
@@ -315,6 +298,9 @@ impl DownloadSupervisor {
         let mut entries = Vec::with_capacity(unique.len());
         for entry_id in unique.into_values() {
             let saga = self.inner.repository.pipeline_restore_begin(&entry_id)?;
+            let root = self.inner.store.validate_download_root(
+                &self.inner.repository.pipeline_artifact_root(&entry_id)?,
+            )?;
             let quarantine_layout =
                 layout_for_directory(root.clone(), saga.quarantine_relative_path.clone())?;
             let manifest = self
@@ -352,27 +338,25 @@ impl DownloadSupervisor {
     }
 
     pub fn reconcile(&self) -> Result<ReconcileReport, ApplicationError> {
-        let settings = self.inner.settings.settings_get()?;
-        if settings.download_root.trim().is_empty() {
-            return Err(DownloadPipelineError::root_required().into());
-        }
-        let root = self
-            .inner
-            .store
-            .validate_download_root(PathBuf::from(settings.download_root).as_path())?;
         let mut report = ReconcileReport {
             inspected_artifacts: 0,
             verified_artifacts: 0,
             resumed_jobs: 0,
             issues: Vec::new(),
         };
-        self.reconcile_quarantine_sagas(&root, &mut report)?;
+        self.reconcile_quarantine_sagas(&mut report)?;
         let bundles = self.inner.repository.pipeline_artifact_bundles()?;
         report.inspected_artifacts = u64::try_from(bundles.len()).unwrap_or(u64::MAX);
         for bundle in bundles {
             if bundle.artifact.state == DownloadArtifactState::Quarantined {
                 continue;
             }
+            let root = self.inner.store.validate_download_root(
+                &self
+                    .inner
+                    .repository
+                    .pipeline_artifact_root(&bundle.artifact.entry_id)?,
+            )?;
             let mut artifact_issues = inspect_bundle(&self.inner, &root, &bundle);
             artifact_issues.sort_unstable();
             artifact_issues.dedup();
@@ -404,11 +388,16 @@ impl DownloadSupervisor {
 
     fn reconcile_quarantine_sagas(
         &self,
-        root: &std::path::Path,
         report: &mut ReconcileReport,
     ) -> Result<(), ApplicationError> {
         for saga in self.inner.repository.pipeline_pending_quarantine_sagas()? {
-            match self.reconcile_quarantine_saga(root, &saga) {
+            let root = self.inner.store.validate_download_root(
+                &self
+                    .inner
+                    .repository
+                    .pipeline_artifact_root(&saga.entry_id)?,
+            )?;
+            match self.reconcile_quarantine_saga(&root, &saga) {
                 Ok(projection) => emit(&self.inner, projection),
                 Err(error) => {
                     let (code, message) = stable_application_issue(&error);
@@ -621,6 +610,7 @@ fn download_entry_from_projection(
         attempt: projection.download.attempt,
         error_code: projection.download.error_code.clone(),
         error_message: projection.download.error_message.clone(),
+        error_retryable: None,
         review_kind: None,
         review_id: None,
     })
@@ -790,16 +780,16 @@ fn run_download(
     let prepared = inner.repository.pipeline_prepare(&DownloadArtifactPlan {
         descriptor: descriptor.clone(),
         gallery: snapshot.gallery,
+        root_snapshot: root.clone(),
         relative_directory: planned_relative_directory,
         manifest_relative_path: planned_manifest_relative_path,
         source_pages: snapshot.pages.clone(),
     })?;
-    // An existing database row alone is not proof that a pre-existing directory belongs
-    // to Atsumi: the first DB reservation intentionally happens before the filesystem write.
-    // A verified page checkpoint is the durable ownership evidence used for resume.
-    let allow_existing_directory = !prepared.artifact_created && !prepared.checkpoints.is_empty();
+    // A pre-existing row is the durable DB reservation for this immutable destination.
+    // Files inside it are still verified against checkpoints or moved to recovery review.
+    let allow_existing_directory = !prepared.artifact_created;
     let layout = inner.store.prepare_layout(
-        &root,
+        &prepared.root_snapshot,
         &prepared.relative_directory,
         allow_existing_directory,
     )?;
@@ -838,6 +828,19 @@ fn run_download(
                 continue;
             }
             ExistingPageVerification::Invalid { .. } => {
+                if let Some(projection) = inner.repository.pipeline_mark_artifact_issue(
+                    &DownloadEntryId::new(descriptor.entry_id.clone()).map_err(|_| {
+                        DownloadPipelineError::new(
+                            DownloadPipelineErrorCode::ManifestInvalid,
+                            "The download entry identity is invalid",
+                            false,
+                        )
+                    })?,
+                    "RECOVERY_CONFLICT",
+                    "Ambiguous page files were moved aside for review",
+                )? {
+                    emit(inner, projection);
+                }
                 return Err(DownloadPipelineError::new(
                     DownloadPipelineErrorCode::HashMismatch,
                     "A stored page does not match its verified checkpoint",
@@ -848,14 +851,6 @@ fn run_download(
             ExistingPageVerification::Missing => {}
         }
 
-        let logical_attempt = DownloadPageAttempt {
-            descriptor: descriptor.clone(),
-            source_page_number: source_page.source_page_number,
-            candidate_index: 0,
-        };
-        inner
-            .repository
-            .pipeline_page_attempt_start(&logical_attempt)?;
         let payload = match inner.source.download_page(
             descriptor.gallery_id,
             source_page.source_page_number,
@@ -863,24 +858,47 @@ fn run_download(
         ) {
             Ok(payload) => payload,
             Err(error) => {
-                let (code, message) = stable_source_failure(&error);
-                let outcome = if error.code == SourceErrorCode::Cancelled {
-                    DownloadPageAttemptOutcome::Cancelled
-                } else {
-                    DownloadPageAttemptOutcome::Failed
-                };
-                let _ = inner
-                    .repository
-                    .pipeline_page_attempt_finish(&DownloadPageAttemptResult {
-                        attempt: logical_attempt,
-                        outcome,
+                let diagnostics = if error.candidate_diagnostics.is_empty() {
+                    vec![SourceCandidateDiagnostic {
+                        candidate_index: 0,
+                        format: "unknown".into(),
+                        http_status: error.http_status,
+                        content_type: None,
                         bytes_received: None,
-                        error_code: Some(code.to_owned()),
-                        error_message: Some(message.to_owned()),
-                    });
+                        error_code: Some(error.code),
+                        retryable: error.retryable,
+                    }]
+                } else {
+                    error.candidate_diagnostics.clone()
+                };
+                persist_candidate_diagnostics(
+                    inner,
+                    descriptor,
+                    source_page.source_page_number,
+                    &diagnostics,
+                )?;
                 return Err(error.into());
             }
         };
+        let diagnostics = if payload.candidate_diagnostics.is_empty() {
+            vec![SourceCandidateDiagnostic {
+                candidate_index: payload.candidate_index,
+                format: payload.source_format.as_str().to_owned(),
+                http_status: None,
+                content_type: None,
+                bytes_received: u64::try_from(payload.bytes.len()).ok(),
+                error_code: None,
+                retryable: false,
+            }]
+        } else {
+            payload.candidate_diagnostics.clone()
+        };
+        persist_candidate_diagnostics(
+            inner,
+            descriptor,
+            source_page.source_page_number,
+            &diagnostics,
+        )?;
         if payload.source_page_number != source_page.source_page_number
             || payload.source_revision != source_page.source_revision
         {
@@ -891,24 +909,7 @@ fn run_download(
             )
             .into());
         }
-        let actual_attempt = DownloadPageAttempt {
-            descriptor: descriptor.clone(),
-            source_page_number: source_page.source_page_number,
-            candidate_index: payload.candidate_index,
-        };
-        inner
-            .repository
-            .pipeline_page_attempt_start(&actual_attempt)?;
         let stored = inner.store.store_page(&layout, &payload, cancellation)?;
-        inner
-            .repository
-            .pipeline_page_attempt_finish(&DownloadPageAttemptResult {
-                attempt: actual_attempt,
-                outcome: DownloadPageAttemptOutcome::Succeeded,
-                bytes_received: Some(stored.byte_length),
-                error_code: None,
-                error_message: None,
-            })?;
         emit(
             inner,
             inner
@@ -1175,6 +1176,41 @@ impl From<DownloadPipelineError> for RunError {
     }
 }
 
+fn persist_candidate_diagnostics(
+    inner: &SupervisorInner,
+    descriptor: &DownloadJobDescriptor,
+    source_page_number: crate::domain::SourcePageNumber,
+    diagnostics: &[SourceCandidateDiagnostic],
+) -> Result<(), RepositoryError> {
+    for diagnostic in diagnostics {
+        let attempt = DownloadPageAttempt {
+            descriptor: descriptor.clone(),
+            source_page_number,
+            candidate_index: diagnostic.candidate_index,
+            candidate_format: diagnostic.format.clone(),
+        };
+        inner.repository.pipeline_page_attempt_start(&attempt)?;
+        let outcome = match diagnostic.error_code {
+            None => DownloadPageAttemptOutcome::Succeeded,
+            Some(SourceErrorCode::Cancelled) => DownloadPageAttemptOutcome::Cancelled,
+            Some(_) => DownloadPageAttemptOutcome::Failed,
+        };
+        inner
+            .repository
+            .pipeline_page_attempt_finish(&DownloadPageAttemptResult {
+                attempt,
+                outcome,
+                bytes_received: diagnostic.bytes_received,
+                http_status: diagnostic.http_status,
+                content_type: diagnostic.content_type.clone(),
+                error_code: diagnostic.error_code.map(|code| code.as_str().to_owned()),
+                error_message: None,
+                retryable: diagnostic.retryable,
+            })?;
+    }
+    Ok(())
+}
+
 fn stable_source_failure(error: &SourceContractError) -> (&'static str, &'static str) {
     match error.code {
         SourceErrorCode::Cancelled => ("REQUEST_CANCELLED", "The source request was cancelled"),
@@ -1222,6 +1258,10 @@ fn stable_source_failure(error: &SourceContractError) -> (&'static str, &'static
         SourceErrorCode::ImageDecodeFailed => (
             "IMAGE_DECODE_FAILED",
             "The downloaded page could not be decoded safely",
+        ),
+        SourceErrorCode::ImageFormatUnsupported => (
+            "IMAGE_FORMAT_UNSUPPORTED",
+            "The downloaded page format is not supported safely",
         ),
     }
 }
@@ -1333,6 +1373,7 @@ mod tests {
                 width: 2,
                 height: 2,
                 candidate_index: 0,
+                candidate_diagnostics: Vec::new(),
             })
         }
     }
@@ -1418,6 +1459,40 @@ mod tests {
     }
 
     #[test]
+    fn retryability_is_persisted_for_job_attempt_and_list_projection() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let (repository, service) = configured_repository(&root);
+        let queued = service
+            .download_queue_add(vec![41], "retryability-persistence".into())
+            .unwrap();
+        let descriptor = queued.jobs.into_iter().next().unwrap();
+        repository.pipeline_begin(&descriptor).unwrap();
+        repository
+            .pipeline_fail(&descriptor, "NETWORK_OFFLINE", "Source unavailable", true)
+            .unwrap();
+
+        let entries = service
+            .download_entries_list(crate::domain::DownloadListRequest {
+                state: None,
+                query: None,
+                page: 1,
+                page_size: 20,
+            })
+            .unwrap();
+        assert_eq!(entries.entries[0].error_retryable, Some(true));
+        let stored: i64 = rusqlite::Connection::open(root.join("state.sqlite3"))
+            .unwrap()
+            .query_row(
+                "SELECT error_retryable FROM download_attempts WHERE job_id = ?1 AND attempt = ?2",
+                rusqlite::params![descriptor.job_id, descriptor.worker_attempt],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 1);
+    }
+
+    #[test]
     fn real_pipeline_writes_verified_webp_manifest_before_completed() {
         let temp = tempdir().unwrap();
         let root = temp.path().to_path_buf();
@@ -1433,6 +1508,27 @@ mod tests {
         let completed = wait_for_state(&service, &entry_id, JobState::Completed, 100.0);
         assert_eq!(completed.attempt, Some(1));
         supervisor.shutdown_and_wait();
+
+        let diagnostics = rusqlite::Connection::open(root.join("state.sqlite3"))
+            .unwrap()
+            .query_row(
+                r#"
+                    SELECT COUNT(*), MIN(candidate_format), SUM(retryable),
+                           SUM(CASE WHEN finished_at IS NOT NULL THEN 1 ELSE 0 END)
+                    FROM download_page_attempts
+                "#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(diagnostics, (2, "png".into(), 0, 2));
 
         let bundle = repository
             .pipeline_artifact_bundle(&DownloadEntryId::new(entry_id).unwrap())
@@ -1582,6 +1678,19 @@ mod tests {
         let entry_id = queued.entries[0].entry_id.to_string();
         supervisor.enqueue_all(queued.jobs).unwrap();
         wait_for_state(&service, &entry_id, JobState::Completed, 100.0);
+
+        let replacement_root = root.join("replacement-downloads");
+        std::fs::create_dir(&replacement_root).unwrap();
+        let settings = service.settings_get().unwrap();
+        service
+            .settings_update(
+                crate::domain::SettingsPatch {
+                    download_root: Some(replacement_root.to_string_lossy().into_owned()),
+                    ..crate::domain::SettingsPatch::default()
+                },
+                settings.revision,
+            )
+            .unwrap();
 
         let quarantined = supervisor
             .quarantine_entries(vec![entry_id.clone()], "integration test quarantine".into())
