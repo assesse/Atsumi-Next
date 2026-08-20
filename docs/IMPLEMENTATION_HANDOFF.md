@@ -175,7 +175,7 @@
 - Classic localStorage는 Classic 코드를 수정하거나 WebView profile을 직접 읽지 않는다. 사용자가 별도로 둔 세 가지 명시적 export filename만 선택적으로 병합하므로 export 파일이 없으면 state.json에 없는 localStorage-only 값은 가져오지 못한다.
 - page quarantine은 undo를 제공하지만 영구 purge는 의도적으로 제공하지 않는다. 공간 회수 UI는 자동 삭제 없이 별도 사용자 승인 정책으로만 추가해야 한다.
 - artifact decode는 현재 검증된 WebP와 JPEG/PNG 입력을 지원한다. source의 AVIF 가능 flag와 후보는 parse하지만 raw AVIF만 남은 page를 실제 WebP로 decode하는 기능은 아직 없다. downloader는 WebP와 원본 JPEG/PNG fallback을 우선하며 지원 후보가 없으면 typed failure로 종료한다.
-- GitHub 전달 blocker: 2026-08-16 최종 확인에서 `gh auth status`가 active account `assesse`의 token을 invalid로 판정했다. 로컬 branch·commit·release 검증에는 영향이 없지만 push와 PR #1 갱신은 새 GitHub 인증 세션이 필요하다. `gh auth login -h github.com` 실행 후 `gh auth status`가 성공하면 `git push origin agent/phase-3-foundation`과 PR 갱신을 재개한다. 인증을 우회하거나 기존 credential을 노출하지 않는다.
+- GitHub PR metadata 전달 blocker: Git Credential Manager를 통한 branch push는 성공했지만 `gh auth status`의 `assesse` token은 여전히 invalid이고, GitHub connector의 PR update는 `403 Resource not accessible by integration`, 앱 내 GitHub 페이지는 로그아웃 상태였다. 따라서 PR #1의 오래된 제목·본문은 아직 갱신하지 못했다. `gh auth login -h github.com`으로 CLI 인증을 복구하거나 GitHub 페이지에 로그인한 뒤 PR 제목·본문을 갱신해야 한다. 인증을 우회하거나 credential을 추출·노출하지 않는다.
 
 ## 8. Future change cautions
 
@@ -219,6 +219,7 @@
 - `6a2cd3f` — `feat: add safe classic import and rollback flow`
 - `1446b81` — `chore: finalize production ui and diagnostics`
 - 최종 문서 전달 commit: 이 문서를 포함한 branch `HEAD`
-- push 결과: GitHub CLI token invalid로 보류. 로컬 branch는 `origin/agent/phase-3-foundation`보다 위 8개 구현 commit과 이 최종 문서 commit을 가진다.
-- PR #1: 기존 Draft PR을 유지한다. 인증 복구 후 제목·본문·검토 체크리스트를 갱신하되 ready/merge는 자동 수행하지 않는다.
+- push 결과: 2026-08-20 `git push origin agent/phase-3-foundation` 성공. 구현·검증·최종 문서 commit `27d7a7b`까지 원격 branch에 반영했고, 이 전달 상태 기록 commit도 같은 branch에 추가 push한다.
+- PR #1: <https://github.com/assesse/Atsumi-Next/pull/1>. `main` 대상, `agent/phase-3-foundation` head의 기존 Draft PR이며 원격 head는 push 직후 `27d7a7b`였다. PR metadata 쓰기 인증이 없어 제목 `Build Phase 3 application foundation`과 초기 Phase 3 본문은 아직 오래된 상태다. 인증 복구 뒤 제목을 `Complete Phase 3–7 production foundation`으로 바꾸고 Milestone A~H·schema 14·최종 115 frontend/113 Rust 검증·수동 실데이터 검토 체크리스트를 본문에 반영한다.
+- Draft 유지 이유: 자동 검증과 live search smoke는 통과했지만 사용자가 실제 갤러리 한 건의 다운로드, 중단 후 재시작, 기본 viewer 열기를 GUI에서 최종 확인하기 전에는 ready로 전환하지 않는다.
 - PR merge, `main` 직접 push, force push, release/tag 생성은 수행하지 않는다.
