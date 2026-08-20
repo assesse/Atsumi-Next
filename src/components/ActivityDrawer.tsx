@@ -34,6 +34,11 @@ const downloadDetail = (download: NonNullable<Gallery["download"]>): string => {
   return stateDetail[download.state] ?? "다운로드 상태를 확인하고 있습니다.";
 };
 
+const displayedProgress = (download: NonNullable<Gallery["download"]>): number => {
+  const rawProgress = download.state === "completed" ? 100 : download.progress ?? 0;
+  return Math.floor(Math.min(100, Math.max(0, Number.isFinite(rawProgress) ? rawProgress : 0)));
+};
+
 export function ActivityDrawer({
   open,
   galleries,
@@ -90,6 +95,7 @@ export function ActivityDrawer({
           const retryable = ["failed", "interrupted", "cancelled"].includes(download.state);
           const cancellable = running || warning;
           const pending = pendingEntryIds.has(download.entryId);
+          const progress = displayedProgress(download);
           return (
             <article
               key={download.entryId}
@@ -125,9 +131,9 @@ export function ActivityDrawer({
                     aria-label={`${gallery.title} 진행률`}
                     aria-valuemin={0}
                     aria-valuemax={100}
-                    aria-valuenow={download.progress ?? (complete ? 100 : 0)}
+                    aria-valuenow={progress}
                   >
-                    {download.progress ?? (complete ? 100 : 0)}%
+                    {progress}%
                   </b>
                 ) : null}
               </div>

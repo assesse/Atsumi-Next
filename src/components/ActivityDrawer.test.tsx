@@ -28,6 +28,39 @@ const failedGallery: Gallery = {
 };
 
 describe("ActivityDrawer download controls", () => {
+  it("truncates fractional progress for the visible and accessible value", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery: Gallery = {
+      ...failedGallery,
+      download: {
+        ...failedGallery.download!,
+        state: "downloading",
+        progress: 41.66666666666667,
+      },
+    };
+
+    await act(async () => root.render(
+      <ActivityDrawer
+        open
+        galleries={[gallery]}
+        onClose={vi.fn()}
+        onReview={vi.fn()}
+        onRetry={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    ));
+
+    const progress = container.querySelector('[role="progressbar"]');
+    expect(progress).toHaveTextContent("41%");
+    expect(progress).toHaveAttribute("aria-valuenow", "41");
+    expect(container.textContent).not.toContain("41.666");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("shows persisted failure evidence and invokes retry/cancel once", async () => {
     const container = document.createElement("div");
     document.body.append(container);
