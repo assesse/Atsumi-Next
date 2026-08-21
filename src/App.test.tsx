@@ -41,6 +41,7 @@ const clickButtonContaining = (container: HTMLElement, label: string): HTMLButto
 
 describe("App Phase 3A backend flow", () => {
   beforeEach(() => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     class TestResizeObserver {
       observe() {}
       unobserve() {}
@@ -258,6 +259,86 @@ describe("App Phase 3A backend flow", () => {
 
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  it("starts a new structured metadata search from selected cards, detail, and related chips", async () => {
+    const search = vi.spyOn(backend, "searchSubmit");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const expectFreshTagRequest = (includeTag = "full color") => {
+      expect(search).toHaveBeenLastCalledWith(expect.objectContaining({
+        text: "",
+        includeTags: [includeTag],
+        excludeTags: [],
+        pageSize: 50,
+      }));
+    };
+
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      const archive = container.querySelector<HTMLElement>('[data-gallery-id="4051038"]');
+      if (!archive) throw new Error("Archive fixture card was not rendered");
+      await act(async () => {
+        archive.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+        await settle();
+      });
+      expect(container.querySelector(".detail-workspace")).not.toBeNull();
+
+      const cardTag = [...archive.querySelectorAll<HTMLButtonElement>(".tag")]
+        .find((chip) => chip.title.startsWith("full color"));
+      if (!cardTag) throw new Error("Selected-card neutral tag was not rendered");
+      await act(async () => {
+        archive.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+        cardTag.click();
+        await settle();
+      });
+      expectFreshTagRequest();
+      expect(container.querySelector(".detail-workspace")).toBeNull();
+      expect(container.querySelector(".detail-restore")).not.toBeNull();
+
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>(".detail-restore")?.click();
+        await settle();
+      });
+      const detailTag = [...container.querySelectorAll<HTMLButtonElement>(".detail-workspace .tags-box .tag")]
+        .find((chip) => chip.title.startsWith("full color"));
+      if (!detailTag) throw new Error("Floating Detail neutral tag was not rendered");
+      await act(async () => {
+        detailTag.click();
+        await settle();
+      });
+      expectFreshTagRequest();
+
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>(".detail-restore")?.click();
+        await settle();
+      });
+      const relatedTag = [...container.querySelectorAll<HTMLButtonElement>(".detail-workspace .related-card .tag")]
+        .find((chip) => chip.title.startsWith("coat"));
+      if (!relatedTag) throw new Error("Related neutral tag was not rendered");
+      const callsBeforeRepeat = search.mock.calls.length;
+      await act(async () => {
+        relatedTag.click();
+        await settle();
+      });
+      expectFreshTagRequest("female:coat");
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>(".detail-restore")?.click();
+        await settle();
+        [...container.querySelectorAll<HTMLButtonElement>(".detail-workspace .related-card .tag")]
+          .find((chip) => chip.title.startsWith("coat"))?.click();
+        await settle();
+      });
+      expect(search.mock.calls).toHaveLength(callsBeforeRepeat + 2);
+      expectFreshTagRequest("female:coat");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   it("keeps series and character favorites in detail while related galleries stay compact", async () => {

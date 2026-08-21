@@ -103,8 +103,15 @@ describe("DetailWorkspace page previews", () => {
     }
   });
 
-  it("keeps a 5000-page gallery bounded and navigates to its final window", async () => {
+  it("moves only the bounded page window with previous and next controls", async () => {
     vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
+    const resizeCallbacks: Array<() => void> = [];
+    class TestResizeObserver {
+      constructor(callback: () => void) { resizeCallbacks.push(callback); }
+      observe() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
     const gallery: Gallery = { ...mockGalleries[0]!, pages: 5000 };
     const client = new ThumbnailClient({ resolve: () => ({ kind: "missing", reason: "test fixture" }) });
     const container = document.createElement("div");
@@ -115,13 +122,28 @@ describe("DetailWorkspace page previews", () => {
         <DetailWorkspace tabs={[gallery.id]} activeId={gallery.id} minimized={false} galleries={new Map([[gallery.id, gallery]])} favoriteMetadata={new Set()} thumbnailClient={client} onActivate={vi.fn()} onClose={vi.fn()} onCloseAll={vi.fn()} onMinimize={vi.fn()} onRestore={vi.fn()} onOpenRelated={vi.fn()} onQueue={vi.fn()} onMetadataSearch={vi.fn()} onMetadataFavorite={vi.fn()} />,
       ));
       expect(container.querySelectorAll(".preview-thumb").length).toBeLessThan(20);
-      const pageInput = container.querySelector<HTMLInputElement>('input[aria-label="페이지 번호로 이동"]');
-      if (!pageInput) throw new Error("page navigator missing");
+      const nav = container.querySelector(".preview-window-nav");
+      expect(nav).not.toHaveTextContent("처음");
+      expect(nav).not.toHaveTextContent("마지막");
+      expect(container.querySelector('input[aria-label="페이지 번호로 이동"]')).toBeNull();
+      const next = [...container.querySelectorAll<HTMLButtonElement>(".preview-window-nav button")]
+        .find((button) => button.textContent === "다음 묶음");
+      const previous = [...container.querySelectorAll<HTMLButtonElement>(".preview-window-nav button")]
+        .find((button) => button.textContent === "이전 묶음");
+      const initialStart = container.querySelector<HTMLButtonElement>(".preview-thumb")?.textContent;
       await act(async () => {
-        pageInput.value = "5000";
-        pageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        next?.click();
       });
-      expect(container.querySelector(".preview-window-nav")).toHaveTextContent("5000 / 5000");
+      expect(container.querySelector<HTMLButtonElement>(".preview-thumb")?.textContent).not.toBe(initialStart);
+      const movedStart = container.querySelector<HTMLButtonElement>(".preview-thumb")?.textContent;
+      await act(async () => {
+        resizeCallbacks.forEach((callback) => callback());
+      });
+      expect(container.querySelector<HTMLButtonElement>(".preview-thumb")?.textContent).toBe(movedStart);
+      await act(async () => {
+        previous?.click();
+      });
+      expect(container.querySelector<HTMLButtonElement>(".preview-thumb")?.textContent).toBe(initialStart);
       expect(container.querySelectorAll(".preview-thumb").length).toBeLessThan(20);
     } finally {
       await act(async () => root.unmount());
@@ -166,6 +188,42 @@ describe("DetailWorkspace page previews", () => {
       await act(async () => root.unmount());
       client.dispose();
       container.remove();
+    }
+  });
+
+  it("changes only the dialog page and its source-page thumbnail key", async () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
+    const previousShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value: vi.fn(function (this: HTMLDialogElement) { this.setAttribute("open", ""); }),
+    });
+    const gallery: Gallery = { ...mockGalleries[0]!, pages: 25 };
+    const client = new ThumbnailClient({
+      resolve: () => ({ kind: "image" as const, url: "https://images.example.test/page.jpg", width: 800, height: 1000 }),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(
+        <DetailWorkspace tabs={[gallery.id]} activeId={gallery.id} minimized={false} galleries={new Map([[gallery.id, gallery]])} favoriteMetadata={new Set()} thumbnailClient={client} onActivate={vi.fn()} onClose={vi.fn()} onCloseAll={vi.fn()} onMinimize={vi.fn()} onRestore={vi.fn()} onOpenRelated={vi.fn()} onQueue={vi.fn()} onMetadataSearch={vi.fn()} onMetadataFavorite={vi.fn()} />,
+      ));
+      await act(async () => container.querySelector<HTMLButtonElement>(".preview-thumb")?.click());
+      expect(container.querySelector("#page-preview-title")).toHaveTextContent("1페이지");
+      expect(container.querySelector<HTMLImageElement>(".page-preview-media img")?.alt).toContain("1페이지");
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>(".page-preview-controls button")]
+          .find((button) => button.textContent === "다음")?.click();
+      });
+      expect(container.querySelector("#page-preview-title")).toHaveTextContent("2페이지");
+      expect(container.querySelector<HTMLImageElement>(".page-preview-media img")?.alt).toContain("2페이지");
+    } finally {
+      await act(async () => root.unmount());
+      client.dispose();
+      container.remove();
+      if (previousShowModal) Object.defineProperty(HTMLDialogElement.prototype, "showModal", previousShowModal);
+      else Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
     }
   });
 

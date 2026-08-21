@@ -179,7 +179,7 @@ describe("GalleryCard event projection", () => {
     container.remove();
   });
 
-  it("routes an internal metadata click to selection while a selection exists", async () => {
+  it("keeps metadata search available while a selection exists and reserves selection for modifiers", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -199,8 +199,12 @@ describe("GalleryCard event projection", () => {
       container.querySelector<HTMLButtonElement>(".card-byline .byline")?.click();
     });
 
+    expect(callbacks.onMetadataSearch).toHaveBeenCalledWith(`artist:${gallery.artist}`);
+    expect(callbacks.onSelect).not.toHaveBeenCalled();
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".card-byline .byline")?.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+    });
     expect(callbacks.onSelect).toHaveBeenCalledWith(gallery.id, expect.anything());
-    expect(callbacks.onMetadataSearch).not.toHaveBeenCalled();
     await act(async () => root.unmount());
     container.remove();
   });

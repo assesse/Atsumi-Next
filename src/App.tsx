@@ -1023,7 +1023,7 @@ export default function App() {
     [showToast],
   );
 
-  const searchMetadata = useCallback((value: string) => {
+  const startFreshMetadataSearch = useCallback((value: string) => {
     const target = metadataSearchToken(value);
     const kind = searchTokenKind(target.displayToken);
     const request: SearchRequest = target.includeTag
@@ -1044,11 +1044,19 @@ export default function App() {
         pageSize: 50,
       };
     if (!kind && !target.displayToken) return;
-    setExploreSearchOverride(request);
+    // This must be a new request object even for a repeated token, so the
+    // search effect cannot reuse a previous Explore session or projection.
+    explorePageSession.current?.clear();
+    setExploreSearchOverride({ ...request, includeTags: [...request.includeTags], excludeTags: [...request.excludeTags] });
     dispatch({ type: "navigate", view: "explore" });
+    dispatch({ type: "selection.clear" });
+    dispatch({ type: "detail.minimize", minimized: true });
     dispatch({ type: "search.commit", view: "explore", value: target.displayToken });
     if (galleryViewport.current) galleryViewport.current.scrollTop = 0;
+    setSearchRefresh((current) => current + 1);
   }, [ui.exploreSort, ui.search.explore.languages]);
+
+  const searchMetadata = startFreshMetadataSearch;
 
   const toggleMetadataFavorite = useCallback(async (value: string) => {
     const token = normalizeMetadataToken(value);

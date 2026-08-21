@@ -176,7 +176,9 @@ function GalleryCardComponent({
     selectionContext || event.ctrlKey || event.shiftKey;
 
   const selectFromInteractiveTarget = (event: MouseEvent<HTMLElement>) => {
-    if (!selectsInsteadOfActivating(event)) return false;
+    // A selected-card context still permits metadata navigation. Only an
+    // explicit range/toggle gesture turns an interactive chip into selection.
+    if (!event.ctrlKey && !event.shiftKey) return false;
     event.preventDefault();
     event.stopPropagation();
     if (event.detail <= 1) onSelect(gallery.id, event);
