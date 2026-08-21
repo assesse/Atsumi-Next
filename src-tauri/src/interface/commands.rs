@@ -20,9 +20,11 @@ use crate::{
         GalleryDetail, GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot,
         InternalRemovalApplyRequest, InternalRemovalPlan, InternalRemovalPlanRequest,
         InternalRemovalResult, InternalRemovalUndoRequest, InternalScanRun, JobRef,
-        SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot,
-        ValidationError, WindowPlacement, WindowPlacementSnapshot,
+        MaintenanceAction, MaintenancePreview, MaintenanceResult, SearchHistoryEntry,
+        SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot, ValidationError,
+        WindowPlacement, WindowPlacementSnapshot,
     },
+    infrastructure::HitomiLiveAdapter,
     thumbnail::{
         CancellationToken, ThumbnailCacheClearDto, ThumbnailCompletionEventDto,
         ThumbnailCoordinator, ThumbnailCoordinatorError, ThumbnailInvalidationDto, ThumbnailKey,
@@ -43,7 +45,10 @@ pub struct AppState {
     internal_duplicates: InternalDuplicateSupervisor,
     download_root_picker: Arc<dyn DownloadRootPicker>,
     artifact_store: Arc<dyn ArtifactStore>,
+    live_source: Arc<HitomiLiveAdapter>,
+    data_dir: PathBuf,
     search_pages: SearchPageRequests,
+    maintenance_previews: Mutex<HashMap<String, MaintenanceAction>>,
 }
 
 #[derive(Default)]
@@ -99,6 +104,16 @@ impl SearchPageRequests {
             .cancelled_order
             .retain(|candidate| candidate != request_id);
     }
+
+    fn cancel_all(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        for token in inner.active.values() {
+            token.cancel();
+        }
+        inner.active.clear();
+        inner.cancelled.clear();
+        inner.cancelled_order.clear();
+    }
 }
 
 impl AppState {
@@ -115,6 +130,8 @@ impl AppState {
         internal_duplicates: InternalDuplicateSupervisor,
         download_root_picker: Arc<dyn DownloadRootPicker>,
         artifact_store: Arc<dyn ArtifactStore>,
+        live_source: Arc<HitomiLiveAdapter>,
+        data_dir: PathBuf,
     ) -> Self {
         Self {
             service,
@@ -126,8 +143,28 @@ impl AppState {
             internal_duplicates,
             download_root_picker,
             artifact_store,
+            live_source,
+            data_dir,
             search_pages: SearchPageRequests::default(),
+            maintenance_previews: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn remember_maintenance_preview(&self, action: MaintenanceAction) -> String {
+        let id = format!("maintenance-{}", uuid::Uuid::new_v4());
+        self.maintenance_previews
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.clone(), action);
+        id
+    }
+
+    fn consume_maintenance_preview(&self, preview_id: &str, action: &MaintenanceAction) -> bool {
+        self.maintenance_previews
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(preview_id)
+            .is_some_and(|previewed| previewed == *action)
     }
 }
 
@@ -599,6 +636,166 @@ pub async fn app_reconcile(
 ) -> Result<ApiResult<ReconcileReport>, ApiError> {
     let downloads = state.downloads.clone();
     Ok(run_application_blocking("app_reconcile", move || downloads.reconcile()).await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn maintenance_preview(
+    state: State<'_, AppState>,
+    action: MaintenanceAction,
+) -> Result<ApiResult<MaintenancePreview>, ApiError> {
+    if let Err(error) = action.validate() {
+        return Ok(ApiResult::failure(ApplicationError::from(error).into()));
+    }
+    let preview_id = state.remember_maintenance_preview(action.clone());
+    let (original_files_deleted, user_decisions_preserved, restart_required, steps, warnings) =
+        match &action {
+            MaintenanceAction::QuickRepair => (
+                false,
+                true,
+                false,
+                vec![
+                    "완료된 썸네일·검색 cache를 비웁니다".into(),
+                    "중단된 다운로드와 검사 작업을 안전하게 복구합니다".into(),
+                    "보류된 격리·복원 작업을 다시 확인합니다".into(),
+                ],
+                vec!["유효한 HTTP host cooldown과 Retry-After는 유지됩니다".into()],
+            ),
+            MaintenanceAction::RebuildLibrary { .. } => (
+                false,
+                true,
+                false,
+                vec![
+                    "SQLite artifact, manifest와 저장 파일을 검사합니다".into(),
+                    "선택한 파생 분석만 다시 실행합니다".into(),
+                ],
+                vec![
+                    "모호한 final/.part 충돌은 덮어쓰거나 삭제하지 않고 recovery로 보냅니다".into(),
+                ],
+            ),
+            MaintenanceAction::FactoryReset { .. } => (
+                false,
+                false,
+                true,
+                vec![
+                    "모든 worker를 취소하고 종료합니다".into(),
+                    "다음 시작 전에 앱 SQLite 상태를 recovery backup으로 옮깁니다".into(),
+                    "새 SQLite DB와 기본 설정으로 다시 시작합니다".into(),
+                ],
+                vec!["외부 download root와 quarantine/recovery 원본 파일은 유지됩니다".into()],
+            ),
+        };
+    Ok(ApiResult::success(MaintenancePreview {
+        preview_id,
+        action,
+        original_files_deleted,
+        user_decisions_preserved,
+        restart_required,
+        warnings,
+        steps,
+    }))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn maintenance_execute(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    preview_id: String,
+    action: MaintenanceAction,
+) -> Result<ApiResult<MaintenanceResult>, ApiError> {
+    if let Err(error) = action.validate() {
+        return Ok(ApiResult::failure(ApplicationError::from(error).into()));
+    }
+    if !state.consume_maintenance_preview(preview_id.trim(), &action) {
+        return Ok(ApiResult::failure(
+            ApplicationError::from(ValidationError::new(
+                "previewId",
+                "a matching maintenance preview is required before execution",
+            ))
+            .into(),
+        ));
+    }
+    if matches!(action, MaintenanceAction::QuickRepair) {
+        state.search_pages.cancel_all();
+    }
+
+    let thumbnails = state.thumbnails.clone();
+    let live_source = Arc::clone(&state.live_source);
+    let downloads = state.downloads.clone();
+    let auto_find = state.auto_find.clone();
+    let duplicates = state.duplicates.clone();
+    let internal_duplicates = state.internal_duplicates.clone();
+    let data_dir = state.data_dir.clone();
+    let execute_action = action.clone();
+    let result = run_application_blocking("maintenance_execute", move || {
+        let mut completed_steps = Vec::new();
+        let mut warnings = Vec::new();
+        match &execute_action {
+            MaintenanceAction::QuickRepair => {
+                thumbnails.clear_cache();
+                live_source.clear_derived_caches();
+                downloads.recover_startup_state()?;
+                auto_find.recover_interrupted()?;
+                duplicates.recover_interrupted()?;
+                internal_duplicates.recover_interrupted()?;
+                match internal_duplicates.reconcile_pending_page_moves() {
+                    Ok(_) => {}
+                    Err(error) => warnings.push(format!("internal page recovery deferred: {error}")),
+                }
+                completed_steps.extend([
+                    "thumbnail and source caches cleared".into(),
+                    "interrupted work recovery completed".into(),
+                ]);
+                Ok(MaintenanceResult { action: execute_action, completed_steps, warnings, restart_required: false })
+            }
+            MaintenanceAction::RebuildLibrary {
+                rebuild_thumbnail_data,
+                rebuild_duplicate_analysis,
+                rebuild_internal_analysis,
+                rebuild_auto_find_results,
+            } => {
+                let report = downloads.reconcile()?;
+                completed_steps.push(format!("{} artifacts inspected", report.inspected_artifacts));
+                if *rebuild_thumbnail_data {
+                    thumbnails.clear_cache();
+                    live_source.clear_derived_caches();
+                    completed_steps.push("thumbnail derived caches cleared".into());
+                }
+                if *rebuild_duplicate_analysis {
+                    duplicates.start()?;
+                    completed_steps.push("gallery duplicate analysis started".into());
+                }
+                if *rebuild_internal_analysis {
+                    internal_duplicates.start()?;
+                    completed_steps.push("internal duplicate analysis started".into());
+                }
+                if *rebuild_auto_find_results {
+                    auto_find.refresh()?;
+                    completed_steps.push("Auto Find refresh started".into());
+                }
+                Ok(MaintenanceResult { action: execute_action, completed_steps, warnings, restart_required: false })
+            }
+            MaintenanceAction::FactoryReset { .. } => {
+                internal_duplicates.shutdown_and_wait();
+                duplicates.shutdown_and_wait();
+                auto_find.shutdown_and_wait();
+                downloads.shutdown_and_wait();
+                std::fs::write(data_dir.join("factory-reset.pending"), b"v1\n")
+                    .map_err(|error| ApplicationError::from(crate::application::RepositoryError::Other(format!("could not schedule factory reset: {error}"))))?;
+                Ok(MaintenanceResult {
+                    action: execute_action,
+                    completed_steps: vec!["factory reset scheduled for the next startup".into()],
+                    warnings: vec!["the app will now exit; external originals are unchanged".into()],
+                    restart_required: true,
+                })
+            }
+        }
+    }).await;
+    if matches!(action, MaintenanceAction::FactoryReset { .. })
+        && matches!(result, ApiResult::Success(_))
+    {
+        app.exit(0);
+    }
+    Ok(result)
 }
 
 #[tauri::command]

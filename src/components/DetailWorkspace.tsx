@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import type { Gallery, GalleryId } from "../core/types";
 import {
   galleryCoverThumbnailKey,
@@ -8,6 +8,13 @@ import {
 import { FluentIcon } from "./FluentIcon";
 import { GalleryThumbnail } from "./GalleryThumbnail";
 import { MetadataChip } from "./MetadataChip";
+import {
+  DETAIL_ORIENTATION_SAMPLE_SIZE,
+  detailPreviewLayout,
+  type DetailPreviewLayout,
+  type DetailPreviewSample,
+} from "./detailPreviewLayout";
+import { sortGalleryTags } from "./galleryCardLayout";
 
 type DetailWorkspaceProps = {
   tabs: GalleryId[];
@@ -15,6 +22,7 @@ type DetailWorkspaceProps = {
   minimized: boolean;
   galleries: ReadonlyMap<GalleryId, Gallery>;
   favoriteMetadata: ReadonlySet<string>;
+  relatedPreviewWidth?: number;
   thumbnailClient?: ThumbnailClient;
   onActivate: (id: GalleryId) => void;
   onClose: (id: GalleryId) => void;
@@ -71,6 +79,7 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
     minimized,
     galleries,
     favoriteMetadata,
+    relatedPreviewWidth = 240,
     thumbnailClient,
     onActivate,
     onClose,
@@ -93,6 +102,9 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
   const previewOpener = useRef<HTMLButtonElement | null>(null);
   const previewClosingInternally = useRef(false);
   const [previewPage, setPreviewPage] = useState<number | null>(null);
+  const previewTerminals = useRef(new Map<GalleryId, Map<number, DetailPreviewSample>>());
+  const previewLayouts = useRef(new Map<GalleryId, DetailPreviewLayout>());
+  const [, setPreviewLayoutRevision] = useState(0);
 
   useEffect(() => {
     const visible = tabs.length > 0 && !minimized;
@@ -116,6 +128,16 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
     previousVisible.current = visible;
     previousTabCount.current = tabs.length;
   }, [minimized, tabs.length]);
+
+  useEffect(() => {
+    const activeTabs = new Set(tabs);
+    for (const id of previewTerminals.current.keys()) {
+      if (!activeTabs.has(id)) previewTerminals.current.delete(id);
+    }
+    for (const id of previewLayouts.current.keys()) {
+      if (!activeTabs.has(id)) previewLayouts.current.delete(id);
+    }
+  }, [tabs]);
 
   useEffect(() => {
     detailBody.current?.scrollTo?.({ top: 0, left: 0 });
@@ -146,6 +168,22 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
 
   const gallery = activeId === null ? undefined : galleries.get(activeId);
   const previewPageCount = gallery ? boundedPageCount(gallery.pages, 24) : 0;
+  const previewSampleCount = Math.min(previewPageCount, DETAIL_ORIENTATION_SAMPLE_SIZE);
+  const lockedPreviewLayout = gallery ? previewLayouts.current.get(gallery.id) : undefined;
+  const previewLayout = lockedPreviewLayout ?? { columns: 3 as const, orientation: "pending" as const };
+
+  const recordPreviewTerminal = (page: number, terminal: DetailPreviewSample) => {
+    if (!gallery || page > previewSampleCount || previewLayouts.current.has(gallery.id)) return;
+    const entries = previewTerminals.current.get(gallery.id) ?? new Map<number, DetailPreviewSample>();
+    const previous = entries.get(page);
+    if (previous?.status === terminal.status && previous?.width === terminal.width && previous?.height === terminal.height) return;
+    entries.set(page, terminal);
+    previewTerminals.current.set(gallery.id, entries);
+    if (entries.size !== previewSampleCount) return;
+    const samples = Array.from({ length: previewSampleCount }, (_, index) => entries.get(index + 1)!);
+    previewLayouts.current.set(gallery.id, detailPreviewLayout(samples));
+    setPreviewLayoutRevision((revision) => revision + 1);
+  };
 
   useEffect(() => {
     const node = previewDialog.current;
@@ -242,16 +280,22 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                   priority="critical"
                   client={thumbnailClient}
                   sizing="intrinsic"
+                  expectedAspectRatio={gallery.thumbnailWidth !== undefined && gallery.thumbnailHeight !== undefined
+                    ? { width: gallery.thumbnailWidth, height: gallery.thumbnailHeight }
+                    : undefined}
                   alt={`${gallery.title} 표지`}
                 />
-                <div className="preview-grid">
+                <div
+                  className="preview-grid"
+                  data-preview-columns={previewLayout.columns}
+                  data-preview-orientation={previewLayout.orientation}
+                >
                   {Array.from({ length: previewPageCount }, (_, index) => (
                     <button
                       key={index}
                       type="button"
                       className="preview-thumb"
                       title={`${index + 1}페이지 확대`}
-                      style={{ backgroundImage: "none" }}
                       onClick={(event) => {
                         previewOpener.current = event.currentTarget;
                         setPreviewPage(index + 1);
@@ -261,17 +305,11 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                         as="span"
                         thumbnailKey={sourcePageThumbnailKey(gallery, index + 1)}
                         consumer="detail"
-                        priority={index < 6 ? "visible" : "prefetch"}
+                        priority={index < DETAIL_ORIENTATION_SAMPLE_SIZE ? "visible" : "prefetch"}
                         client={thumbnailClient}
+                        sizing="intrinsic"
+                        onTerminalSnapshot={(terminal) => recordPreviewTerminal(index + 1, terminal)}
                         alt={`${gallery.title} ${index + 1}페이지 미리보기`}
-                        style={{
-                          position: "absolute",
-                          inset: 0,
-                          width: "100%",
-                          height: "100%",
-                          backgroundColor: "#d8e4e2",
-                          borderRadius: "inherit",
-                        }}
                       />
                       <span>{index + 1}</span>
                     </button>
@@ -302,8 +340,8 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                   <div className="metadata-box tags-box">
                     <span>태그</span>
                     <div className="metadata-value">
-                      {gallery.tags.map((tag) => (
-                        <MetadataChip key={tag} value={tag} kind="tag" favorite={favoriteMetadata.has(tag)} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
+                      {sortGalleryTags(gallery.tags, favoriteMetadata).map((tag) => (
+                        <MetadataChip key={tag.value} value={tag.value} kind="tag" favorite={tag.favorite} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
                       ))}
                     </div>
                   </div>
@@ -324,6 +362,7 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                         <article
                           key={item.id}
                           className="related-card"
+                          style={{ "--related-preview-width": `${relatedPreviewWidth}px` } as CSSProperties}
                           title="더블클릭 또는 우클릭으로 상세 열기"
                           onDoubleClick={() => onOpenRelated(item.id, gallery.id)}
                           onContextMenu={(event) => {
@@ -337,6 +376,10 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                             consumer="detail"
                             priority="visible"
                             client={thumbnailClient}
+                            sizing="intrinsic"
+                            expectedAspectRatio={item.thumbnailWidth !== undefined && item.thumbnailHeight !== undefined
+                              ? { width: item.thumbnailWidth, height: item.thumbnailHeight }
+                              : undefined}
                             alt={`${item.title} 표지`}
                           />
                           <div className="related-copy">
@@ -346,14 +389,8 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                               {item.group ? <MetadataChip value={`group:${item.group}`} label={item.group} kind="byline" favorite={favoriteMetadata.has(`group:${item.group}`)} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} /> : null}
                             </div>
                             <div className="tag-list">
-                              {(item.series ?? []).slice(0, 1).map((series) => (
-                                <MetadataChip key={`series:${series}`} value={`series:${series}`} searchValue={metadataSearchToken("series", series)} label={`시리즈 · ${series.replaceAll("_", " ")}`} kind="tag" favorite={favoriteMetadata.has(`series:${series}`)} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
-                              ))}
-                              {(item.characters ?? []).slice(0, 1).map((character) => (
-                                <MetadataChip key={`character:${character}`} value={`character:${character}`} searchValue={metadataSearchToken("character", character)} label={`캐릭터 · ${character.replaceAll("_", " ")}`} kind="tag" favorite={favoriteMetadata.has(`character:${character}`)} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
-                              ))}
-                              {item.tags.slice(0, 4).map((tag) => (
-                                <MetadataChip key={tag} value={tag} kind="tag" favorite={favoriteMetadata.has(tag)} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
+                              {sortGalleryTags(item.tags, favoriteMetadata).slice(0, 4).map((tag) => (
+                                <MetadataChip key={tag.value} value={tag.value} kind="tag" favorite={tag.favorite} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
                               ))}
                             </div>
                           </div>

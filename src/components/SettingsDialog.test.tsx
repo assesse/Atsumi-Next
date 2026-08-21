@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
-import type { SettingsSnapshot } from "../api/contracts";
+import type { ApiResult, MaintenanceAction, MaintenanceResult, SettingsSnapshot } from "../api/contracts";
 import { SettingsDialog } from "./SettingsDialog";
 
 const settings: SettingsSnapshot = {
@@ -11,6 +11,7 @@ const settings: SettingsSnapshot = {
   autoFindHistoryMode: "include_all_history",
   maxColumns: 3,
   previewWidth: 220,
+  relatedPreviewWidth: 240,
   cacheLimitGb: 5,
   concurrentImageRequests: 5,
   requestStartIntervalMs: 25,
@@ -34,20 +35,10 @@ describe("SettingsDialog operational boundaries", () => {
       ok: true,
       data: "[작가] 작품 제목 [그룹] 4113714",
     } as const));
-    const onClearCache = vi.fn(async () => ({
+    const onMaintenance = vi.fn(async (action: MaintenanceAction): Promise<ApiResult<MaintenanceResult>> => ({
       ok: true,
-      data: { successEntriesRemoved: 2, successBytesRemoved: 10, negativeEntriesRemoved: 1 },
-    } as const));
-    const onResetExplorationData = vi.fn(async () => ({
-      ok: true,
-      data: {
-        favoritesRemoved: 1,
-        searchHistoryRemoved: 2,
-        autoFindRunsRemoved: 1,
-        autoFindCandidatesRemoved: 3,
-        autoFindExclusionsRemoved: 1,
-      },
-    } as const));
+      data: { action, completedSteps: ["done"], warnings: [], restartRequired: false },
+    }));
 
     try {
       await act(async () => root.render(
@@ -60,8 +51,7 @@ describe("SettingsDialog operational boundaries", () => {
           onSave={onSave}
           onPreviewLayout={vi.fn()}
           onPreviewFolderName={onPreviewFolderName}
-          onClearCache={onClearCache}
-          onResetExplorationData={onResetExplorationData}
+          onMaintenance={onMaintenance}
         />,
       ));
       await act(async () => {
@@ -71,16 +61,13 @@ describe("SettingsDialog operational boundaries", () => {
       expect(container.querySelector(".settings-nav")).toBeNull();
       expect(container.textContent).not.toContain("다음 단계");
 
-      const destructive = [...container.querySelectorAll<HTMLButtonElement>(".danger-zone button")];
-      expect(destructive).toHaveLength(3);
-      expect(destructive.every((button) => !button.disabled)).toBe(true);
-      expect(container.textContent).toContain("다운로드 DB와 파일은 보존");
-
-      await act(async () => destructive[0]?.click());
-      expect(onClearCache).toHaveBeenCalledTimes(1);
-      await act(async () => destructive[2]?.click());
-      expect(confirm).toHaveBeenCalledWith(expect.stringContaining("다운로드 DB와 파일은 삭제되지 않습니다"));
-      expect(onResetExplorationData).toHaveBeenCalledTimes(1);
+      const maintenance = [...container.querySelectorAll<HTMLButtonElement>(".maintenance-actions button")];
+      expect(maintenance).toHaveLength(3);
+      expect(maintenance.map((button) => button.textContent)).toEqual(["빠른 복구", "라이브러리 검사 및 재구축", "앱 데이터 완전 초기화"]);
+      await act(async () => maintenance[0]?.click());
+      expect(onMaintenance).toHaveBeenCalledWith({ kind: "quickRepair" });
+      await act(async () => maintenance[2]?.click());
+      expect(confirm).toHaveBeenCalledWith(expect.stringContaining("외부 다운로드 원본 파일은 유지"));
 
       const template = container.querySelector<HTMLInputElement>('[aria-label="갤러리 폴더 이름 템플릿"]');
       expect(template?.value).toBe("[{artist}] {title} [{group}] {id}");
@@ -90,6 +77,10 @@ describe("SettingsDialog operational boundaries", () => {
       expect(previewRange?.min).toBe("0");
       expect(previewRange?.max).toBe("6");
       expect(previewRange?.value).toBe("2");
+      const relatedPreviewRange = container.querySelector<HTMLInputElement>('[aria-label="Related galleries 미리보기 크기"]');
+      expect(relatedPreviewRange?.min).toBe("180");
+      expect(relatedPreviewRange?.max).toBe("320");
+      expect(relatedPreviewRange?.value).toBe("240");
       expect(container.textContent).toContain("사용가능 인자 : {artist}, {title}, {group}, {id}");
       expect(container.textContent).toContain("미리보기 : [작가] 작품 제목 [그룹] 4113714");
       expect(container.textContent).not.toContain("{id}는 필수입니다");
@@ -113,6 +104,7 @@ describe("SettingsDialog operational boundaries", () => {
       expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
         folderNameTemplate: "[{artist}] {title} [{group}] {id}",
         autoFindHistoryMode: "include_all_history",
+        relatedPreviewWidth: 240,
       }));
     } finally {
       await act(async () => root.unmount());

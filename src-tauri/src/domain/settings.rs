@@ -6,6 +6,9 @@ use super::{validate_folder_name_template, ValidationError, DEFAULT_FOLDER_NAME_
 
 pub const DEFAULT_MAX_COLUMNS: u32 = 3;
 pub const DEFAULT_PREVIEW_WIDTH: u32 = 220;
+/// The related-gallery strip lives inside the floating detail view, so it has
+/// its own size preference instead of inheriting the dense Explore card size.
+pub const DEFAULT_RELATED_PREVIEW_WIDTH: u32 = 240;
 pub const DEFAULT_CACHE_LIMIT_GB: u32 = 10;
 pub const DEFAULT_CONCURRENT_IMAGE_REQUESTS: u32 = 5;
 pub const DEFAULT_REQUEST_START_INTERVAL_MS: u64 = 25;
@@ -59,6 +62,10 @@ pub fn normalize_gallery_preview_width(value: u32) -> u32 {
 
 pub fn is_gallery_preview_width(value: u32) -> bool {
     PREVIEW_PRESET_WIDTHS.contains(&value)
+}
+
+pub fn is_related_preview_width(value: u32) -> bool {
+    matches!(value, 180 | 200 | 220 | 240 | 260 | 280 | 300 | 320)
 }
 
 /// Converts only well-formed Windows verbatim filesystem paths to the form a
@@ -136,6 +143,7 @@ pub struct SettingsSnapshot {
     pub folder_name_template: String,
     pub max_columns: u32,
     pub preview_width: u32,
+    pub related_preview_width: u32,
     pub cache_limit_gb: u32,
     pub concurrent_image_requests: u32,
     pub request_start_interval_ms: u64,
@@ -150,6 +158,7 @@ impl Default for SettingsSnapshot {
             folder_name_template: DEFAULT_FOLDER_NAME_TEMPLATE.to_owned(),
             max_columns: DEFAULT_MAX_COLUMNS,
             preview_width: DEFAULT_PREVIEW_WIDTH,
+            related_preview_width: DEFAULT_RELATED_PREVIEW_WIDTH,
             cache_limit_gb: DEFAULT_CACHE_LIMIT_GB,
             concurrent_image_requests: DEFAULT_CONCURRENT_IMAGE_REQUESTS,
             request_start_interval_ms: DEFAULT_REQUEST_START_INTERVAL_MS,
@@ -165,6 +174,7 @@ pub struct SettingsPatch {
     pub folder_name_template: Option<String>,
     pub max_columns: Option<u32>,
     pub preview_width: Option<u32>,
+    pub related_preview_width: Option<u32>,
     pub cache_limit_gb: Option<u32>,
     pub concurrent_image_requests: Option<u32>,
     pub request_start_interval_ms: Option<u64>,
@@ -186,6 +196,9 @@ impl SettingsSnapshot {
         }
         if let Some(value) = patch.preview_width {
             next.preview_width = value;
+        }
+        if let Some(value) = patch.related_preview_width {
+            next.related_preview_width = value;
         }
         if let Some(value) = patch.cache_limit_gb {
             next.cache_limit_gb = value;
@@ -224,6 +237,12 @@ impl SettingsSnapshot {
             return Err(ValidationError::new(
                 "previewWidth",
                 "must be one of 160, 190, 220, 250, 280, 320 or 360",
+            ));
+        }
+        if !is_related_preview_width(self.related_preview_width) {
+            return Err(ValidationError::new(
+                "relatedPreviewWidth",
+                "must be one of 180, 200, 220, 240, 260, 280, 300 or 320",
             ));
         }
         if !(1..=30).contains(&self.cache_limit_gb) {

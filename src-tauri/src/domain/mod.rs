@@ -48,7 +48,8 @@ pub use job::{
     JobEvent, JobRef, JobState,
 };
 pub use maintenance::{
-    ExplorationDataResetRequest, ExplorationDataResetResult, EXPLORATION_DATA_RESET_CONFIRMATION,
+    ExplorationDataResetRequest, ExplorationDataResetResult, MaintenanceAction, MaintenancePreview,
+    MaintenanceResult, EXPLORATION_DATA_RESET_CONFIRMATION, FACTORY_RESET_CONFIRMATION,
 };
 pub use search::{
     GalleryDetail, GalleryPage, GallerySummary, Language, SearchRequest, SearchSort,

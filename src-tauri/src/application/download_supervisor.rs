@@ -386,6 +386,22 @@ impl DownloadSupervisor {
         Ok(report)
     }
 
+    /// Performs only the recovery work that must happen before downloads can
+    /// resume. Full artifact hash/decode verification stays behind the
+    /// explicit `app_reconcile` command so opening the application does not
+    /// scale with the user's completed library.
+    pub fn recover_startup_state(&self) -> Result<ReconcileReport, ApplicationError> {
+        let mut report = ReconcileReport {
+            inspected_artifacts: 0,
+            verified_artifacts: 0,
+            resumed_jobs: 0,
+            issues: Vec::new(),
+        };
+        self.reconcile_quarantine_sagas(&mut report)?;
+        report.resumed_jobs = u64::try_from(self.resume_interrupted()?).unwrap_or(u64::MAX);
+        Ok(report)
+    }
+
     fn reconcile_quarantine_sagas(
         &self,
         report: &mut ReconcileReport,
@@ -1781,7 +1797,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_reconcile_finishes_a_quarantine_move_interrupted_before_db_commit() {
+    fn startup_recovery_finishes_a_quarantine_move_without_scanning_completed_artifacts() {
         let temp = tempdir().unwrap();
         let root = temp.path().to_path_buf();
         let (repository, service) = configured_repository(&root);
@@ -1820,7 +1836,9 @@ mod tests {
             )
             .unwrap();
 
-        let report = supervisor.reconcile().unwrap();
+        let report = supervisor.recover_startup_state().unwrap();
+        assert_eq!(report.inspected_artifacts, 0);
+        assert_eq!(report.verified_artifacts, 0);
         assert!(
             report.issues.iter().all(|issue| issue.entry_id != entry_id),
             "{:?}",

@@ -1245,6 +1245,15 @@ pub const MIGRATIONS: &[Migration] = &[
                 );
         "#,
     },
+    Migration {
+        version: 19,
+        name: "related_gallery_preview_preference",
+        sql: r#"
+            ALTER TABLE settings
+            ADD COLUMN related_preview_width INTEGER NOT NULL DEFAULT 240
+                CHECK (related_preview_width IN (180, 200, 220, 240, 260, 280, 300, 320));
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1530,7 +1539,7 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v14 to v15");
-        assert_eq!(report.applied_versions, vec![15, 16, 17, 18]);
+        assert_eq!(report.applied_versions, vec![15, 16, 17, 18, 19]);
         let historical_import_tables: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'classic_import_%'",
@@ -1624,8 +1633,11 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
-        assert_eq!(report.applied_versions, vec![12, 13, 14, 15, 16, 17, 18]);
-        assert_eq!(report.current_version, 18);
+        assert_eq!(
+            report.applied_versions,
+            vec![12, 13, 14, 15, 16, 17, 18, 19]
+        );
+        assert_eq!(report.current_version, 19);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",

@@ -1,6 +1,6 @@
 # API Contract V2
 
-현재 실제 runtime과 schema v15~v18 안정화까지 구현된 command와 event 형식을 이 문서의 기준 revision으로 사용한다. DB schema는 18, manifest schema와 HashProfile은 1이다.
+현재 실제 runtime과 schema v15~v19 안정화까지 구현된 command와 event 형식을 이 문서의 기준 revision으로 사용한다. DB schema는 19, manifest schema와 HashProfile은 1이다.
 
 ## 공통 규칙
 
@@ -102,6 +102,7 @@ type SettingsSnapshot = {
   autoFindHistoryMode: "include_all_history" | "newer_than_oldest_downloaded";
   maxColumns: number;
   previewWidth: number;
+  relatedPreviewWidth: number;
   cacheLimitGb: number;
   concurrentImageRequests: number;
   requestStartIntervalMs: number;
@@ -110,7 +111,15 @@ type SettingsSnapshot = {
 
 `settings_update`는 `expectedRevision` CAS를 사용한다. Windows의 `downloadRoot`는 사람이 읽고 편집하는 drive/UNC 형식이며 well-formed `\\?\D:\...`와 `\\?\UNC\...`만 표시 경계에서 일반 형식으로 바꾼다. device path나 malformed prefix는 변환하지 않는다. filesystem containment는 별도로 canonical path를 사용하고 기존 artifact `root_snapshot`은 표시 정규화의 대상이 아니다. `folderNameTemplate`과 `autoFindHistoryMode`의 변경은 새 artifact/새 Auto Find run부터 적용하고 이미 예약된 artifact path나 실행 중 run을 재해석하지 않는다.
 
-`cacheLimitGb`는 기존 settings row 호환을 위해 transport에 남아 있지만 현재 memory-only thumbnail coordinator의 64MiB bound를 바꾸지 않는다. 설정 화면은 효력이 없는 용량 slider를 노출하지 않고, 실제 동작하는 `thumbnail_cache_clear`만 제공한다.
+`relatedPreviewWidth`는 Floating Detail의 Related galleries cover만 조절하며 Explore·Downloads의 `previewWidth`와 독립적이다. `cacheLimitGb`는 기존 settings row 호환을 위해 transport에 남아 있지만 현재 memory-only thumbnail coordinator의 64MiB bound를 바꾸지 않는다. 설정 화면은 효력이 없는 용량 slider를 노출하지 않고, 실제 동작하는 `thumbnail_cache_clear`만 제공한다.
+
+## Maintenance
+
+`maintenance_preview(action)`은 실행 전 보존 범위·경고·restart 여부와 일회성 `previewId`를 반환한다. `maintenance_execute(previewId, action)`은 같은 action의 preview가 있어야 실행된다.
+
+- `quickRepair`: completed thumbnail/source/query cache만 비우고, interrupted worker와 pending quarantine/restore를 기존 recovery 함수로 다시 확인한다. HTTP host cooldown과 Retry-After는 건드리지 않는다.
+- `rebuildLibrary`: `app_reconcile` 검증을 실행하고 선택한 thumbnail/duplicate/internal/Auto Find 파생 작업만 재생성한다. 실제 원본과 사용자 판정·제외는 보존한다.
+- `factoryReset`: 강한 `RESET_ALL_APP_DATA` 확인 후 worker를 종료하고 reset marker를 기록해 앱을 종료한다. 다음 startup이 SQLite/WAL/SHM을 app-data recovery backup으로 옮긴 뒤 새 DB를 만든다. 외부 download root와 quarantine/recovery 파일은 삭제하지 않는다.
 
 ## SearchRequest
 

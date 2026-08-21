@@ -19,6 +19,7 @@ export type SettingsSnapshot = {
   autoFindHistoryMode: AutoFindHistoryMode;
   maxColumns: number;
   previewWidth: number;
+  relatedPreviewWidth: number;
   cacheLimitGb: number;
   concurrentImageRequests: number;
   requestStartIntervalMs: number;
@@ -30,6 +31,34 @@ export type ThumbnailCacheClearResult = {
   successEntriesRemoved: number;
   successBytesRemoved: number;
   negativeEntriesRemoved: number;
+};
+
+export type MaintenanceAction =
+  | { kind: "quickRepair" }
+  | {
+    kind: "rebuildLibrary";
+    rebuildThumbnailData: boolean;
+    rebuildDuplicateAnalysis: boolean;
+    rebuildInternalAnalysis: boolean;
+    rebuildAutoFindResults: boolean;
+  }
+  | { kind: "factoryReset"; confirmation: string };
+
+export type MaintenancePreview = {
+  previewId: string;
+  action: MaintenanceAction;
+  originalFilesDeleted: boolean;
+  userDecisionsPreserved: boolean;
+  restartRequired: boolean;
+  warnings: string[];
+  steps: string[];
+};
+
+export type MaintenanceResult = {
+  action: MaintenanceAction;
+  completedSteps: string[];
+  warnings: string[];
+  restartRequired: boolean;
 };
 
 export type ExplorationDataResetRequest = {

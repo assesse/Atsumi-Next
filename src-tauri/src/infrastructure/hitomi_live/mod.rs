@@ -123,6 +123,15 @@ impl HitomiLiveAdapter {
         }
     }
 
+    /// Drops only in-memory derived source state. The HTTP scheduler and its
+    /// host cooldowns deliberately survive so a repair cannot bypass Retry-After.
+    pub fn clear_derived_caches(&self) {
+        unpoison(self.metadata_cache.lock()).values.clear();
+        unpoison(self.metadata_inflight.lock()).clear();
+        *unpoison(self.gg_cache.lock()) = None;
+        unpoison(self.queries.lock()).clear();
+    }
+
     fn fetch_metadata(
         &self,
         gallery_id: u64,

@@ -57,6 +57,38 @@ describe("App Phase 3A backend flow", () => {
     vi.unstubAllGlobals();
   });
 
+  it("uses the gallery skeleton only for initial blank Explore, Downloads, and Auto Find loading", async () => {
+    vi.spyOn(backend, "searchSubmit").mockImplementation(() => new Promise(() => undefined));
+    vi.spyOn(backend, "downloadEntriesList").mockImplementation(() => new Promise(() => undefined));
+    vi.spyOn(backend, "autoFindSnapshot").mockImplementation(() => new Promise(() => undefined));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      expect(container.querySelector(".gallery-grid-skeleton")).toHaveAttribute("aria-busy", "true");
+      expect(container.querySelector(".loading-state")).toBeNull();
+
+      await act(async () => {
+        clickButtonContaining(container, "Downloads");
+        await settle();
+      });
+      expect(container.querySelector(".gallery-grid-skeleton")).toHaveAttribute("aria-busy", "true");
+
+      await act(async () => {
+        clickButtonContaining(container, "Auto Find");
+        await settle();
+      });
+      expect(container.querySelector(".gallery-grid-skeleton")).toHaveAttribute("aria-busy", "true");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   it("hydrates Recent and Downloads and queues through the formal backend client", async () => {
     const seeded = await backend.downloadQueueAdd([galleryId(4051038)], "app-test-seed-download");
     if (!seeded.ok) throw new Error(seeded.error.message);
@@ -203,7 +235,7 @@ describe("App Phase 3A backend flow", () => {
     container.remove();
   });
 
-  it("keeps series and character favorites in detail and related metadata while cards stay compact", async () => {
+  it("keeps series and character favorites in detail while related galleries stay compact", async () => {
     const favoriteSet = vi.spyOn(backend, "favoriteSet");
     const container = document.createElement("div");
     document.body.append(container);
@@ -237,11 +269,11 @@ describe("App Phase 3A backend flow", () => {
     expect([...container.querySelectorAll<HTMLButtonElement>('.detail-workspace [title^="mira lane"]')]
       .every((chip) => chip.classList.contains("favorite"))).toBe(true);
 
-    const matchingDetailChips = [...container.querySelectorAll<HTMLButtonElement>(
-      '.detail-workspace [title^="rain archives"], .detail-workspace [title^="시리즈 · rain archives"]',
-    )];
-    expect(matchingDetailChips.length).toBeGreaterThanOrEqual(2);
+    const matchingDetailChips = [...container.querySelectorAll<HTMLButtonElement>('.detail-workspace [title^="rain archives"]')];
+    expect(matchingDetailChips).toHaveLength(1);
     expect(matchingDetailChips.every((chip) => chip.classList.contains("favorite"))).toBe(true);
+    expect(container.querySelector(".related-card")?.textContent).not.toContain("rain archives");
+    expect(container.querySelector(".related-card")?.textContent).not.toContain("mira lane");
 
     await act(async () => root.unmount());
     container.replaceChildren();

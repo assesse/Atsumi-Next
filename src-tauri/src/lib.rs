@@ -35,6 +35,27 @@ use thumbnail::{
     ThumbnailResolver,
 };
 
+fn apply_pending_factory_reset(data_dir: &std::path::Path) -> std::io::Result<()> {
+    let marker = data_dir.join("factory-reset.pending");
+    if !marker.exists() {
+        return Ok(());
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let backup = data_dir.join(format!("factory-reset-backup-{stamp}"));
+    std::fs::create_dir_all(&backup)?;
+    for suffix in ["", "-wal", "-shm"] {
+        let source = data_dir.join(format!("atsumi-next.sqlite3{suffix}"));
+        if source.exists() {
+            std::fs::rename(&source, backup.join(format!("atsumi-next.sqlite3{suffix}")))?;
+        }
+    }
+    std::fs::remove_file(marker)?;
+    Ok(())
+}
+
 pub fn run() -> tauri::Result<()> {
     infrastructure::telemetry::init();
 
@@ -88,6 +109,7 @@ pub fn run() -> tauri::Result<()> {
         })
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+            apply_pending_factory_reset(&data_dir)?;
             let database_path = data_dir.join("atsumi-next.sqlite3");
             let repository = SqliteRepository::open(&database_path)?;
             let repository = Arc::new(repository);
@@ -220,7 +242,7 @@ pub fn run() -> tauri::Result<()> {
                 })?;
             let download_repository: Arc<dyn DownloadPipelineRepository> = repository.clone();
             let settings_repository: Arc<dyn StateRepository> = repository.clone();
-            let download_source: Arc<dyn DownloadSourcePort> = live_source;
+            let download_source: Arc<dyn DownloadSourcePort> = live_source.clone();
             let (download_event_tx, download_event_rx) =
                 mpsc::channel::<DownloadJobProjection>();
             let download_app = app.handle().clone();
@@ -246,23 +268,19 @@ pub fn run() -> tauri::Result<()> {
                 download_event_tx,
                 2,
             )?;
-            let (reconciled_artifacts, reconcile_issues, resumed_jobs) =
+            let (startup_recovery_issues, resumed_jobs) =
                 if download_root_configured {
-                    match downloads.reconcile() {
-                        Ok(report) => (
-                            report.verified_artifacts,
-                            report.issues.len(),
-                            report.resumed_jobs,
-                        ),
+                    match downloads.recover_startup_state() {
+                        Ok(report) => (report.issues.len(), report.resumed_jobs),
                         Err(_) => {
                             tracing::warn!(
-                                "startup artifact reconciliation was deferred; no ambiguous file was changed"
+                                "startup download recovery was deferred; no ambiguous file was changed"
                             );
-                            (0, 1, 0)
+                            (1, 0)
                         }
                     }
                 } else {
-                    (0, 0, 0)
+                    (0, 0)
                 };
             app.manage(AppState::new(
                 service,
@@ -274,6 +292,8 @@ pub fn run() -> tauri::Result<()> {
                 internal_duplicates,
                 Arc::new(WindowsFolderPicker::new()),
                 artifact_store,
+                live_source.clone(),
+                data_dir,
             ));
             if let Some(window) = app.get_webview_window("main") {
                 window.show()?;
@@ -288,8 +308,7 @@ pub fn run() -> tauri::Result<()> {
                 recovered_duplicate_runs,
                 recovered_internal_runs,
                 reconciled_internal_pages,
-                reconciled_artifacts,
-                reconcile_issues,
+                startup_recovery_issues,
                 resumed_jobs,
                 "Atsumi Next backend initialized"
             );
@@ -313,6 +332,8 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::auto_find_cancel,
             interface::commands::auto_find_exclude,
             interface::commands::exploration_data_reset,
+            interface::commands::maintenance_preview,
+            interface::commands::maintenance_execute,
             interface::commands::duplicate_snapshot,
             interface::commands::duplicate_scan_start,
             interface::commands::duplicate_scan_cancel,

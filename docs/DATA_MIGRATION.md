@@ -4,11 +4,11 @@
 
 새 버전의 영속 데이터 기준은 SQLite 하나로 통합한다. 파일 시스템은 artifact의 실제 존재를 증명하며, DB와 불일치하면 reconciliation job이 해결한다.
 
-## 현재 구현 schema (v18)
+## 현재 구현 schema (v19)
 
 | 테이블 | 책임 |
 |---|---|
-| `settings` | versioned 사용자 설정; v15 folder template, v17 Auto Find history mode 포함 |
+| `settings` | versioned 사용자 설정; v15 folder template, v17 Auto Find history mode, v19 Related galleries preview width 포함 |
 | `window_placement` | 창 위치·크기 revision snapshot |
 | `galleries` | 정규화된 gallery metadata snapshot, v18 source revision 문자열 identity와 작은 내부 revision |
 | `download_entries` | 사용자가 관리하는 다운로드 항목 |
@@ -113,7 +113,7 @@
 - `owned_gallery_artists`는 completed/quarantined entry와 complete/quarantined artifact가 모두 있는 경우만 소유 증거로 인정한다. legacy backfill은 저장된 `galleries.primary_artist`만 사용하며 추가 artist를 추측하지 않는다.
 - `auto_find_run_cutoffs`는 `source='verified_owned_artifact'`, `policy_version=1` CHECK를 가지며 작가별 optional oldest ID와 qualified count를 저장한다. 증거가 없으면 cutoff가 없다.
 - `auto_find_run_truncations`는 `reason='candidate_limit_after_cutoff'`, eligible count와 limit을 저장한다. 현재 application limit은 cutoff 적용 뒤 50,000 candidate다.
-- v14→latest migration 회귀 테스트는 v15/v16/v17/v18의 순서, 역사적 v14 table 보존, legacy relative directory 보존, `root_snapshot` backfill과 두 경로의 immutability를 검증한다.
+- v14→latest migration 회귀 테스트는 v15/v16/v17/v18/v19의 순서, 역사적 v14 table 보존, legacy relative directory 보존, `root_snapshot` backfill과 두 경로의 immutability를 검증한다.
 
 ### v18 추가 규칙
 
@@ -121,6 +121,11 @@
 - `galleries.source_revision TEXT`를 nullable additive column으로 추가한다. 값이 있으면 1~512 bytes여야 한다.
 - remote source의 unsigned fingerprint는 이 문자열 identity에 저장한다. signed SQLite `galleries.revision`은 내부 snapshot revision으로만 사용하므로 `u64`→`i64` 변환 오버플로가 없다.
 - 기존 row의 source identity는 추측하지 않고 `NULL`로 둔다. 다음 실제 metadata 계획에서 identity를 저장하며 identity가 달라질 때만 내부 revision을 증가시킨다.
+
+### v19 추가 규칙
+
+- migration 이름은 `related_gallery_preview_preference`다.
+- `settings.related_preview_width`는 180~320px의 고정 preset(20px 단위)만 허용하며 기본값은 240px이다. Explore·Downloads의 `preview_width`와 독립적으로 Floating Detail의 Related galleries cover에만 적용한다.
 
 ## 유지보수 데이터 초기화
 
@@ -148,7 +153,7 @@ D:\Atsumi\.atsumi-quarantine\<record-id>\[artist] Gallery title [group] 4051027\
 ## rollback
 
 - Next가 생성한 manifest는 schema와 writer version을 가진다.
-- schema v15~v18 downgrade는 지원하지 않는다. 오래된 binary는 future-schema를 쓰기 전에 거부하며 실제 downgrade는 migration 전 backup과 호환 binary를 함께 복원해야 한다.
+- schema v15~v19 downgrade는 지원하지 않는다. 오래된 binary는 future-schema를 쓰기 전에 거부하며 실제 downgrade는 migration 전 backup과 호환 binary를 함께 복원해야 한다.
 - 운영 DB에 과거 migration table/column을 수동 삭제하거나 migration history를 편집하지 않는다. 복구는 migration 전 일관 backup과 호환 binary를 함께 사용한다.
 
 quarantine에는 자동 보존 만료가 없다. 사용자가 명시적으로 복원하거나, 별도 재확인을 거친 비우기 기능을 실행하기 전까지 파일을 유지한다.

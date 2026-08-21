@@ -9,6 +9,7 @@ const fallback: SettingsSnapshot = {
   autoFindHistoryMode: "include_all_history",
   maxColumns: 3,
   previewWidth: 220,
+  relatedPreviewWidth: 240,
   cacheLimitGb: 10,
   concurrentImageRequests: 5,
   requestStartIntervalMs: 25,

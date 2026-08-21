@@ -38,6 +38,9 @@ import type {
   InternalRemovalResult,
   InternalRemovalUndoRequest,
   InternalScanRun,
+  MaintenanceAction,
+  MaintenancePreview,
+  MaintenanceResult,
   ReconcileReport,
   SearchHistoryEntry,
   SearchRequest,
@@ -118,6 +121,8 @@ export interface BackendClient {
   downloadActiveCount(): Promise<ApiResult<number>>;
   artifactOpenFirst(entryId: string): Promise<ApiResult<null>>;
   appReconcile(): Promise<ApiResult<ReconcileReport>>;
+  maintenancePreview(action: MaintenanceAction): Promise<ApiResult<MaintenancePreview>>;
+  maintenanceExecute(previewId: string, action: MaintenanceAction): Promise<ApiResult<MaintenanceResult>>;
   thumbnailRequest(request: ThumbnailRequestDto): Promise<ApiResult<ThumbnailRequestToken>>;
   thumbnailCancel(requestId: string): Promise<ApiResult<boolean>>;
   thumbnailReprioritize(requestId: string, priority: ThumbnailRequestDto["priority"]): Promise<ApiResult<boolean>>;
@@ -137,6 +142,7 @@ const defaultSettings: SettingsSnapshot = {
   autoFindHistoryMode: "include_all_history",
   maxColumns: 3,
   previewWidth: 220,
+  relatedPreviewWidth: 240,
   cacheLimitGb: 10,
   concurrentImageRequests: 5,
   requestStartIntervalMs: 25,
@@ -173,6 +179,9 @@ const readPersistedBrowserSettings = (): SettingsSnapshot => {
       ...parsed,
       downloadRoot: windowsPathForDisplay(parsed.downloadRoot ?? defaultSettings.downloadRoot),
       previewWidth: normalizeGalleryPreviewWidth(parsed.previewWidth ?? defaultSettings.previewWidth),
+      relatedPreviewWidth: [180, 200, 220, 240, 260, 280, 300, 320].includes(parsed.relatedPreviewWidth ?? defaultSettings.relatedPreviewWidth)
+        ? parsed.relatedPreviewWidth ?? defaultSettings.relatedPreviewWidth
+        : defaultSettings.relatedPreviewWidth,
       autoFindHistoryMode: parsed.autoFindHistoryMode === "newer_than_oldest_downloaded"
         ? "newer_than_oldest_downloaded"
         : "include_all_history",
@@ -526,6 +535,7 @@ class BrowserMockBackend implements BackendClient {
   private nextInternalRunId = 1;
   private internalPlans = new Map<string, InternalRemovalPlan>();
   private nextInternalPlanId = 1;
+  private maintenancePreviews = new Map<string, MaintenanceAction>();
 
   async settingsGet(): Promise<ApiResult<SettingsSnapshot>> {
     return ok({ ...this.settings });
@@ -543,6 +553,9 @@ class BrowserMockBackend implements BackendClient {
       validateIntegerRange(next.maxColumns, "maxColumns", 1, 4) ??
       (!GALLERY_PREVIEW_PRESETS.some((preset) => preset.width === next.previewWidth)
         ? validationError("previewWidth", "must be one of the supported preview presets")
+        : null) ??
+      (![180, 200, 220, 240, 260, 280, 300, 320].includes(next.relatedPreviewWidth)
+        ? validationError("relatedPreviewWidth", "must be one of the supported related preview presets")
         : null) ??
       validateIntegerRange(next.cacheLimitGb, "cacheLimitGb", 1, 30) ??
       validateIntegerRange(next.concurrentImageRequests, "concurrentImageRequests", 1, 30) ??
@@ -1531,6 +1544,44 @@ class BrowserMockBackend implements BackendClient {
     });
   }
 
+  async maintenancePreview(action: MaintenanceAction): Promise<ApiResult<MaintenancePreview>> {
+    const previewId = `browser-maintenance-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    this.maintenancePreviews.set(previewId, action);
+    const factory = action.kind === "factoryReset";
+    return ok({
+      previewId,
+      action,
+      originalFilesDeleted: false,
+      userDecisionsPreserved: !factory,
+      restartRequired: factory,
+      warnings: factory ? ["브라우저 fixture에서는 앱 종료 없이 메모리 상태만 초기화합니다."] : [],
+      steps: factory ? ["앱 데이터를 첫 실행 상태로 되돌립니다."] : ["파생 cache와 중단 상태를 정리합니다."],
+    });
+  }
+
+  async maintenanceExecute(previewId: string, action: MaintenanceAction): Promise<ApiResult<MaintenanceResult>> {
+    const previewed = this.maintenancePreviews.get(previewId);
+    this.maintenancePreviews.delete(previewId);
+    if (!previewed || JSON.stringify(previewed) !== JSON.stringify(action)) {
+      return validationError("previewId", "a matching maintenance preview is required before execution");
+    }
+    if (action.kind === "factoryReset" && action.confirmation !== "RESET_ALL_APP_DATA") {
+      return validationError("confirmation", "must explicitly confirm complete app data reset");
+    }
+    if (action.kind === "quickRepair") {
+      return ok({ action, completedSteps: ["thumbnail and source caches cleared", "interrupted work recovery completed"], warnings: [], restartRequired: false });
+    }
+    if (action.kind === "rebuildLibrary") {
+      return ok({ action, completedSteps: ["0 artifacts inspected"], warnings: [], restartRequired: false });
+    }
+    this.downloadEntries.clear();
+    this.favorites.clear();
+    this.searchHistory.clear();
+    this.autoFindExclusions.clear();
+    this.autoFind = { candidates: [], cutoffEvidence: [], truncations: [] };
+    return ok({ action, completedSteps: ["factory reset completed in browser fixture"], warnings: [], restartRequired: true });
+  }
+
   async appQuit(): Promise<ApiResult<null>> {
     return ok(null);
   }
@@ -1876,6 +1927,14 @@ class TauriBackend implements BackendClient {
 
   appReconcile(): Promise<ApiResult<ReconcileReport>> {
     return invoke("app_reconcile");
+  }
+
+  maintenancePreview(action: MaintenanceAction): Promise<ApiResult<MaintenancePreview>> {
+    return invoke("maintenance_preview", { action });
+  }
+
+  maintenanceExecute(previewId: string, action: MaintenanceAction): Promise<ApiResult<MaintenanceResult>> {
+    return invoke("maintenance_execute", { previewId, action });
   }
 
   thumbnailRequest(request: ThumbnailRequestDto): Promise<ApiResult<ThumbnailRequestToken>> {

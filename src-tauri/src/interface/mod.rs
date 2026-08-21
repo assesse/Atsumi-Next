@@ -11,8 +11,8 @@ pub use commands::{
     favorite_set, favorites_list, folder_name_template_preview, gallery_detail_get,
     internal_duplicate_review_get, internal_duplicate_scan_cancel, internal_duplicate_scan_start,
     internal_duplicate_snapshot, internal_removal_apply, internal_removal_plan,
-    internal_removal_undo, search_history_list, search_page_cancel, search_page_get, search_submit,
-    settings_get, settings_update, thumbnail_cache_clear, thumbnail_cancel, thumbnail_invalidate,
-    thumbnail_reprioritize, thumbnail_request, thumbnail_stats, window_placement_get,
-    window_placement_update, AppState,
+    internal_removal_undo, maintenance_execute, maintenance_preview, search_history_list,
+    search_page_cancel, search_page_get, search_submit, settings_get, settings_update,
+    thumbnail_cache_clear, thumbnail_cancel, thumbnail_invalidate, thumbnail_reprioritize,
+    thumbnail_request, thumbnail_stats, window_placement_get, window_placement_update, AppState,
 };

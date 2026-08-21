@@ -4,7 +4,7 @@
 
 Atsumi Next는 기존 Atsumi를 보존하면서 새 구조로 재작성하는 독립 프로젝트다.
 
-승인된 UX prototype과 V2 계약을 기준으로 실제 다운로드 흐름, 영속 즐겨찾기·검색 이력·Auto Find, 작품 중복 Review, 앨범 내부 중복 페이지 검토·격리·undo를 구현했다. 현재 DB schema는 v18이고 manifest schema와 HashProfile은 계속 1이다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
+승인된 UX prototype과 V2 계약을 기준으로 실제 다운로드 흐름, 영속 즐겨찾기·검색 이력·Auto Find, 작품 중복 Review, 앨범 내부 중복 페이지 검토·격리·undo를 구현했다. 현재 DB schema는 v19이고 manifest schema와 HashProfile은 계속 1이다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
 
 다운로드는 SQLite queue에서 자동 시작해 source page 번호별 `.part` 기록, decode, WebP 저장, SHA-256, atomic rename, versioned manifest 검증을 마친 뒤에만 `completed`가 된다. 강제 종료된 작업은 검증된 page checkpoint부터 재개하며, 시작 시와 Downloads의 수동 명령에서 DB·manifest·실제 파일을 재조정한다. 완료 파일은 Windows 기본 뷰어로 열 수 있고, 삭제 대신 download root 내부의 crash-safe quarantine으로 옮긴 뒤 복원할 수 있다. 자동 영구 삭제는 하지 않는다.
 

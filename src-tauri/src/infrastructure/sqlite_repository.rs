@@ -256,11 +256,12 @@ impl StateRepository for SqliteRepository {
                         folder_name_template = ?3,
                         max_columns = ?4,
                         preview_width = ?5,
-                        cache_limit_gb = ?6,
-                        concurrent_image_requests = ?7,
-                        request_start_interval_ms = ?8,
-                        auto_find_history_mode = ?9
-                    WHERE singleton = 1 AND revision = ?10
+                        related_preview_width = ?6,
+                        cache_limit_gb = ?7,
+                        concurrent_image_requests = ?8,
+                        request_start_interval_ms = ?9,
+                        auto_find_history_mode = ?10
+                    WHERE singleton = 1 AND revision = ?11
                 "#,
                 params![
                     to_sql_integer(next.revision, "settings revision")?,
@@ -268,6 +269,7 @@ impl StateRepository for SqliteRepository {
                     next.folder_name_template,
                     i64::from(next.max_columns),
                     i64::from(next.preview_width),
+                    i64::from(next.related_preview_width),
                     i64::from(next.cache_limit_gb),
                     i64::from(next.concurrent_image_requests),
                     to_sql_integer(next.request_start_interval_ms, "request start interval")?,
@@ -5845,6 +5847,7 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
         .query_row(
             r#"
                 SELECT revision, download_root, folder_name_template, max_columns, preview_width,
+                       related_preview_width,
                        cache_limit_gb, concurrent_image_requests,
                        request_start_interval_ms, auto_find_history_mode
                 FROM settings
@@ -5861,7 +5864,8 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
-                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             },
         )
@@ -5876,10 +5880,11 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
             values.4,
             "preview width",
         )?),
-        cache_limit_gb: stored_u32(values.5, "cache limit")?,
-        concurrent_image_requests: stored_u32(values.6, "concurrent image requests")?,
-        request_start_interval_ms: stored_u64(values.7, "request start interval")?,
-        auto_find_history_mode: AutoFindHistoryMode::from_database(&values.8).ok_or_else(|| {
+        related_preview_width: stored_u32(values.5, "related preview width")?,
+        cache_limit_gb: stored_u32(values.6, "cache limit")?,
+        concurrent_image_requests: stored_u32(values.7, "concurrent image requests")?,
+        request_start_interval_ms: stored_u64(values.8, "request start interval")?,
+        auto_find_history_mode: AutoFindHistoryMode::from_database(&values.9).ok_or_else(|| {
             RepositoryError::Corrupt(format!(
                 "Auto Find history mode {:?} is unsupported",
                 values.8

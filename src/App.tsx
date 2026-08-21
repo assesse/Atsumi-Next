@@ -19,8 +19,8 @@ import type {
   SearchHistoryEntry,
   SearchRequest,
   SettingsPatch,
-  ThumbnailCacheClearResult,
-  ExplorationDataResetResult,
+  MaintenanceAction,
+  MaintenanceResult,
   ApiResult,
 } from "./api/contracts";
 import { ActivityDrawer } from "./components/ActivityDrawer";
@@ -31,6 +31,7 @@ import { ExitConfirmDialog } from "./components/ExitConfirmDialog";
 import { FluentIcon } from "./components/FluentIcon";
 import { GalleryCard } from "./components/GalleryCard";
 import { GalleryGrid } from "./components/GalleryGrid";
+import { GalleryGridSkeleton } from "./components/GalleryGridSkeleton";
 import { SelectionToolbar } from "./components/SelectionToolbar";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SideRail } from "./components/SideRail";
@@ -250,56 +251,29 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(null), 2400);
   }, []);
 
-  const clearThumbnailCache = useCallback(async (): Promise<ApiResult<ThumbnailCacheClearResult>> => {
-    const localEntriesRemoved = thumbnailClient.clearRetainedCache();
+  const runMaintenance = useCallback(async (action: MaintenanceAction): Promise<ApiResult<MaintenanceResult>> => {
     try {
-      const result = await backend.thumbnailCacheClear();
+      const preview = await backend.maintenancePreview(action);
+      if (!preview.ok) return preview;
+      const result = await backend.maintenanceExecute(preview.data.previewId, action);
       if (!result.ok) return result;
-      return {
-        ok: true,
-        data: {
-          ...result.data,
-          successEntriesRemoved: result.data.successEntriesRemoved + localEntriesRemoved,
-        },
-      };
+      if (action.kind === "quickRepair" || (action.kind === "rebuildLibrary" && action.rebuildThumbnailData)) {
+        thumbnailClient.clearRetainedCache();
+        explorePageSession.current?.clear();
+      }
+      return result;
     } catch {
       return {
         ok: false,
         error: {
-          code: "CACHE_CLEAR_FAILED",
-          message: "미리보기 캐시를 정리하지 못했습니다.",
+          code: "MAINTENANCE_FAILED",
+          message: "유지보수 작업을 완료하지 못했습니다.",
           retryable: true,
           action: "retry",
         },
       };
     }
   }, [thumbnailClient]);
-
-  const resetExplorationData = useCallback(async (): Promise<ApiResult<ExplorationDataResetResult>> => {
-    try {
-      const result = await backend.explorationDataReset({
-        confirmation: "RESET_EXPLORATION_DATA",
-      });
-      if (!result.ok) return result;
-      setFavoriteRecords([]);
-      setFavoriteMetadata(new Set());
-      setSearchHistory([]);
-      setAutoFindSnapshot({ candidates: [], cutoffEvidence: [], truncations: [] });
-      setAutoFindIds([]);
-      setAutoFindError(null);
-      return result;
-    } catch {
-      return {
-        ok: false,
-        error: {
-          code: "EXPLORATION_RESET_FAILED",
-          message: "탐색 데이터를 초기화하지 못했습니다.",
-          retryable: true,
-          action: "retry",
-        },
-      };
-    }
-  }, []);
 
   const applyAutoFindSnapshot = useCallback((snapshot: AutoFindSnapshot) => {
     setAutoFindSnapshot(snapshot);
@@ -1678,8 +1652,12 @@ export default function App() {
                 : showToast("후보 제외는 Auto Find 화면에서 사용할 수 있습니다.")}
           />
           <section ref={galleryViewport} className="gallery-viewport">
-            {settingsLoading || (ui.view === "explore" && query.phase === "submitting") || (ui.view === "downloads" && downloadsLoading) || (ui.view === "auto-find" && autoFindLoading) ? (
-              <div className="loading-state" role="status"><span className="spinner" /> {settingsLoading ? "저장된 화면 설정을 불러오는 중" : ui.view === "explore" ? "갤러리를 검색하는 중" : ui.view === "auto-find" ? "저장된 자동 탐색 결과를 불러오는 중" : "다운로드 목록을 불러오는 중"}</div>
+            {settingsLoading ? (
+              <div className="loading-state" role="status"><span className="spinner" /> 저장된 화면 설정을 불러오는 중</div>
+            ) : ((ui.view === "explore" && query.phase === "submitting" && !visible.length)
+              || (ui.view === "downloads" && downloadsLoading && !visible.length)
+              || (ui.view === "auto-find" && autoFindLoading && !visible.length)) ? (
+              <GalleryGridSkeleton columns={galleryColumns} previewWidth={previewWidth} />
             ) : ui.view === "explore" && query.error && !query.page ? (
               <div className="empty-state" role="alert"><FluentIcon glyph="\uE7BA" /><h2>검색 결과를 불러오지 못했습니다</h2><p>{query.error.message}</p><button type="button" className="text-button" onClick={() => setSearchRefresh((value) => value + 1)}>다시 시도</button></div>
             ) : ui.view === "downloads" && downloadsError ? (
@@ -1720,6 +1698,7 @@ export default function App() {
         minimized={ui.detail.minimized}
         galleries={displayGalleries}
         favoriteMetadata={favoriteMetadataForDisplay}
+        relatedPreviewWidth={settings.relatedPreviewWidth}
         onActivate={(id) => dispatch({ type: "detail.activate", id })}
         onClose={(id) => dispatch({ type: "detail.close", id })}
         onCloseAll={() => dispatch({ type: "detail.closeAll" })}
@@ -1740,8 +1719,7 @@ export default function App() {
         onSave={saveSettingsPatch}
         onPreviewLayout={setSettingsPreview}
         onPreviewFolderName={previewFolderNameTemplate}
-        onClearCache={clearThumbnailCache}
-        onResetExplorationData={resetExplorationData}
+        onMaintenance={runMaintenance}
       />
 
       <DuplicateReviewDialog

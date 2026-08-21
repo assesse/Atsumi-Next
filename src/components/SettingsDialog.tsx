@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type {
   ApiError,
   ApiResult,
-  ExplorationDataResetResult,
+  MaintenanceAction,
+  MaintenanceResult,
   SettingsPatch,
   SettingsSnapshot,
-  ThumbnailCacheClearResult,
 } from "../api/contracts";
 import {
   GALLERY_PREVIEW_PRESETS,
@@ -22,13 +22,12 @@ type SettingsDialogProps = {
   onSave: (patch: SettingsPatch) => Promise<boolean>;
   onPreviewLayout: (layout: { maxColumns: number; previewWidth: number } | null) => void;
   onPreviewFolderName: (template: string) => Promise<ApiResult<string>>;
-  onClearCache: () => Promise<ApiResult<ThumbnailCacheClearResult>>;
-  onResetExplorationData: () => Promise<ApiResult<ExplorationDataResetResult>>;
+  onMaintenance: (action: MaintenanceAction) => Promise<ApiResult<MaintenanceResult>>;
 };
 
 const DEFAULT_FOLDER_NAME_TEMPLATE = "[{artist}] {title} [{group}] {id}";
 
-export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onPreviewLayout, onPreviewFolderName, onClearCache, onResetExplorationData }: SettingsDialogProps) {
+export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onPreviewLayout, onPreviewFolderName, onMaintenance }: SettingsDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
@@ -39,8 +38,9 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
   const [folderPreview, setFolderPreview] = useState("");
   const [folderPreviewError, setFolderPreviewError] = useState("");
   const folderPreviewRequest = useRef(0);
-  const [maintenanceBusy, setMaintenanceBusy] = useState<"cache" | "exploration" | null>(null);
+  const [maintenanceBusy, setMaintenanceBusy] = useState<MaintenanceAction["kind"] | null>(null);
   const [maintenanceMessage, setMaintenanceMessage] = useState("");
+  const [rebuildOptions, setRebuildOptions] = useState({ thumbnail: true, duplicate: false, internal: false, autoFind: false });
 
   useEffect(() => {
     if (open && !wasOpen.current) {
@@ -107,6 +107,7 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
       autoFindHistoryMode: "include_all_history",
       maxColumns,
       previewWidth,
+      relatedPreviewWidth: 240,
       concurrentImageRequests: 5,
       requestStartIntervalMs: 25,
     }));
@@ -114,23 +115,12 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
     setMaintenanceMessage("화면·네트워크 설정을 기본값으로 되돌렸습니다. 저장을 눌러 적용하세요.");
   };
 
-  const clearCache = async () => {
-    setMaintenanceBusy("cache");
-    const result = await onClearCache();
+  const runMaintenance = async (action: MaintenanceAction) => {
+    if (action.kind === "factoryReset" && !window.confirm("앱 데이터 전체를 초기화하고 앱을 다시 시작할까요? 외부 다운로드 원본 파일은 유지됩니다.")) return;
+    setMaintenanceBusy(action.kind);
+    const result = await onMaintenance(action);
     setMaintenanceBusy(null);
-    setMaintenanceMessage(result.ok
-      ? `재생성 가능한 미리보기 캐시 ${result.data.successEntriesRemoved + result.data.negativeEntriesRemoved}개를 정리했습니다.`
-      : result.error.message);
-  };
-
-  const resetExplorationData = async () => {
-    if (!window.confirm("즐겨찾기, 검색 이력, Auto Find 결과와 제외 기록을 초기화할까요? 다운로드 DB와 파일은 삭제되지 않습니다.")) return;
-    setMaintenanceBusy("exploration");
-    const result = await onResetExplorationData();
-    setMaintenanceBusy(null);
-    setMaintenanceMessage(result.ok
-      ? `탐색 데이터 ${result.data.favoritesRemoved + result.data.searchHistoryRemoved + result.data.autoFindRunsRemoved + result.data.autoFindCandidatesRemoved + result.data.autoFindExclusionsRemoved}건을 초기화했습니다.`
-      : result.error.message);
+    setMaintenanceMessage(result.ok ? result.data.completedSteps.join(" · ") : result.error.message);
   };
 
   const save = async () => {
@@ -141,6 +131,7 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
       autoFindHistoryMode: draft.autoFindHistoryMode,
       maxColumns: draft.maxColumns,
       previewWidth: draft.previewWidth,
+      relatedPreviewWidth: draft.relatedPreviewWidth,
       cacheLimitGb: draft.cacheLimitGb,
       concurrentImageRequests: draft.concurrentImageRequests,
       requestStartIntervalMs: draft.requestStartIntervalMs,
@@ -236,6 +227,10 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                   <div className="range-wrap"><input id="settings-preview-width" aria-label="앨범 미리보기 크기" type="range" min="0" max={GALLERY_PREVIEW_PRESETS.length - 1} step="1" value={galleryPreviewPresetIndex(draft.previewWidth)} onChange={(event) => { const preset = GALLERY_PREVIEW_PRESETS[Number(event.target.value)] ?? GALLERY_PREVIEW_PRESETS[2]!; patch("previewWidth", preset.width); previewLayout(draft.maxColumns, preset.width); }} /><output htmlFor="settings-preview-width">{draft.previewWidth}px</output></div>
                 </div>
                 <div className="setting-row">
+                  <div><strong>Related galleries 미리보기 크기</strong><span>Floating Detail 안의 Related galleries에만 적용</span></div>
+                  <div className="range-wrap"><input id="settings-related-preview-width" aria-label="Related galleries 미리보기 크기" type="range" min="180" max="320" step="20" value={draft.relatedPreviewWidth} onChange={(event) => patch("relatedPreviewWidth", Number(event.target.value))} /><output htmlFor="settings-related-preview-width">{draft.relatedPreviewWidth}px</output></div>
+                </div>
+                <div className="setting-row">
                   <div><strong>동시 이미지 요청</strong><span>Classic 실측 안정 기본값 5</span></div>
                   <input type="number" min="1" max="30" value={draft.concurrentImageRequests} aria-label="동시 이미지 요청" onChange={(event) => patch("concurrentImageRequests", Number(event.target.value))} />
                 </div>
@@ -245,14 +240,23 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                 </div>
                 <div className="danger-zone">
                   <strong>저장 데이터 관리</strong>
-                  <p>캐시는 재생성 가능한 미리보기만 지웁니다. 탐색 데이터 초기화는 즐겨찾기·검색 이력·Auto Find 기록만 지우며 다운로드 DB와 파일은 보존합니다.</p>
+                  <p>원본 파일과 사용자 판정을 보존하는 복구·검사 작업과, 외부 원본을 보존하는 앱 데이터 초기화를 제공합니다.</p>
                   {maintenanceMessage ? <p className="maintenance-message" role="status">{maintenanceMessage}</p> : null}
                   <div>
-                    <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={() => void clearCache()}>{maintenanceBusy === "cache" ? "정리 중" : "캐시 초기화"}</button>
                     <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={restorePreferenceDefaults}>설정 기본값</button>
-                    <button type="button" className="text-button warning-button" disabled={maintenanceBusy !== null} onClick={() => void resetExplorationData()}>{maintenanceBusy === "exploration" ? "초기화 중" : "탐색 데이터 초기화"}</button>
                   </div>
-                  <p>다운로드 기록·artifact·격리 파일의 일괄 영구 삭제는 복구 계획이 없으므로 제공하지 않습니다.</p>
+                  <div className="maintenance-actions">
+                    <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={() => void runMaintenance({ kind: "quickRepair" })}>{maintenanceBusy === "quickRepair" ? "복구 중" : "빠른 복구"}</button>
+                    <p>다운로드, 검색 또는 미리보기가 멈출 때 cache와 중단된 작업 상태를 정리합니다. 저장된 앨범과 원본 파일은 유지됩니다.</p>
+                    <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={() => void runMaintenance({ kind: "rebuildLibrary", rebuildThumbnailData: rebuildOptions.thumbnail, rebuildDuplicateAnalysis: rebuildOptions.duplicate, rebuildInternalAnalysis: rebuildOptions.internal, rebuildAutoFindResults: rebuildOptions.autoFind })}>{maintenanceBusy === "rebuildLibrary" ? "검사 중" : "라이브러리 검사 및 재구축"}</button>
+                    <p>DB, manifest와 실제 파일을 검사하고 필요한 파생 데이터를 다시 만듭니다. 원본과 사용자 판정은 유지됩니다.</p>
+                    <label><input type="checkbox" checked={rebuildOptions.thumbnail} onChange={(event) => setRebuildOptions((current) => ({ ...current, thumbnail: event.target.checked }))} /> 미리보기 cache 재생성</label>
+                    <label><input type="checkbox" checked={rebuildOptions.duplicate} onChange={(event) => setRebuildOptions((current) => ({ ...current, duplicate: event.target.checked }))} /> 작품 중복 분석 재실행</label>
+                    <label><input type="checkbox" checked={rebuildOptions.internal} onChange={(event) => setRebuildOptions((current) => ({ ...current, internal: event.target.checked }))} /> 내부 중복 분석 재실행</label>
+                    <label><input type="checkbox" checked={rebuildOptions.autoFind} onChange={(event) => setRebuildOptions((current) => ({ ...current, autoFind: event.target.checked }))} /> Auto Find 결과 갱신</label>
+                    <button type="button" className="text-button warning-button" disabled={maintenanceBusy !== null} onClick={() => void runMaintenance({ kind: "factoryReset", confirmation: "RESET_ALL_APP_DATA" })}>{maintenanceBusy === "factoryReset" ? "초기화 준비 중" : "앱 데이터 완전 초기화"}</button>
+                    <p>첫 실행 상태로 돌아갑니다. 외부 다운로드 원본 파일과 quarantine/recovery 파일은 유지됩니다.</p>
+                  </div>
                 </div>
               </>
           </section>

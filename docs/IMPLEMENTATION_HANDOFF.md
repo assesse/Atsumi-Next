@@ -22,7 +22,7 @@
 | detail·Related | 완료 | typed galleryinfo detail·Related 5개와 source-page identity를 저장 fixture 통합 테스트로 검증 |
 | thumbnail | 완료 | 전역 coordinator와 live resolver·viewport 구독·400ms orphan grace·120초/256 frontend retention·우선순위·실제 취소·memory/negative cache 검증 완료 |
 | download | 완료 | 실제 source page를 `.part`→bounded WebP/JPEG/PNG/experimental AVIF decode→WebP→SHA-256→atomic rename→manifest 순서로 저장하고 검증 뒤에만 완료; JXL은 typed unsupported |
-| resume·reconcile | 완료 | verified page checkpoint resume, startup/manual DB·manifest·파일 검사와 quarantine saga 복구 검증 |
+| resume·reconcile | 완료 | startup은 pending quarantine·interrupted job만 빠르게 복구하고, 전체 DB·manifest·파일 검사는 명시 `app_reconcile`에서만 수행 |
 | file open | 완료 | verified first non-quarantined page를 root 내부 canonical path로 확인하고 Windows ShellExecute로 실행 |
 | Auto Find | 완료 | SQLite favorite/history/run/candidate/exclusion/cutoff/truncation, verified-owned `source`/`policyVersion`, 실제 source supervisor, 5개 namespace projection, 명시적 갱신·취소·복원·local filter/group·batch queue 검증 완료 |
 | gallery duplicate | 완료 | verified artifact HashProfile evidence, full scan/cancel/recovery, 실제 source-page Review와 CAS decision history 검증 완료 |
@@ -122,14 +122,20 @@
 - schema v17 `auto_find_history_cutoff_evidence`: 설정/run history mode, verified owned artist, 작가별 cutoff evidence와 truncation을 추가했다. 현재 literal은 `source=verified_owned_artifact`, `policyVersion=1`; cutoff 뒤 50,000 candidate limit이며 과거 250-page 정책은 폐기됐다.
 - Windows download root 표시 경계는 well-formed `\\?\D:\...`와 `\\?\UNC\...`만 일반 drive/UNC로 바꾼다. 폴더 선택 뒤 canonical root를 설정에 그대로 저장하던 유입 경로를 차단했으며, 기존 artifact `root_snapshot`과 파일은 그대로 둔다. 폴더 template 미리보기는 실제 Rust planner command를 사용한다.
 - schema v18 `gallery_source_revision_identity`: remote source fingerprint를 문자열 identity로 저장하고 signed SQLite 내부 revision과 분리했다. gallery 4113714/4132312에서 발생한 unsigned source revision 변환 오류를 `u64::MAX` 회귀 test로 차단한다.
+- schema v19 `related_gallery_preview_preference`: Floating Detail의 Related galleries cover 폭(180~320px, 기본 240)을 Explore·Downloads card preview와 독립적으로 저장한다. 상세와 Related의 일반 태그는 동일한 favorite → Female → Male → neutral 순서를 쓰며 Related에는 series/character chip을 표시하지 않는다.
 - card layout은 일곱 preview preset(160/190/220/250/280/320/360, 기본 220), preset별 typography·2/2/3/4/5/6/7 tag rows, grid별 시각 행 최대 intrinsic cover 높이를 공유한다. 독립 grid와 불완전 마지막 행은 서로 영향을 주지 않는다.
-- 데이터 호환성: DB schema는 18이다. v15~v18은 additive하고 기존 `relative_directory`를 다시 계산하지 않으며 manifest schema 1과 HashProfile 1을 재해석하지 않는다.
+- 데이터 호환성: DB schema는 19이다. v15~v19은 additive하고 기존 `relative_directory`를 다시 계산하지 않으며 manifest schema 1과 HashProfile 1을 재해석하지 않는다.
 
 ## 4. Contracts and versions
 
+### Maintenance actions
+
+- Settings의 저장 데이터 관리는 `빠른 복구`, `라이브러리 검사 및 재구축`, `앱 데이터 완전 초기화` 세 action만 사용한다. Cache/history/user decision을 혼합 삭제하는 기존 exploration reset은 이 UI 경로에서 사용하지 않는다.
+- Factory reset은 실행 중 SQLite를 삭제하지 않는다. worker shutdown 후 marker를 기록하고 프로세스를 종료한 다음 startup이 DB/WAL/SHM을 recovery backup으로 이동한다. 외부 원본, `.atsumi-quarantine`, `.atsumi-page-quarantine`, `.atsumi-recovery`는 보존한다.
+
 - 앱/package/Tauri version: `0.1.0`
 - Rust MSRV: `1.88.0` (working tree)
-- DB schema version: 18
+- DB schema version: 19
 - migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`, `favorites_search_history_and_auto_find`, `auto_find_visible_metadata`, `artifact_duplicate_evidence_and_decisions`, `internal_scene_review_and_page_quarantine`, `classic_read_only_import_and_rollback`(역사적 DDL만 보존), `artifact_folder_template_and_immutable_path`, `download_candidate_diagnostics_and_artifact_root_snapshot`, `auto_find_history_cutoff_evidence`, `gallery_source_revision_identity`
 - manifest schema version: 1
 - HashProfile version: 1 / algorithm version 1 (artifact SHA-256 + 작품 중복 64-bit coarse dHash·pHash, 1024-bit detail dHash와 content gate)

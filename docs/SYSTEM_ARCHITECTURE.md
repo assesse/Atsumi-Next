@@ -134,7 +134,7 @@ type JobEvent = {
 
 ## 데이터 소유권
 
-- SQLite(schema v18): 설정, source revision identity가 분리된 Gallery snapshot, 다운로드, immutable artifact 위치, job/page attempt 진단, 판정, 제외, 즐겨찾기, 검색 이력과 Auto Find run/후보/cutoff/truncation의 canonical source
+- SQLite(schema v19): 설정(독립 Related galleries preview width 포함), source revision identity가 분리된 Gallery snapshot, 다운로드, immutable artifact 위치, job/page attempt 진단, 판정, 제외, 즐겨찾기, 검색 이력과 Auto Find run/후보/cutoff/truncation의 canonical source
 - 실제 폴더: 다운로드 artifact
 - 폴더 manifest: 이식성과 복구를 위한 파생 metadata
 - thumbnail cache: 언제든 재생성 가능한 cache
@@ -204,7 +204,7 @@ type JobEvent = {
 - Windows 설정 projection은 well-formed verbatim drive/UNC prefix를 사람이 읽는 형식으로 바꾸지만 artifact store는 작업마다 root를 canonicalize해 containment를 검증한다. `folder_name_template_preview`도 production planner를 그대로 사용하므로 UI와 실제 예약 규칙이 갈라지지 않는다.
 - manifest schema 1은 gallery snapshot, source page mapping, relative path, byte length, SHA-256, storage format, exclusion/quarantine, 완료 시각과 HashProfile version을 가진다.
 - 모든 page 파일과 DB checkpoint를 다시 검증하고 manifest temp write/sync/atomic replace를 마친 뒤에만 DB artifact/job/entry를 `completed`로 바꾼다.
-- startup/manual reconcile은 pending quarantine saga를 먼저 마무리하고, 완료 artifact의 파일·hash·manifest를 검사한 뒤 interrupted job을 verified checkpoint부터 재개한다.
+- startup은 pending quarantine saga와 interrupted job만 복구한다. 완료 artifact의 파일·hash·manifest 전체 검사는 사용자 명시 `app_reconcile`에서만 수행하므로 완료 앨범 수가 창 표시 시간을 늘리지 않는다.
 
 ## 해시와 중복
 

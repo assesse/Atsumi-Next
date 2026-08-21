@@ -37,7 +37,7 @@
 
 - v15/v16/v17/v18은 additive migration이지만 DB schema downgrade는 지원하지 않는다. 오래된 binary가 v18 DB를 열면 `DATABASE_SCHEMA_NEWER`로 쓰기 전에 거부해야 한다.
 - 실제 downgrade가 필요하면 migration 직전 자동 backup을 보존하고, 앱을 종료한 상태에서 해당 backup과 호환 binary를 함께 복원한다. 운영 DB에 수동 `ALTER`/trigger 제거를 적용하지 않는다.
-- 기존 artifact path는 rollback에서도 자동 재명명하지 않는다. artifact/manifest 불일치는 `app_reconcile`과 typed Review로 확인하고 원본과 격리 위치가 모호하면 overwrite/delete하지 않는다.
+- 기존 artifact path는 rollback에서도 자동 재명명하지 않는다. artifact/manifest 불일치는 시작 시 전체 검사하지 않고 사용자 명시 `app_reconcile`과 typed Review에서 확인한다. 원본과 격리 위치가 모호하면 overwrite/delete하지 않는다.
 - 탐색 데이터 초기화는 다운로드·artifact rollback 수단이 아니다. favorites/history/Auto Find 데이터만 제거하며 download DB와 파일은 그대로 둔다.
 
 ## 완료 증거의 경계

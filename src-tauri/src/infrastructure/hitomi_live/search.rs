@@ -57,6 +57,11 @@ impl QueryCache {
         self.order.push_back(id.to_owned());
         Some(value)
     }
+
+    pub(super) fn clear(&mut self) {
+        self.values.clear();
+        self.order.clear();
+    }
 }
 
 struct QuerySnapshot {

@@ -65,6 +65,9 @@ describe("DetailWorkspace page previews", () => {
 
       expect(container.querySelectorAll(".preview-thumb")).toHaveLength(24);
       expect(container.querySelectorAll('[data-thumbnail-kind="source-page"]')).toHaveLength(24);
+      expect(container.querySelector(".preview-grid")).toHaveAttribute("data-preview-columns", "3");
+      expect(container.querySelector(".preview-grid")).toHaveAttribute("data-preview-orientation", "mixed");
+      expect(container.querySelector(".detail-cover")).toHaveAttribute("data-thumbnail-kind", "gallery-cover");
 
       await act(async () => {
         container.querySelector<HTMLButtonElement>(".preview-thumb")?.click();
@@ -99,7 +102,46 @@ describe("DetailWorkspace page previews", () => {
     }
   });
 
-  it("keeps series and character favorites consistent in detail and related metadata", async () => {
+  it("locks a landscape preview grid for the active detail tab", async () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
+    const gallery: Gallery = { ...mockGalleries[0]!, pages: 8 };
+    const client = new ThumbnailClient({
+      resolve: () => ({ kind: "image" as const, url: "https://images.example.test/landscape.jpg", width: 1600, height: 900 }),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(
+        <DetailWorkspace
+          tabs={[gallery.id]}
+          activeId={gallery.id}
+          minimized={false}
+          galleries={new Map([[gallery.id, gallery]])}
+          favoriteMetadata={new Set()}
+          thumbnailClient={client}
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          onCloseAll={vi.fn()}
+          onMinimize={vi.fn()}
+          onRestore={vi.fn()}
+          onOpenRelated={vi.fn()}
+          onQueue={vi.fn()}
+          onMetadataSearch={vi.fn()}
+          onMetadataFavorite={vi.fn()}
+        />,
+      ));
+      expect(container.querySelector(".preview-grid")).toHaveAttribute("data-preview-columns", "2");
+      expect(container.querySelector(".preview-grid")).toHaveAttribute("data-preview-orientation", "landscape");
+      expect(container.querySelector(".preview-thumb .gallery-thumbnail")).toHaveStyle({ aspectRatio: "1600 / 900" });
+    } finally {
+      await act(async () => root.unmount());
+      client.dispose();
+      container.remove();
+    }
+  });
+
+  it("uses the card tag order in detail and keeps series and characters out of related galleries", async () => {
     vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
     const parent: Gallery = { ...mockGalleries[0]!, relatedIds: [mockGalleries[6]!.id] };
     const related = mockGalleries[6]!;
@@ -134,17 +176,19 @@ describe("DetailWorkspace page previews", () => {
       ));
 
       const mainSeries = container.querySelector<HTMLButtonElement>('[title^="rain archives"]');
-      const relatedSeries = container.querySelector<HTMLButtonElement>('[title^="시리즈 · rain archives"]');
       const mainCharacter = container.querySelector<HTMLButtonElement>('[title^="mira lane ·"]');
-      const relatedCharacter = container.querySelector<HTMLButtonElement>('[title^="캐릭터 · mira lane"]');
       expect(mainSeries).toHaveClass("favorite");
-      expect(relatedSeries).toHaveClass("favorite");
       expect(mainCharacter).toHaveClass("favorite");
-      expect(relatedCharacter).toHaveClass("favorite");
+      expect(container.querySelector(".related-card")?.textContent).not.toContain("rain archives");
+      expect(container.querySelector(".related-card")?.textContent).not.toContain("mira lane");
+
+      const relatedTags = [...container.querySelectorAll<HTMLButtonElement>(".related-card .tag")]
+        .map((chip) => chip.textContent?.replace(/[★FM]/g, "").trim());
+      expect(relatedTags).toEqual(["coat", "suit", "rain", "drama"]);
 
       await act(async () => {
         mainSeries?.click();
-        relatedCharacter?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+        mainCharacter?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
       });
       expect(onMetadataSearch).toHaveBeenCalledWith("series:rain_archives");
       expect(onMetadataFavorite).toHaveBeenCalledWith("character:mira lane");

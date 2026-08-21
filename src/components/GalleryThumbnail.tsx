@@ -32,6 +32,12 @@ type GalleryThumbnailProps = Omit<HTMLAttributes<HTMLElement>, "children"> & {
   sizing?: "container" | "intrinsic";
   /** Reserve this ratio before the coordinator returns intrinsic image dimensions. */
   expectedAspectRatio?: { readonly width: number; readonly height: number };
+  /** Receives terminal thumbnail states without creating a second subscription. */
+  onTerminalSnapshot?: (snapshot: {
+    status: "resolved" | "error";
+    width?: number;
+    height?: number;
+  }) => void;
   rootRef?: Ref<HTMLElement>;
   client?: ThumbnailClient;
   children?: ReactNode;
@@ -221,6 +227,7 @@ export function GalleryThumbnail({
   as = "div",
   sizing = "container",
   expectedAspectRatio,
+  onTerminalSnapshot,
   rootRef,
   client: clientOverride,
   className,
@@ -305,6 +312,18 @@ export function GalleryThumbnail({
   const dimensions = intrinsicDimensions(asset, expectedAspectRatio);
   const Element = as;
 
+  useEffect(() => {
+    if (!onTerminalSnapshot || !shouldSubscribe) return;
+    if (snapshot.status === "error") {
+      onTerminalSnapshot({ status: "error" });
+      return;
+    }
+    if (snapshot.status === "resolved") {
+      const resolved = intrinsicDimensions(snapshot.asset, undefined);
+      onTerminalSnapshot({ status: "resolved", width: resolved.width, height: resolved.height });
+    }
+  }, [onTerminalSnapshot, shouldSubscribe, snapshot]);
+
   return (
     <Element
       {...elementProps}
@@ -325,7 +344,7 @@ export function GalleryThumbnail({
       style={{
         position: "relative",
         overflow: "hidden",
-        backgroundColor: "#d8e4e2",
+        backgroundColor: "var(--thumbnail-frame)",
         backgroundImage: "none",
         ...intrinsicStyle,
         ...style,

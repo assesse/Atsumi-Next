@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [switch]$CheckOnly
+  [switch]$CheckOnly,
+  [switch]$Rebuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,61 +38,6 @@ function Add-ProcessLog {
   if (-not [string]::IsNullOrEmpty($content)) {
     (Protect-LogText -Text $content) | Add-Content -LiteralPath $logPath -Encoding UTF8
   }
-}
-
-function Test-ReleaseBuildRequired {
-  if (-not (Test-Path -LiteralPath $releaseExecutable -PathType Leaf)) {
-    return $true
-  }
-
-  $releaseTimestamp = (Get-Item -LiteralPath $releaseExecutable).LastWriteTimeUtc
-  $sourceDirectories = @(
-    "src"
-    "src-tauri\src"
-    "src-tauri\fixtures"
-    "src-tauri\capabilities"
-    "src-tauri\icons"
-    "public"
-  )
-  $sourceFiles = @(
-    "index.html"
-    "package.json"
-    "pnpm-lock.yaml"
-    "pnpm-workspace.yaml"
-    "tsconfig.app.json"
-    "tsconfig.json"
-    "tsconfig.node.json"
-    "vite.config.ts"
-    "src-tauri\build.rs"
-    "src-tauri\Cargo.lock"
-    "src-tauri\Cargo.toml"
-    "src-tauri\tauri.conf.json"
-  )
-
-  foreach ($relativeDirectory in $sourceDirectories) {
-    $directory = Join-Path $projectRoot $relativeDirectory
-    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
-      continue
-    }
-    $newerFile = Get-ChildItem -LiteralPath $directory -File -Recurse |
-      Where-Object { $_.LastWriteTimeUtc -gt $releaseTimestamp } |
-      Select-Object -First 1
-    if ($null -ne $newerFile) {
-      return $true
-    }
-  }
-
-  foreach ($relativeFile in $sourceFiles) {
-    $path = Join-Path $projectRoot $relativeFile
-    if (
-      (Test-Path -LiteralPath $path -PathType Leaf) -and
-      (Get-Item -LiteralPath $path).LastWriteTimeUtc -gt $releaseTimestamp
-    ) {
-      return $true
-    }
-  }
-
-  return $false
 }
 
 if (-not $CheckOnly) {
@@ -146,8 +92,8 @@ try {
     exit 0
   }
 
-  if (Test-ReleaseBuildRequired) {
-    "A source change was detected. Building the desktop application..." |
+  if ($Rebuild) {
+    "An explicit release build was requested. Building the desktop application..." |
       Add-Content -LiteralPath $logPath -Encoding UTF8
 
     $powershellPath = Join-Path $env:SystemRoot `
@@ -200,7 +146,7 @@ try {
   }
 
   if (-not (Test-Path -LiteralPath $releaseExecutable -PathType Leaf)) {
-    "The release executable was not created: src-tauri\target\release\atsumi-next.exe" |
+    "No local release exists. Run build-app.vbs once to create src-tauri\target\release\atsumi-next.exe." |
       Add-Content -LiteralPath $logPath -Encoding UTF8
     exit 1
   }
