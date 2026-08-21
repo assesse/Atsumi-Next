@@ -181,14 +181,13 @@ export function ViewHeader({
         <button
           type="button"
           ref={languageButton}
-          className="icon-button"
+          className={`icon-button${search.languages.length ? " is-active" : ""}`}
           title="언어 필터"
           aria-label="언어 필터"
           aria-expanded={languageOpen}
           onClick={() => setLanguageOpen((open) => !open)}
         >
           <FluentIcon glyph="\uE774" />
-          <span className="icon-dot">{search.languages.length}</span>
         </button>
         {languageOpen ? (
           <div className="popover language-popover">

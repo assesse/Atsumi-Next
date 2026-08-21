@@ -15,6 +15,8 @@ import {
   type DetailPreviewSample,
 } from "./detailPreviewLayout";
 import { sortGalleryTags } from "./galleryCardLayout";
+import { galleryPreviewPreset, galleryPreviewPresetStyle } from "../layout/galleryPreviewPresets";
+import { detailPreviewWindowRange, detailPreviewWindowSize, detailPreviewWindowStart } from "./detailPreviewWindow";
 
 type DetailWorkspaceProps = {
   tabs: GalleryId[];
@@ -22,6 +24,7 @@ type DetailWorkspaceProps = {
   minimized: boolean;
   galleries: ReadonlyMap<GalleryId, Gallery>;
   favoriteMetadata: ReadonlySet<string>;
+  previewWidth?: number;
   relatedPreviewWidth?: number;
   thumbnailClient?: ThumbnailClient;
   onActivate: (id: GalleryId) => void;
@@ -45,8 +48,8 @@ type MetadataBoxProps = {
   onFavorite: (value: string) => void;
 };
 
-const boundedPageCount = (pages: number, maximum: number): number =>
-  Number.isFinite(pages) ? Math.min(maximum, Math.max(0, Math.floor(pages))) : 0;
+const galleryPageCount = (pages: number): number =>
+  Number.isFinite(pages) ? Math.max(0, Math.floor(pages)) : 0;
 
 const metadataSearchToken = (namespace: string, value: string): string =>
   `${namespace}:${value.trim().replace(/\s+/g, "_")}`;
@@ -79,6 +82,7 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
     minimized,
     galleries,
     favoriteMetadata,
+    previewWidth = 220,
     relatedPreviewWidth = 240,
     thumbnailClient,
     onActivate,
@@ -101,9 +105,12 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
   const previewCloseButton = useRef<HTMLButtonElement>(null);
   const previewOpener = useRef<HTMLButtonElement | null>(null);
   const previewClosingInternally = useRef(false);
+  const previewGrid = useRef<HTMLDivElement>(null);
+  const relatedList = useRef<HTMLDivElement>(null);
   const [previewPage, setPreviewPage] = useState<number | null>(null);
   const previewTerminals = useRef(new Map<GalleryId, Map<number, DetailPreviewSample>>());
   const previewLayouts = useRef(new Map<GalleryId, DetailPreviewLayout>());
+  const previewWindows = useRef(new Map<GalleryId, { size: number; start: number }>());
   const [, setPreviewLayoutRevision] = useState(0);
 
   useEffect(() => {
@@ -137,6 +144,9 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
     for (const id of previewLayouts.current.keys()) {
       if (!activeTabs.has(id)) previewLayouts.current.delete(id);
     }
+    for (const id of previewWindows.current.keys()) {
+      if (!activeTabs.has(id)) previewWindows.current.delete(id);
+    }
   }, [tabs]);
 
   useEffect(() => {
@@ -167,28 +177,65 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
   };
 
   const gallery = activeId === null ? undefined : galleries.get(activeId);
-  const previewPageCount = gallery ? boundedPageCount(gallery.pages, 24) : 0;
-  const previewSampleCount = Math.min(previewPageCount, DETAIL_ORIENTATION_SAMPLE_SIZE);
+  const totalPageCount = gallery ? galleryPageCount(gallery.pages) : 0;
+  const existingWindow = gallery ? previewWindows.current.get(gallery.id) : undefined;
+  const previewPageCount = existingWindow?.size ?? Math.min(totalPageCount, 12);
+  const previewWindowStart = existingWindow?.start ?? 1;
+  const previewPages = detailPreviewWindowRange(previewWindowStart, totalPageCount, previewPageCount);
+  const previewSampleCount = Math.min(previewPages.length, DETAIL_ORIENTATION_SAMPLE_SIZE);
   const lockedPreviewLayout = gallery ? previewLayouts.current.get(gallery.id) : undefined;
   const previewLayout = lockedPreviewLayout ?? { columns: 3 as const, orientation: "pending" as const };
 
   const recordPreviewTerminal = (page: number, terminal: DetailPreviewSample) => {
-    if (!gallery || page > previewSampleCount || previewLayouts.current.has(gallery.id)) return;
+    if (!gallery || !previewPages.includes(page) || previewLayouts.current.has(gallery.id)) return;
     const entries = previewTerminals.current.get(gallery.id) ?? new Map<number, DetailPreviewSample>();
     const previous = entries.get(page);
     if (previous?.status === terminal.status && previous?.width === terminal.width && previous?.height === terminal.height) return;
     entries.set(page, terminal);
     previewTerminals.current.set(gallery.id, entries);
     if (entries.size !== previewSampleCount) return;
-    const samples = Array.from({ length: previewSampleCount }, (_, index) => entries.get(index + 1)!);
+    const samples = previewPages.slice(0, previewSampleCount).map((pageNumber) => entries.get(pageNumber)!);
     previewLayouts.current.set(gallery.id, detailPreviewLayout(samples));
+    setPreviewLayoutRevision((revision) => revision + 1);
+  };
+
+  useEffect(() => {
+    if (!gallery) return;
+    const updateWindow = () => {
+      const nextSize = detailPreviewWindowSize({
+        pageCount: totalPageCount,
+        columns: previewLayout.columns,
+        gridWidth: previewGrid.current?.clientWidth ?? 0,
+        relatedHeight: relatedList.current?.getBoundingClientRect().height ?? 0,
+        viewportHeight: detailBody.current?.clientHeight ?? 0,
+        rowGap: 8,
+        thumbnailRowHeight: previewGrid.current?.querySelector<HTMLElement>(".preview-thumb")?.getBoundingClientRect().height,
+      });
+      const current = previewWindows.current.get(gallery.id);
+      const nextStart = detailPreviewWindowStart(current?.start ?? 1, totalPageCount, nextSize);
+      if (current?.size === nextSize && current.start === nextStart) return;
+      previewWindows.current.set(gallery.id, { size: nextSize, start: nextStart });
+      setPreviewLayoutRevision((revision) => revision + 1);
+    };
+    updateWindow();
+    const Observer = globalThis.ResizeObserver;
+    if (!Observer) return;
+    const observer = new Observer(updateWindow);
+    [detailBody.current, previewGrid.current, relatedList.current].forEach((node) => node && observer.observe(node));
+    return () => observer.disconnect();
+  }, [gallery?.id, gallery?.relatedIds?.length, previewLayout.columns, relatedPreviewWidth, totalPageCount]);
+
+  const setPreviewWindowPage = (page: number) => {
+    if (!gallery || !previewPageCount) return;
+    const start = detailPreviewWindowStart(page, totalPageCount, previewPageCount);
+    previewWindows.current.set(gallery.id, { size: previewPageCount, start });
     setPreviewLayoutRevision((revision) => revision + 1);
   };
 
   useEffect(() => {
     const node = previewDialog.current;
     if (!node) return;
-    if (previewPage !== null && (previewPageCount === 0 || previewPage > previewPageCount)) {
+    if (previewPage !== null && (totalPageCount === 0 || previewPage > totalPageCount)) {
       setPreviewPage(null);
       return;
     }
@@ -205,7 +252,21 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
         else workspace.current?.querySelector<HTMLElement>("[role='tab'][aria-selected='true']")?.focus();
       });
     }
-  }, [gallery, previewPage, previewPageCount]);
+  }, [gallery, previewPage, totalPageCount]);
+
+  useEffect(() => {
+    if (previewPage === null || !gallery) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      const next = event.key === "ArrowLeft" ? previewPage - 1 : previewPage + 1;
+      if (next < 1 || next > totalPageCount) return;
+      event.preventDefault();
+      setPreviewWindowPage(next);
+      setPreviewPage(next);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [gallery, previewPage, previewPageCount, totalPageCount]);
 
   if (!tabs.length) return null;
 
@@ -286,35 +347,50 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                   alt={`${gallery.title} 표지`}
                 />
                 <div
+                  ref={previewGrid}
                   className="preview-grid"
                   data-preview-columns={previewLayout.columns}
                   data-preview-orientation={previewLayout.orientation}
                 >
-                  {Array.from({ length: previewPageCount }, (_, index) => (
+                  {previewPages.map((page) => (
                     <button
-                      key={index}
+                      key={page}
                       type="button"
                       className="preview-thumb"
-                      title={`${index + 1}페이지 확대`}
+                      title={`${page}페이지 확대`}
                       onClick={(event) => {
                         previewOpener.current = event.currentTarget;
-                        setPreviewPage(index + 1);
+                        setPreviewPage(page);
                       }}
                     >
                       <GalleryThumbnail
                         as="span"
-                        thumbnailKey={sourcePageThumbnailKey(gallery, index + 1)}
+                        thumbnailKey={sourcePageThumbnailKey(gallery, page)}
                         consumer="detail"
-                        priority={index < DETAIL_ORIENTATION_SAMPLE_SIZE ? "visible" : "prefetch"}
+                        priority={page - previewWindowStart < DETAIL_ORIENTATION_SAMPLE_SIZE ? "visible" : "prefetch"}
                         client={thumbnailClient}
                         sizing="intrinsic"
-                        onTerminalSnapshot={(terminal) => recordPreviewTerminal(index + 1, terminal)}
-                        alt={`${gallery.title} ${index + 1}페이지 미리보기`}
+                        onTerminalSnapshot={(terminal) => recordPreviewTerminal(page, terminal)}
+                        alt={`${gallery.title} ${page}페이지 미리보기`}
                       />
-                      <span>{index + 1}</span>
+                      <span>{page}</span>
                     </button>
                   ))}
                 </div>
+                {totalPageCount > 0 ? (
+                  <nav className="preview-window-nav" aria-label="상세 페이지 탐색">
+                    <button type="button" className="text-button" onClick={() => setPreviewWindowPage(1)} disabled={previewWindowStart === 1}>처음</button>
+                    <button type="button" className="text-button" onClick={() => setPreviewWindowPage(Math.max(1, previewWindowStart - previewPageCount))} disabled={previewWindowStart === 1}>이전 묶음</button>
+                    <span>{previewPages.at(0) ?? 0}–{previewPages.at(-1) ?? 0} / {totalPageCount}</span>
+                    <button type="button" className="text-button" onClick={() => setPreviewWindowPage(previewWindowStart + previewPageCount)} disabled={(previewPages.at(-1) ?? 0) >= totalPageCount}>다음 묶음</button>
+                    <button type="button" className="text-button" onClick={() => setPreviewWindowPage(totalPageCount)} disabled={(previewPages.at(-1) ?? 0) >= totalPageCount}>마지막</button>
+                    <label>페이지 <input aria-label="페이지 번호로 이동" type="number" min="1" max={totalPageCount} defaultValue={previewWindowStart} onKeyDown={(event) => {
+                      if (event.key !== "Enter") return;
+                      const target = event.currentTarget;
+                      setPreviewWindowPage(Math.min(totalPageCount, Math.max(1, Number(target.value) || 1)));
+                    }} /></label>
+                  </nav>
+                ) : null}
               </section>
               <section className="detail-info">
                 <div className="detail-title-row">
@@ -351,7 +427,7 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                     <h3>Related galleries</h3>
                     <span>{Math.min(5, gallery.relatedIds?.length ?? 0)}</span>
                   </div>
-                  <div className="related-list">
+                  <div ref={relatedList} className="related-list">
                     {(gallery.relatedIds ?? [])
                       .flatMap((id) => {
                         const item = galleries.get(id);
@@ -362,10 +438,15 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                         <article
                           key={item.id}
                           className="related-card"
-                          style={{ "--related-preview-width": `${relatedPreviewWidth}px` } as CSSProperties}
-                          title="더블클릭 또는 우클릭으로 상세 열기"
-                          onDoubleClick={() => onOpenRelated(item.id, gallery.id)}
-                          onContextMenu={(event) => {
+                          tabIndex={0}
+                          style={{ ...galleryPreviewPresetStyle(galleryPreviewPreset(previewWidth)), "--related-preview-width": `${relatedPreviewWidth}px` } as CSSProperties}
+                          title="더블클릭 또는 Enter로 상세 열기"
+                          onDoubleClick={(event) => {
+                            if ((event.target as Element).closest("button")) return;
+                            onOpenRelated(item.id, gallery.id);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter" || event.target !== event.currentTarget) return;
                             event.preventDefault();
                             onOpenRelated(item.id, gallery.id);
                           }}
@@ -382,9 +463,9 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                               : undefined}
                             alt={`${item.title} 표지`}
                           />
-                          <div className="related-copy">
-                            <strong>{item.title} | {item.subtitle}</strong>
-                            <div className="related-byline">
+                          <div className="related-copy card-content">
+                            <div className="card-title"><strong>{item.title}</strong>{item.subtitle ? <span className="title-sub">{item.subtitle}</span> : null}</div>
+                            <div className="card-byline">
                               <MetadataChip value={`artist:${item.artist}`} label={item.artist} kind="byline" favorite={item.favorite} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
                               {item.group ? <MetadataChip value={`group:${item.group}`} label={item.group} kind="byline" favorite={favoriteMetadata.has(`group:${item.group}`)} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} /> : null}
                             </div>
@@ -393,20 +474,7 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                                 <MetadataChip key={tag.value} value={tag.value} kind="tag" favorite={tag.favorite} onSearch={onMetadataSearch} onToggleFavorite={onMetadataFavorite} />
                               ))}
                             </div>
-                          </div>
-                          <div className="related-meta">
-                            <button
-                              type="button"
-                              className="related-open-command"
-                              aria-label={`${item.title} 상세 열기`}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                onOpenRelated(item.id, gallery.id);
-                              }}
-                            >
-                              열기
-                            </button>
-                            <span>{item.pages}p</span><span>#{item.id}</span>
+                            <div className="meta-bottom"><span>{item.pages}p</span><span>#{item.id}</span></div>
                           </div>
                         </article>
                       ))}
@@ -455,6 +523,11 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
               client={thumbnailClient}
               alt={`${gallery.title} ${previewPage}페이지 확대 미리보기`}
             />
+            <div className="page-preview-controls">
+              <button type="button" className="text-button" disabled={previewPage <= 1} onClick={() => { const page = previewPage - 1; setPreviewWindowPage(page); setPreviewPage(page); }}>이전</button>
+              <span>{previewPage} / {totalPageCount}</span>
+              <button type="button" className="text-button" disabled={previewPage >= totalPageCount} onClick={() => { const page = previewPage + 1; setPreviewWindowPage(page); setPreviewPage(page); }}>다음</button>
+            </div>
           </div>
         ) : null}
       </dialog>

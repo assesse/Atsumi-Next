@@ -11,7 +11,7 @@ afterEach(() => {
 });
 
 describe("DetailWorkspace page previews", () => {
-  it("requests at most 24 valid source pages and none for a zero-page gallery", async () => {
+  it("renders only the current page window and keeps a zero-page gallery safe", async () => {
     vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
     const previousShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
     const previousClose = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "close");
@@ -63,8 +63,9 @@ describe("DetailWorkspace page previews", () => {
     try {
       await act(async () => render(gallery));
 
-      expect(container.querySelectorAll(".preview-thumb")).toHaveLength(24);
-      expect(container.querySelectorAll('[data-thumbnail-kind="source-page"]')).toHaveLength(24);
+      expect(container.querySelectorAll(".preview-thumb").length).toBeGreaterThan(0);
+      expect(container.querySelectorAll(".preview-thumb").length).toBeLessThan(gallery.pages);
+      expect(container.querySelectorAll('[data-thumbnail-kind="source-page"]')).toHaveLength(container.querySelectorAll(".preview-thumb").length);
       expect(container.querySelector(".preview-grid")).toHaveAttribute("data-preview-columns", "3");
       expect(container.querySelector(".preview-grid")).toHaveAttribute("data-preview-orientation", "mixed");
       expect(container.querySelector(".detail-cover")).toHaveAttribute("data-thumbnail-kind", "gallery-cover");
@@ -74,7 +75,7 @@ describe("DetailWorkspace page previews", () => {
       });
       expect(container.querySelector(".page-preview-dialog")).toHaveAttribute("open");
       expect(container.querySelector("#page-preview-title")).toHaveTextContent("1페이지");
-      expect(container.querySelectorAll('[data-thumbnail-kind="source-page"]')).toHaveLength(25);
+      expect(container.querySelectorAll('[data-thumbnail-kind="source-page"]')).toHaveLength(container.querySelectorAll(".preview-thumb").length + 1);
 
       await act(async () => render({ ...gallery, pages: 0 }));
 
@@ -99,6 +100,33 @@ describe("DetailWorkspace page previews", () => {
       } else {
         Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
       }
+    }
+  });
+
+  it("keeps a 5000-page gallery bounded and navigates to its final window", async () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
+    const gallery: Gallery = { ...mockGalleries[0]!, pages: 5000 };
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing", reason: "test fixture" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(
+        <DetailWorkspace tabs={[gallery.id]} activeId={gallery.id} minimized={false} galleries={new Map([[gallery.id, gallery]])} favoriteMetadata={new Set()} thumbnailClient={client} onActivate={vi.fn()} onClose={vi.fn()} onCloseAll={vi.fn()} onMinimize={vi.fn()} onRestore={vi.fn()} onOpenRelated={vi.fn()} onQueue={vi.fn()} onMetadataSearch={vi.fn()} onMetadataFavorite={vi.fn()} />,
+      ));
+      expect(container.querySelectorAll(".preview-thumb").length).toBeLessThan(20);
+      const pageInput = container.querySelector<HTMLInputElement>('input[aria-label="페이지 번호로 이동"]');
+      if (!pageInput) throw new Error("page navigator missing");
+      await act(async () => {
+        pageInput.value = "5000";
+        pageInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      });
+      expect(container.querySelector(".preview-window-nav")).toHaveTextContent("5000 / 5000");
+      expect(container.querySelectorAll(".preview-thumb").length).toBeLessThan(20);
+    } finally {
+      await act(async () => root.unmount());
+      client.dispose();
+      container.remove();
     }
   });
 
@@ -147,6 +175,7 @@ describe("DetailWorkspace page previews", () => {
     const related = mockGalleries[6]!;
     const onMetadataSearch = vi.fn();
     const onMetadataFavorite = vi.fn();
+    const onOpenRelated = vi.fn();
     const client = new ThumbnailClient({
       resolve: () => ({ kind: "missing", reason: "test fixture" }),
     });
@@ -168,7 +197,7 @@ describe("DetailWorkspace page previews", () => {
           onCloseAll={vi.fn()}
           onMinimize={vi.fn()}
           onRestore={vi.fn()}
-          onOpenRelated={vi.fn()}
+          onOpenRelated={onOpenRelated}
           onQueue={vi.fn()}
           onMetadataSearch={onMetadataSearch}
           onMetadataFavorite={onMetadataFavorite}
@@ -185,13 +214,26 @@ describe("DetailWorkspace page previews", () => {
       const relatedTags = [...container.querySelectorAll<HTMLButtonElement>(".related-card .tag")]
         .map((chip) => chip.textContent?.replace(/[★FM]/g, "").trim());
       expect(relatedTags).toEqual(["coat", "suit", "rain", "drama"]);
+      expect(container.querySelector(".related-open-command")).toBeNull();
+      expect(container.querySelector(".related-card .meta-bottom")).toHaveTextContent(`${related.pages}p`);
+      expect(container.querySelector(".related-card .meta-bottom")).toHaveTextContent(`#${related.id}`);
+      expect(container.querySelector(".related-card")).toHaveAttribute("tabindex", "0");
 
       await act(async () => {
         mainSeries?.click();
         mainCharacter?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+        container.querySelector<HTMLButtonElement>(".related-card .tag")?.click();
+        container.querySelector<HTMLButtonElement>(".related-card .byline")?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
       });
       expect(onMetadataSearch).toHaveBeenCalledWith("series:rain_archives");
       expect(onMetadataFavorite).toHaveBeenCalledWith("character:mira lane");
+      expect(onOpenRelated).not.toHaveBeenCalled();
+      const relatedCard = container.querySelector<HTMLElement>(".related-card");
+      await act(async () => {
+        relatedCard?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+        relatedCard?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      });
+      expect(onOpenRelated).toHaveBeenCalledTimes(2);
     } finally {
       await act(async () => root.unmount());
       client.dispose();

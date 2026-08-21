@@ -1025,8 +1025,11 @@ export default function App() {
   );
 
   const searchMetadata = useCallback((value: string) => {
+    setExploreSearchOverride(null);
     dispatch({ type: "navigate", view: "explore" });
     dispatch({ type: "search.commit", view: "explore", value });
+    setSearchRefresh((refresh) => refresh + 1);
+    if (galleryViewport.current) galleryViewport.current.scrollTop = 0;
   }, []);
 
   const toggleMetadataFavorite = useCallback(async (value: string) => {
@@ -1698,6 +1701,7 @@ export default function App() {
         minimized={ui.detail.minimized}
         galleries={displayGalleries}
         favoriteMetadata={favoriteMetadataForDisplay}
+        previewWidth={previewWidth}
         relatedPreviewWidth={settings.relatedPreviewWidth}
         onActivate={(id) => dispatch({ type: "detail.activate", id })}
         onClose={(id) => dispatch({ type: "detail.close", id })}

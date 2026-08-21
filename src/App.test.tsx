@@ -222,6 +222,31 @@ describe("App Phase 3A backend flow", () => {
     });
     expect(search).toHaveBeenLastCalledWith({ ...replayRequest, languages: ["korean", "english"] });
 
+    const viewport = container.querySelector<HTMLElement>(".gallery-viewport");
+    const metadata = container.querySelector<HTMLButtonElement>(".gallery-card .byline");
+    if (!metadata || !viewport) throw new Error("gallery metadata fixture was not rendered");
+    viewport.scrollTop = 245;
+    const callsBeforeMetadata = search.mock.calls.length;
+    await act(async () => {
+      metadata.click();
+      await settle();
+    });
+    expect(search.mock.calls).toHaveLength(callsBeforeMetadata + 1);
+    expect(search).toHaveBeenLastCalledWith(expect.objectContaining({
+      text: expect.stringMatching(/^artist:/),
+      includeTags: [],
+      excludeTags: [],
+      languages: ["korean", "english"],
+      sort: "popular_week",
+      pageSize: 50,
+    }));
+    expect(viewport.scrollTop).toBe(0);
+    await act(async () => {
+      metadata.click();
+      await settle();
+    });
+    expect(search.mock.calls).toHaveLength(callsBeforeMetadata + 2);
+
     const callsAfterReplay = search.mock.calls.length;
     const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
     await act(async () => {
