@@ -35,7 +35,13 @@ export function detailPreviewWindowSize(metrics: DetailPreviewWindowMetrics): nu
   const rowHeight = cellWidth / expectedAspectRatio;
   const targetHeight = finitePositive(metrics.relatedHeight, finitePositive(metrics.viewportHeight, 480) * 0.48);
   const rows = Math.max(1, Math.round((targetHeight + gap) / (rowHeight + gap)));
-  return Math.min(pageCount, Math.max(columns, rows * columns));
+  const calculatedSize = Math.max(columns, rows * columns);
+  // Detail pages use remote source-page media. A very tall Related column must
+  // not make opening a small album subscribe every page at once. Retain the
+  // responsive calculation for large albums, but always leave a second window
+  // for an album that has more pages than a single preview row.
+  const initialWindowLimit = Math.max(columns, Math.ceil(pageCount / 2));
+  return Math.min(pageCount, initialWindowLimit, calculatedSize);
 }
 
 export function detailPreviewWindowStart(page: number, pageCount: number, windowSize: number): number {

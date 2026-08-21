@@ -14,15 +14,15 @@ use image::{GenericImageView, ImageFormat, ImageReader, Limits};
 use crate::{
     application::{
         DownloadGallerySnapshot, DownloadPagePayload, DownloadSourceImageFormat,
-        DownloadSourcePage, DownloadSourcePort, RepositoryError,
+        DownloadSourcePage, DownloadSourcePort, RepositoryError, TagCatalogSource,
     },
-    domain::{Gallery, GalleryId, GalleryMetadata, SourcePageNumber},
+    domain::{Gallery, GalleryId, GalleryMetadata, SourcePageNumber, TagCatalogEntry},
     source::{
         hitomi::{
-            download_full_candidates, galleryinfo_script_url, gg_script_url,
-            parse_galleryinfo_script, parse_gg_routing, parse_nozomi_ids,
-            webp_thumbnail_candidates, GgRoutingTable, HitomiGalleryMetadata, HitomiImageCandidate,
-            HitomiImageFormat, ThumbnailSize, HITOMI_METADATA_ORIGIN,
+            all_tags_urls, download_full_candidates, galleryinfo_script_url, gg_script_url,
+            merge_catalog, parse_all_tags_page, parse_galleryinfo_script, parse_gg_routing,
+            parse_nozomi_ids, webp_thumbnail_candidates, GgRoutingTable, HitomiGalleryMetadata,
+            HitomiImageCandidate, HitomiImageFormat, ThumbnailSize, HITOMI_METADATA_ORIGIN,
         },
         SourceCandidateDiagnostic, SourceContractError, SourceErrorCode,
     },
@@ -42,6 +42,7 @@ const SCRIPT_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 const NOZOMI_RESPONSE_LIMIT: usize = 32 * 1024 * 1024;
 const THUMBNAIL_RESPONSE_LIMIT: usize = 12 * 1024 * 1024;
 const FULL_IMAGE_RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
+const ALL_TAGS_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 16_384;
 const MAX_IMAGE_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 
@@ -367,6 +368,26 @@ impl ThumbnailResolver for HitomiLiveAdapter {
     ) -> Result<ResolvedThumbnail, ThumbnailResolveError> {
         self.resolve_thumbnail(key, cancellation, priority)
             .map_err(source_thumbnail_error)
+    }
+}
+
+impl TagCatalogSource for HitomiLiveAdapter {
+    fn tag_catalog_fetch_all(&self) -> Result<Vec<TagCatalogEntry>, RepositoryError> {
+        let mut entries = Vec::new();
+        for url in all_tags_urls() {
+            let payload = self.transport.execute(HttpRequest {
+                url,
+                expected: ExpectedContent::Html,
+                max_bytes: ALL_TAGS_RESPONSE_LIMIT,
+                range: None,
+                priority: HttpPriority::Visible,
+                cancellation: None,
+            })?;
+            let html = String::from_utf8(payload.bytes)
+                .map_err(|_| SourceContractError::invalid_data("all tags", "page is not UTF-8"))?;
+            entries.extend(parse_all_tags_page(&html)?);
+        }
+        Ok(merge_catalog(entries)?)
     }
 }
 

@@ -125,7 +125,8 @@ pub fn run() -> tauri::Result<()> {
             let service = ApplicationService::new(repository.clone())
                 .with_download_repository(repository.clone())
                 .with_search_repository(live_source.clone())
-                .with_automation_repository(repository.clone());
+                .with_automation_repository(repository.clone())
+                .with_tag_catalog(repository.clone(), live_source.clone());
             let recovered_entries = service.download_recover_interrupted()?;
             let automation_repository: Arc<dyn AutomationRepository> = repository.clone();
             let auto_find_settings: Arc<dyn StateRepository> = repository.clone();
@@ -327,6 +328,9 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::favorites_list,
             interface::commands::favorite_set,
             interface::commands::search_history_list,
+            interface::commands::tag_catalog_status,
+            interface::commands::tag_catalog_refresh,
+            interface::commands::tag_suggestions_search,
             interface::commands::auto_find_snapshot,
             interface::commands::auto_find_refresh,
             interface::commands::auto_find_cancel,

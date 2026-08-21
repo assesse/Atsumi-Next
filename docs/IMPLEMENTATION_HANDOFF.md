@@ -123,6 +123,7 @@
 - Windows download root 표시 경계는 well-formed `\\?\D:\...`와 `\\?\UNC\...`만 일반 drive/UNC로 바꾼다. 폴더 선택 뒤 canonical root를 설정에 그대로 저장하던 유입 경로를 차단했으며, 기존 artifact `root_snapshot`과 파일은 그대로 둔다. 폴더 template 미리보기는 실제 Rust planner command를 사용한다.
 - schema v18 `gallery_source_revision_identity`: remote source fingerprint를 문자열 identity로 저장하고 signed SQLite 내부 revision과 분리했다. gallery 4113714/4132312에서 발생한 unsigned source revision 변환 오류를 `u64::MAX` 회귀 test로 차단한다.
 - schema v19 `related_gallery_preview_preference`: Floating Detail의 Related galleries cover 폭(180~320px, 기본 240)을 Explore·Downloads card preview와 독립적으로 저장한다. 상세와 Related의 일반 태그는 동일한 favorite → Female → Male → neutral 순서를 쓰며 Related에는 series/character chip을 표시하지 않는다.
+- schema v20 `tag_catalog`: Explore 자동완성은 Hitomi alltags-123/a-z 27페이지의 tag/female/male catalog를 SQLite에 원자적으로 저장한 뒤 조회한다. refresh 실패는 이전 catalog를 보존한다.
 - card layout은 일곱 preview preset(160/190/220/250/280/320/360, 기본 220), preset별 typography·2/2/3/4/5/6/7 tag rows, grid별 시각 행 최대 intrinsic cover 높이를 공유한다. 독립 grid와 불완전 마지막 행은 서로 영향을 주지 않는다.
 - 데이터 호환성: DB schema는 19이다. v15~v19은 additive하고 기존 `relative_directory`를 다시 계산하지 않으며 manifest schema 1과 HashProfile 1을 재해석하지 않는다.
 

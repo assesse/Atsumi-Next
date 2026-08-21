@@ -10,6 +10,7 @@ use crate::domain::{
     InternalGroupRecord, InternalRemovalPlan, InternalRemovalSelection, InternalScanRun,
     InternalScanState, JobRef, JobState, PageQuarantineRecord, PageQuarantineSaga,
     SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsSnapshot, SourcePageNumber,
+    TagCatalogEntry, TagCatalogStatus, TagSuggestion, TagSuggestionRequest,
     WindowPlacementSnapshot,
 };
 
@@ -97,6 +98,25 @@ pub trait SearchRepository: Send + Sync {
         &self,
         gallery_id: GalleryId,
     ) -> Result<Option<GalleryDetail>, RepositoryError>;
+}
+
+/// A fixed-source catalog. Implementations never accept caller-provided URLs.
+pub trait TagCatalogSource: Send + Sync {
+    fn tag_catalog_fetch_all(&self) -> Result<Vec<TagCatalogEntry>, RepositoryError>;
+}
+
+pub trait TagCatalogRepository: Send + Sync {
+    fn tag_catalog_status(&self) -> Result<TagCatalogStatus, RepositoryError>;
+    fn tag_catalog_record_attempt(&self) -> Result<(), RepositoryError>;
+    fn tag_catalog_replace(
+        &self,
+        entries: &[TagCatalogEntry],
+    ) -> Result<TagCatalogStatus, RepositoryError>;
+    fn tag_catalog_record_failure(&self, code: &str, message: &str) -> Result<(), RepositoryError>;
+    fn tag_suggestions_search(
+        &self,
+        request: &TagSuggestionRequest,
+    ) -> Result<Vec<TagSuggestion>, RepositoryError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

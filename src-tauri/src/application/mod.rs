@@ -27,5 +27,6 @@ pub use ports::{
     AutomationRepository, DownloadMutationOutcome, DownloadQueueAddOutcome, DownloadQueueRecord,
     DownloadRepository, DuplicateRelationProvider, DuplicateRepository,
     InternalDuplicateRepository, InternalPlanPrepareOutcome, SearchRepository, StateRepository,
+    TagCatalogRepository, TagCatalogSource,
 };
 pub use service::{ApplicationService, DownloadQueueLaunch};

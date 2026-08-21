@@ -11,6 +11,7 @@
 | 오래된 검색 취소 | 구현 | reset/query 교체가 `requestId`별 `search_page_cancel`을 호출하며 cancel-before-start와 active 취소를 backend 테스트로 고정했다. 늦은 완료도 현재 query를 덮지 않는다. |
 | 가로 밀도형 앨범 카드 | 구현 | 점수·날짜를 표시하지 않는다. grid별 행 coordinator가 같은 시각 행의 intrinsic cover 최대 높이를 공유하고 본문은 외곽 높이를 늘리지 않는다. 페이지 수·gallery ID와 기존 metadata 종류는 유지한다. |
 | 높이 제한 adaptive 태그 | 구현 | 일곱 preset이 2/2/3/4/5/6/7줄 예산을 정의하고 실제 chip과 자릿수별 `+N` 폭을 함께 측정한다. favorite 우선/Female→Male→중립 stable sort이며 namespace marker와 favorite star를 분리한다. |
+| Explore 태그 자동완성 | 구현 | 수동 최신화한 SQLite tag/female/male catalog만 조회한다. loaded gallery metadata와 synthetic 후보는 사용하지 않으며 artist/group/series/character 자동완성은 범위 밖이다. |
 | 반응형 열·카드 폭 | 구현 | 160/190/220/250/280/320/360px만 허용하고 기본 220px, 1~4열을 사용한다. 원본 비율은 `contain`으로 보존하며 각 grid·불완전 마지막 행은 독립 계산한다. |
 | 중국어 badge | 구현 | 로컬 `cn.svg`와 텍스트 `CN` fallback을 사용하며 런타임 네트워크 의존성이 없다. |
 | 전역 thumbnail coordinator | 구현 | Explore, Downloads, Detail, gallery/internal Review가 하나의 coordinator와 `galleryCover`/`galleryPage`/`artifactPage` key를 공유한다. |

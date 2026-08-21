@@ -9,6 +9,7 @@ mod job;
 mod maintenance;
 mod search;
 mod settings;
+mod tag_catalog;
 mod window_placement;
 
 pub use artifact::{
@@ -59,6 +60,10 @@ pub use settings::{
     download_root_for_display, gallery_preview_preset_widths, is_gallery_preview_width,
     normalize_gallery_preview_width, windows_path_for_display, AutoFindHistoryMode, SettingsPatch,
     SettingsSnapshot,
+};
+pub use tag_catalog::{
+    canonical_tag_token, normalize_tag_name, TagCatalogEntry, TagCatalogStatus, TagNamespace,
+    TagSuggestion, TagSuggestionRequest,
 };
 pub use window_placement::{WindowPlacement, WindowPlacementSnapshot};
 

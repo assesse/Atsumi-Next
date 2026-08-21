@@ -17,7 +17,7 @@ use crate::{
         DownloadMutationOutcome, DownloadPageAttempt, DownloadPageAttemptResult,
         DownloadPipelineRepository, DownloadPrepared, DownloadQueueAddOutcome, DownloadQueueRecord,
         DownloadRepository, DuplicateRepository, QuarantineSaga, QuarantineSagaState,
-        RepositoryError, StateRepository, StoredPage,
+        RepositoryError, StateRepository, StoredPage, TagCatalogRepository,
     },
     domain::{
         ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
@@ -34,7 +34,8 @@ use crate::{
         FavoriteMutationResult, FavoriteNamespace, FavoriteRecord, FixtureDownloadJobStep, Gallery,
         GalleryId, GalleryMetadata, GallerySummary, HashProfile, JobEvent, JobRef, JobState,
         Language, PageArtifact, PageArtifactState, SearchHistoryEntry, SearchRequest, SearchSort,
-        SeriesGroup, SettingsSnapshot, SourcePageNumber, WindowPlacementSnapshot,
+        SeriesGroup, SettingsSnapshot, SourcePageNumber, TagCatalogEntry, TagCatalogStatus,
+        TagNamespace, TagSuggestion, TagSuggestionRequest, WindowPlacementSnapshot,
     },
 };
 
@@ -316,6 +317,99 @@ impl StateRepository for SqliteRepository {
             )
             .map_err(map_sqlite_error)?;
         Ok(changed == 1)
+    }
+}
+
+impl TagCatalogRepository for SqliteRepository {
+    fn tag_catalog_status(&self) -> Result<TagCatalogStatus, RepositoryError> {
+        let connection = self.connection()?;
+        read_tag_catalog_status(&connection)
+    }
+
+    fn tag_catalog_record_attempt(&self) -> Result<(), RepositoryError> {
+        let connection = self.connection()?;
+        connection.execute("UPDATE tag_catalog_state SET last_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_error_code = NULL, last_error_message = NULL WHERE singleton = 1", [])
+            .map_err(map_sqlite_error)?;
+        Ok(())
+    }
+
+    fn tag_catalog_replace(
+        &self,
+        entries: &[TagCatalogEntry],
+    ) -> Result<TagCatalogStatus, RepositoryError> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        transaction
+            .execute("DELETE FROM tag_catalog_entries", [])
+            .map_err(map_sqlite_error)?;
+        let mut neutral = 0u64;
+        let mut female = 0u64;
+        let mut male = 0u64;
+        for entry in entries {
+            match entry.namespace {
+                TagNamespace::Tag => neutral += 1,
+                TagNamespace::Female => female += 1,
+                TagNamespace::Male => male += 1,
+            }
+            transaction.execute(
+                "INSERT INTO tag_catalog_entries (namespace, name, normalized_name, canonical_token, gallery_count, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                params![entry.namespace.as_str(), entry.name, entry.normalized_name, entry.canonical_token, to_sql_integer(entry.gallery_count, "tag gallery count")?],
+            ).map_err(map_sqlite_error)?;
+        }
+        transaction.execute(
+            "UPDATE tag_catalog_state SET revision = revision + 1, entry_count = ?1, neutral_count = ?2, female_count = ?3, male_count = ?4, last_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_success_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_error_code = NULL, last_error_message = NULL WHERE singleton = 1",
+            params![to_sql_integer(entries.len() as u64, "tag entry count")?, to_sql_integer(neutral, "neutral count")?, to_sql_integer(female, "female count")?, to_sql_integer(male, "male count")?],
+        ).map_err(map_sqlite_error)?;
+        let status = read_tag_catalog_status(&transaction)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(status)
+    }
+
+    fn tag_catalog_record_failure(&self, code: &str, message: &str) -> Result<(), RepositoryError> {
+        let connection = self.connection()?;
+        connection.execute("UPDATE tag_catalog_state SET last_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_error_code = ?1, last_error_message = ?2 WHERE singleton = 1", params![code, message]).map_err(map_sqlite_error)?;
+        Ok(())
+    }
+
+    fn tag_suggestions_search(
+        &self,
+        request: &TagSuggestionRequest,
+    ) -> Result<Vec<TagSuggestion>, RepositoryError> {
+        if request.query.chars().count() < 2 || request.limit == 0 {
+            return Ok(Vec::new());
+        }
+        let connection = self.connection()?;
+        let namespace = request.namespace.map(TagNamespace::as_str);
+        let needle = request.query.as_str();
+        let mut statement = connection.prepare(
+            r#"SELECT e.namespace, e.name, e.canonical_token, e.gallery_count,
+                EXISTS(SELECT 1 FROM favorites f WHERE f.namespace = 'tag' AND lower(replace(f.value, '_', ' ')) = lower(CASE e.namespace WHEN 'tag' THEN e.name ELSE e.namespace || ':' || e.name END))
+              FROM tag_catalog_entries e
+              WHERE instr(e.normalized_name, ?1) > 0 AND (?2 IS NULL OR e.namespace = ?2)
+              ORDER BY 5 DESC, e.gallery_count DESC, e.normalized_name COLLATE NOCASE ASC,
+                CASE e.namespace WHEN 'female' THEN 0 WHEN 'male' THEN 1 ELSE 2 END ASC,
+                e.canonical_token COLLATE NOCASE ASC LIMIT ?3"#,
+        ).map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map(
+                params![needle, namespace, i64::from(request.limit)],
+                |row| {
+                    let namespace: String = row.get(0)?;
+                    Ok(TagSuggestion {
+                        namespace: TagNamespace::parse(&namespace)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        name: row.get(1)?,
+                        token: row.get(2)?,
+                        gallery_count: row.get::<_, i64>(3)? as u64,
+                        favorite: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(map_sqlite_error)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(map_sqlite_error)
     }
 }
 
@@ -5235,6 +5329,21 @@ fn stored_page_artifact(row: &Row<'_>) -> rusqlite::Result<StoredPageArtifact> {
         verified_at: row.get(8)?,
         excluded: row.get(9)?,
     })
+}
+
+fn read_tag_catalog_status(connection: &Connection) -> Result<TagCatalogStatus, RepositoryError> {
+    connection.query_row(
+        "SELECT revision, entry_count, neutral_count, female_count, male_count, last_attempt_at, last_success_at, last_error_code, last_error_message FROM tag_catalog_state WHERE singleton = 1",
+        [],
+        |row| Ok(TagCatalogStatus {
+            revision: row.get::<_, i64>(0)? as u64,
+            entry_count: row.get::<_, i64>(1)? as u64,
+            neutral_count: row.get::<_, i64>(2)? as u64,
+            female_count: row.get::<_, i64>(3)? as u64,
+            male_count: row.get::<_, i64>(4)? as u64,
+            last_attempt_at: row.get(5)?, last_success_at: row.get(6)?, last_error_code: row.get(7)?, last_error_message: row.get(8)?,
+        }),
+    ).map_err(map_sqlite_error)
 }
 
 fn read_favorites(connection: &Connection) -> Result<Vec<FavoriteRecord>, RepositoryError> {

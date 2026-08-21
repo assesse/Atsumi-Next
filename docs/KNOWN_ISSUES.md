@@ -2,6 +2,8 @@
 
 2026-08-21, DB schema v18 working tree를 기준으로 작성했다. 이 문서는 구현되지 않은 기능을 완료로 보이게 하지 않고, 자동 검증과 실데이터 검증의 경계를 기록한다.
 
+- 전체 태그 catalog는 수동 최신화 방식이다. Explore 입력 중에는 Hitomi에 요청하지 않으며, 아직 최신화하지 않은 새 설치에서는 tag suggestion이 비어 있을 수 있다.
+
 ## 이미지 형식
 
 - AVIF decode는 `avif-rust 0.0.6`과 `bin-rs 0.0.10`에 정확히 고정된 순수 Rust 경로다. dimension 16,384, RGBA allocation 256MiB 등 입력 제한과 panic 격리를 적용했지만 experimental이며 대표적인 AVIF 실데이터 corpus 검증은 남아 있다.

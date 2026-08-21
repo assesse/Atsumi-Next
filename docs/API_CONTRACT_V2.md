@@ -1,6 +1,10 @@
 # API Contract V2
 
-현재 실제 runtime과 schema v15~v19 안정화까지 구현된 command와 event 형식을 이 문서의 기준 revision으로 사용한다. DB schema는 19, manifest schema와 HashProfile은 1이다.
+현재 실제 runtime과 schema v15~v20 안정화까지 구현된 command와 event 형식을 이 문서의 기준 revision으로 사용한다. DB schema는 20, manifest schema와 HashProfile은 1이다.
+
+## Tag catalog
+
+`tag_catalog_status`, `tag_catalog_refresh`, `tag_suggestions_search`는 SQLite에 저장된 tag/female/male catalog를 사용한다. 최신화는 고정 allowlist의 Hitomi alltags-123/a-z 27페이지를 순차 처리하며, 입력 중 source network 요청은 만들지 않는다.
 
 ## 공통 규칙
 

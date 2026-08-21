@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+};
 
 use crate::domain::{
     download_root_for_display, plan_artifact_relative_directory, AutoFindExclusionResult,
@@ -6,13 +9,13 @@ use crate::domain::{
     DownloadListRequest, DownloadPage, ExplorationDataResetRequest, ExplorationDataResetResult,
     FavoriteKey, FavoriteMutationResult, FavoriteRecord, FixtureDownloadJobStep, Gallery,
     GalleryDetail, GalleryId, GalleryMetadata, GalleryPage, JobRef, SearchHistoryEntry,
-    SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot, ValidationError,
-    WindowPlacement, WindowPlacementSnapshot,
+    SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot, TagCatalogStatus,
+    TagSuggestion, TagSuggestionRequest, ValidationError, WindowPlacement, WindowPlacementSnapshot,
 };
 
 use super::{
     ApplicationError, AutomationRepository, DownloadMutationOutcome, DownloadQueueAddOutcome,
-    DownloadRepository, SearchRepository, StateRepository,
+    DownloadRepository, SearchRepository, StateRepository, TagCatalogRepository, TagCatalogSource,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +29,9 @@ pub struct ApplicationService {
     search_repository: Option<Arc<dyn SearchRepository>>,
     download_repository: Option<Arc<dyn DownloadRepository>>,
     automation_repository: Option<Arc<dyn AutomationRepository>>,
+    tag_catalog_repository: Option<Arc<dyn TagCatalogRepository>>,
+    tag_catalog_source: Option<Arc<dyn TagCatalogSource>>,
+    tag_catalog_refresh_lock: Arc<Mutex<()>>,
 }
 
 impl Clone for ApplicationService {
@@ -35,6 +41,9 @@ impl Clone for ApplicationService {
             search_repository: self.search_repository.as_ref().map(Arc::clone),
             download_repository: self.download_repository.as_ref().map(Arc::clone),
             automation_repository: self.automation_repository.as_ref().map(Arc::clone),
+            tag_catalog_repository: self.tag_catalog_repository.as_ref().map(Arc::clone),
+            tag_catalog_source: self.tag_catalog_source.as_ref().map(Arc::clone),
+            tag_catalog_refresh_lock: Arc::clone(&self.tag_catalog_refresh_lock),
         }
     }
 }
@@ -46,6 +55,9 @@ impl ApplicationService {
             search_repository: None,
             download_repository: None,
             automation_repository: None,
+            tag_catalog_repository: None,
+            tag_catalog_source: None,
+            tag_catalog_refresh_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -67,6 +79,16 @@ impl ApplicationService {
         automation_repository: Arc<dyn AutomationRepository>,
     ) -> Self {
         self.automation_repository = Some(automation_repository);
+        self
+    }
+
+    pub fn with_tag_catalog(
+        mut self,
+        repository: Arc<dyn TagCatalogRepository>,
+        source: Arc<dyn TagCatalogSource>,
+    ) -> Self {
+        self.tag_catalog_repository = Some(repository);
+        self.tag_catalog_source = Some(source);
         self
     }
 
@@ -383,6 +405,40 @@ impl ApplicationService {
             .map_err(Into::into)
     }
 
+    pub fn tag_catalog_status(&self) -> Result<TagCatalogStatus, ApplicationError> {
+        Ok(self.tag_catalog_repository()?.tag_catalog_status()?)
+    }
+
+    pub fn tag_suggestions_search(
+        &self,
+        request: TagSuggestionRequest,
+    ) -> Result<Vec<TagSuggestion>, ApplicationError> {
+        let request = request.normalized()?;
+        if request.query.chars().count() < 2 || request.limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .tag_catalog_repository()?
+            .tag_suggestions_search(&request)?)
+    }
+
+    pub fn tag_catalog_refresh(&self) -> Result<TagCatalogStatus, ApplicationError> {
+        let _guard = self
+            .tag_catalog_refresh_lock
+            .try_lock()
+            .map_err(|_| super::RepositoryError::OperationActive("tag catalog refresh".into()))?;
+        let repository = self.tag_catalog_repository()?;
+        repository.tag_catalog_record_attempt()?;
+        match self.tag_catalog_source()?.tag_catalog_fetch_all() {
+            Ok(entries) => repository.tag_catalog_replace(&entries).map_err(Into::into),
+            Err(error) => {
+                let code = error.stable_code();
+                repository.tag_catalog_record_failure(code, "The existing tag catalog was kept")?;
+                Err(error.into())
+            }
+        }
+    }
+
     pub fn auto_find_snapshot(&self) -> Result<AutoFindSnapshot, ApplicationError> {
         self.automation_repository()?
             .auto_find_snapshot()
@@ -442,6 +498,18 @@ impl ApplicationService {
     fn automation_repository(&self) -> Result<&dyn AutomationRepository, ApplicationError> {
         self.automation_repository.as_deref().ok_or_else(|| {
             super::RepositoryError::Other("automation repository is not configured".into()).into()
+        })
+    }
+
+    fn tag_catalog_repository(&self) -> Result<&dyn TagCatalogRepository, ApplicationError> {
+        self.tag_catalog_repository.as_deref().ok_or_else(|| {
+            super::RepositoryError::Other("tag catalog repository is not configured".into()).into()
+        })
+    }
+
+    fn tag_catalog_source(&self) -> Result<&dyn TagCatalogSource, ApplicationError> {
+        self.tag_catalog_source.as_deref().ok_or_else(|| {
+            super::RepositoryError::Other("tag catalog source is not configured".into()).into()
         })
     }
 }

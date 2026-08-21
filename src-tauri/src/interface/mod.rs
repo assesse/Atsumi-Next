@@ -13,6 +13,7 @@ pub use commands::{
     internal_duplicate_snapshot, internal_removal_apply, internal_removal_plan,
     internal_removal_undo, maintenance_execute, maintenance_preview, search_history_list,
     search_page_cancel, search_page_get, search_submit, settings_get, settings_update,
-    thumbnail_cache_clear, thumbnail_cancel, thumbnail_invalidate, thumbnail_reprioritize,
-    thumbnail_request, thumbnail_stats, window_placement_get, window_placement_update, AppState,
+    tag_catalog_refresh, tag_catalog_status, tag_suggestions_search, thumbnail_cache_clear,
+    thumbnail_cancel, thumbnail_invalidate, thumbnail_reprioritize, thumbnail_request,
+    thumbnail_stats, window_placement_get, window_placement_update, AppState,
 };

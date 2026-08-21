@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { Language, SearchUi, ViewId } from "../core/types";
 import { languageOrder, languagePresentation } from "../data/languages";
-import { filterSearchSuggestions, type SearchSuggestion } from "../search/searchSuggestions";
-import { replaceActiveSearchToken } from "../search/searchTokens";
+import type { TagCatalogStatus } from "../api/contracts";
+import type { SearchSuggestion } from "../search/searchSuggestions";
+import { activeSearchToken, replaceActiveSearchToken, searchTokenKind } from "../search/searchTokens";
 import { FluentIcon } from "./FluentIcon";
 
 export type { SearchSuggestion } from "../search/searchSuggestions";
@@ -27,7 +28,11 @@ type ViewHeaderProps = {
   onSelectSuggestion: (suggestion: SearchSuggestion, value: string) => void;
   onCompleteSuggestion: (value: string) => void;
   onLanguages: (languages: Language[]) => void;
-  onRefresh: () => void;
+  onTagCatalogRefresh: () => void;
+  tagCatalogStatus?: TagCatalogStatus;
+  tagCatalogRefreshing: boolean;
+  tagCatalogRevision?: number;
+  onTagSuggestionQuery: (query: string, namespace?: "tag" | "female" | "male") => void;
   onActivity: () => void;
   onSettings: () => void;
 };
@@ -44,7 +49,11 @@ export function ViewHeader({
   onSelectSuggestion,
   onCompleteSuggestion,
   onLanguages,
-  onRefresh,
+  onTagCatalogRefresh,
+  tagCatalogStatus,
+  tagCatalogRefreshing,
+  tagCatalogRevision,
+  onTagSuggestionQuery,
   onActivity,
   onSettings,
 }: ViewHeaderProps) {
@@ -54,9 +63,7 @@ export function ViewHeader({
   const composing = useRef(false);
   const [languageOpen, setLanguageOpen] = useState(false);
   const [selection, setSelection] = useState({ start: 0, end: 0 });
-  const visibleSuggestions = useMemo(() => {
-    return filterSearchSuggestions(suggestions, search.draft, selection.start, selection.end);
-  }, [search.draft, selection.end, selection.start, suggestions]);
+  const visibleSuggestions = suggestions;
 
   useEffect(() => {
     if (search.activeSuggestion !== null && search.activeSuggestion >= visibleSuggestions.length) {
@@ -87,6 +94,18 @@ export function ViewHeader({
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [languageOpen, onSuggestions, search.suggestionsOpen]);
+
+  useEffect(() => {
+    if (view !== "explore" || composing.current || !search.suggestionsOpen) return;
+    const raw = activeSearchToken(search.draft, selection.start, selection.end).value.replace(/^-/, "");
+    const kind = searchTokenKind(raw);
+    if (kind && !["tag", "female", "male"].includes(kind)) { onTagSuggestionQuery("", undefined); return; }
+    const value = (kind ? raw.slice(raw.indexOf(":") + 1) : raw).trim();
+    if (value.replace(/[\s_]/g, "").length < 2) { onTagSuggestionQuery("", undefined); return; }
+    const namespace = kind === "tag" || kind === "female" || kind === "male" ? kind : undefined;
+    const timer = window.setTimeout(() => onTagSuggestionQuery(value, namespace), 100);
+    return () => window.clearTimeout(timer);
+  }, [onTagSuggestionQuery, search.draft, search.suggestionsOpen, selection.end, selection.start, tagCatalogRevision, view]);
 
   const complete = (item: SearchSuggestion, submitNow: boolean) => {
     const caretStart = input.current?.selectionStart ?? selection.start;
@@ -242,8 +261,9 @@ export function ViewHeader({
           </div>
         ) : null}
       </div>
-      <button type="button" className="icon-button" title="현재 화면 새로고침" aria-label="현재 화면 새로고침" onClick={onRefresh}>
-        <FluentIcon glyph="\uE72C" />
+      <button type="button" className="icon-button" title={tagCatalogStatus?.entryCount ? `모든 태그 최신화 · ${tagCatalogStatus.entryCount.toLocaleString()}개` : "모든 태그 최신화 · 태그 데이터 없음"} aria-label="모든 태그 최신화" disabled={tagCatalogRefreshing} onClick={onTagCatalogRefresh}>
+        <FluentIcon glyph={tagCatalogRefreshing ? "\uE895" : "\uE72C"} />
+        {!tagCatalogStatus?.entryCount ? <span className="catalog-warning" aria-hidden="true">!</span> : null}
       </button>
       <button
         type="button"

@@ -230,7 +230,11 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
     const Observer = globalThis.ResizeObserver;
     if (!Observer) return;
     const observer = new Observer(updateWindow);
-    [workspace.current, detailMedia.current, relatedList.current].forEach((node) => node && observer.observe(node));
+    // detailMedia contains the preview grid itself. Observing it feeds a new
+    // window size back from the thumbnails we just rendered, which can keep
+    // resizing the detail and eventually subscribe an entire album at once.
+    // Workspace width and the Related list are stable outer metrics instead.
+    [workspace.current, relatedList.current].forEach((node) => node && observer.observe(node));
     return () => observer.disconnect();
   }, [gallery?.id, gallery?.relatedIds?.length, previewLayout.columns, relatedPreviewWidth, totalPageCount]);
 

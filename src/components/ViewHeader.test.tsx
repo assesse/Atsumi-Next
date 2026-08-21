@@ -22,7 +22,11 @@ describe("ViewHeader language filter", () => {
           onSelectSuggestion={vi.fn()}
           onCompleteSuggestion={vi.fn()}
           onLanguages={vi.fn()}
-          onRefresh={vi.fn()}
+          onTagCatalogRefresh={vi.fn()}
+          tagCatalogStatus={{ revision: 0, entryCount: 0, neutralCount: 0, femaleCount: 0, maleCount: 0 }}
+          tagCatalogRefreshing={false}
+          tagCatalogRevision={0}
+          onTagSuggestionQuery={vi.fn()}
           onActivity={vi.fn()}
           onSettings={vi.fn()}
         />,
@@ -45,7 +49,7 @@ describe("ViewHeader language filter", () => {
     const suggestion = { type: "TAG" as const, token: "tag:full_color", label: "full color", extra: "태그" };
     try {
       await act(async () => root.render(
-        <ViewHeader view="explore" search={{ draft: "artist:mizuno tag:full", committed: "", languages: [], suggestionsOpen: true, activeSuggestion: 0 }} suggestions={[suggestion]} activityCount={0} activityOpen={false} onDraft={vi.fn()} onSuggestions={vi.fn()} onCommit={vi.fn()} onSelectSuggestion={onSelectSuggestion} onCompleteSuggestion={onCompleteSuggestion} onLanguages={vi.fn()} onRefresh={vi.fn()} onActivity={vi.fn()} onSettings={vi.fn()} />,
+        <ViewHeader view="explore" search={{ draft: "artist:mizuno tag:full", committed: "", languages: [], suggestionsOpen: true, activeSuggestion: 0 }} suggestions={[suggestion]} activityCount={0} activityOpen={false} onDraft={vi.fn()} onSuggestions={vi.fn()} onCommit={vi.fn()} onSelectSuggestion={onSelectSuggestion} onCompleteSuggestion={onCompleteSuggestion} onLanguages={vi.fn()} onTagCatalogRefresh={vi.fn()} tagCatalogStatus={{ revision: 1, entryCount: 7, neutralCount: 1, femaleCount: 5, maleCount: 1 }} tagCatalogRefreshing={false} tagCatalogRevision={1} onTagSuggestionQuery={vi.fn()} onActivity={vi.fn()} onSettings={vi.fn()} />,
       ));
       const input = container.querySelector<HTMLInputElement>('input[aria-label="검색"]');
       if (!input) throw new Error("search input missing");

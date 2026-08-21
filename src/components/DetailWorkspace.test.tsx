@@ -5,12 +5,16 @@ import { type Gallery } from "../core/types";
 import { mockGalleries } from "../data/mockGalleries";
 import { ThumbnailClient } from "../thumbnail";
 import { DetailWorkspace } from "./DetailWorkspace";
+import { detailPreviewWindowSize } from "./detailPreviewWindow";
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe("DetailWorkspace page previews", () => {
+  it("keeps a second source-page window when Related covers make the measured column tall", () => {
+    expect(detailPreviewWindowSize({ pageCount: 18, columns: 3, gridWidth: 600, relatedHeight: 10_000, viewportHeight: 800, rowGap: 8, layout: { orientation: "portrait" } })).toBe(9);
+  });
   it("renders only the current page window and keeps a zero-page gallery safe", async () => {
     vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
     const previousShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");

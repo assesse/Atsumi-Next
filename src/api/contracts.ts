@@ -203,6 +203,21 @@ export type SearchRequest = {
   pageSize: number;
 };
 
+export type TagNamespace = "tag" | "female" | "male";
+export type TagCatalogStatus = {
+  revision: number;
+  entryCount: number;
+  neutralCount: number;
+  femaleCount: number;
+  maleCount: number;
+  lastAttemptAt?: string;
+  lastSuccessAt?: string;
+  lastErrorCode?: string;
+  lastErrorMessage?: string;
+};
+export type TagSuggestionRequest = { query: string; namespace?: TagNamespace; limit: number };
+export type TagSuggestion = { namespace: TagNamespace; name: string; token: string; galleryCount: number; favorite: boolean };
+
 export type GallerySummary = {
   id: GalleryId;
   title: string;

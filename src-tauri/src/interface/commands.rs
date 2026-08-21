@@ -21,8 +21,9 @@ use crate::{
         InternalRemovalApplyRequest, InternalRemovalPlan, InternalRemovalPlanRequest,
         InternalRemovalResult, InternalRemovalUndoRequest, InternalScanRun, JobRef,
         MaintenanceAction, MaintenancePreview, MaintenanceResult, SearchHistoryEntry,
-        SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot, ValidationError,
-        WindowPlacement, WindowPlacementSnapshot,
+        SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot, TagCatalogStatus,
+        TagSuggestion, TagSuggestionRequest, ValidationError, WindowPlacement,
+        WindowPlacementSnapshot,
     },
     infrastructure::HitomiLiveAdapter,
     thumbnail::{
@@ -190,6 +191,37 @@ pub async fn search_history_list(
     limit: u32,
 ) -> Result<ApiResult<Vec<SearchHistoryEntry>>, ApiError> {
     Ok(state.service.search_history_list(limit).into())
+}
+
+#[tauri::command]
+pub async fn tag_catalog_status(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<TagCatalogStatus>, ApiError> {
+    let service = state.service.clone();
+    Ok(run_application_blocking("tag_catalog_status", move || service.tag_catalog_status()).await)
+}
+
+#[tauri::command]
+pub async fn tag_catalog_refresh(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<TagCatalogStatus>, ApiError> {
+    let service = state.service.clone();
+    Ok(
+        run_application_blocking("tag_catalog_refresh", move || service.tag_catalog_refresh())
+            .await,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn tag_suggestions_search(
+    state: State<'_, AppState>,
+    request: TagSuggestionRequest,
+) -> Result<ApiResult<Vec<TagSuggestion>>, ApiError> {
+    let service = state.service.clone();
+    Ok(run_application_blocking("tag_suggestions_search", move || {
+        service.tag_suggestions_search(request)
+    })
+    .await)
 }
 
 #[tauri::command]

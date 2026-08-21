@@ -4,7 +4,7 @@
 
 새 버전의 영속 데이터 기준은 SQLite 하나로 통합한다. 파일 시스템은 artifact의 실제 존재를 증명하며, DB와 불일치하면 reconciliation job이 해결한다.
 
-## 현재 구현 schema (v19)
+## 현재 구현 schema (v20)
 
 | 테이블 | 책임 |
 |---|---|
@@ -20,6 +20,7 @@
 | `download_page_attempts` | job attempt 안의 source page/candidate 형식·HTTP/content-type·retryability 진단 |
 | `quarantine_records` | 원본·격리 상대 경로와 crash-safe move/restore saga |
 | `favorites` | 작가·그룹·시리즈·캐릭터·태그의 정규화 key와 revision |
+| `tag_catalog_entries`·`tag_catalog_state` | 수동 최신화한 Hitomi tag/female/male catalog와 attempt/success 상태. 전체 교체는 단일 transaction이라 실패 시 이전 catalog를 유지한다. |
 | `search_history` | 성공한 명시적 검색의 전체 정규화 요청 fingerprint, 사용 횟수와 최근 시각 |
 | `auto_find_runs` | 명시적 작가 갱신의 상태·revision·진행률·안전 오류 |
 | `auto_find_candidates` | run별 `GallerySummary` snapshot(시리즈·캐릭터 포함)과 일치한 즐겨찾기 key |

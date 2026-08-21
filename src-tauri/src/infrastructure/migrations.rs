@@ -1254,6 +1254,37 @@ pub const MIGRATIONS: &[Migration] = &[
                 CHECK (related_preview_width IN (180, 200, 220, 240, 260, 280, 300, 320));
         "#,
     },
+    Migration {
+        version: 20,
+        name: "tag_catalog",
+        sql: r#"
+            CREATE TABLE tag_catalog_entries (
+                namespace TEXT NOT NULL CHECK (namespace IN ('tag', 'female', 'male')),
+                name TEXT NOT NULL COLLATE NOCASE CHECK (length(trim(name)) BETWEEN 1 AND 200),
+                normalized_name TEXT NOT NULL COLLATE NOCASE CHECK (length(normalized_name) > 0),
+                canonical_token TEXT NOT NULL COLLATE NOCASE CHECK (length(canonical_token) > 0),
+                gallery_count INTEGER NOT NULL CHECK (gallery_count >= 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                PRIMARY KEY (namespace, name),
+                UNIQUE (canonical_token)
+            ) STRICT;
+            CREATE INDEX tag_catalog_entries_normalized_name ON tag_catalog_entries(normalized_name);
+            CREATE TABLE tag_catalog_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                entry_count INTEGER NOT NULL CHECK (entry_count >= 0),
+                neutral_count INTEGER NOT NULL CHECK (neutral_count >= 0),
+                female_count INTEGER NOT NULL CHECK (female_count >= 0),
+                male_count INTEGER NOT NULL CHECK (male_count >= 0),
+                last_attempt_at TEXT,
+                last_success_at TEXT,
+                last_error_code TEXT,
+                last_error_message TEXT
+            ) STRICT;
+            INSERT INTO tag_catalog_state (singleton, revision, entry_count, neutral_count, female_count, male_count)
+            VALUES (1, 0, 0, 0, 0, 0);
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1539,7 +1570,7 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v14 to v15");
-        assert_eq!(report.applied_versions, vec![15, 16, 17, 18, 19]);
+        assert_eq!(report.applied_versions, vec![15, 16, 17, 18, 19, 20]);
         let historical_import_tables: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'classic_import_%'",
@@ -1635,9 +1666,9 @@ mod tests {
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
         assert_eq!(
             report.applied_versions,
-            vec![12, 13, 14, 15, 16, 17, 18, 19]
+            vec![12, 13, 14, 15, 16, 17, 18, 19, 20]
         );
-        assert_eq!(report.current_version, 19);
+        assert_eq!(report.current_version, 20);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",

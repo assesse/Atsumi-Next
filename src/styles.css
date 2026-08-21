@@ -430,6 +430,21 @@ select:focus-visible {
   background: var(--warning);
 }
 
+.catalog-warning {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  min-width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: var(--warning);
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .menu-anchor {
   position: relative;
 }
@@ -1978,25 +1993,83 @@ dialog::backdrop {
   text-align: right;
 }
 
-.danger-zone {
+.maintenance-panel {
   margin-top: 24px;
   padding: 16px;
-  background: #fafcfc;
   border: 1px solid var(--line);
   border-radius: 6px;
 }
 
-.danger-zone > div {
+.maintenance-panel-header,
+.maintenance-copy {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 12px;
+  gap: 6px;
 }
 
-.danger-zone p {
+.maintenance-panel-header p,
+.maintenance-copy p {
   margin: 6px 0 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+.maintenance-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.maintenance-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  grid-template-areas:
+    "copy action"
+    "options options";
+  align-items: start;
+  gap: 12px 20px;
+  padding: 14px 16px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.maintenance-copy { grid-area: copy; min-width: 0; }
+
+.maintenance-item > button {
+  grid-area: action;
+  align-self: center;
+  width: 100%;
+  min-height: 42px;
+}
+
+.maintenance-options {
+  display: grid;
+  grid-area: options;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px 18px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px 0 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.maintenance-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  color: var(--text-soft);
+}
+
+.maintenance-item--factory-reset {
+  background: color-mix(in srgb, var(--danger-bg) 45%, var(--surface-soft));
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+}
+
+.settings-reset-row > button {
+  width: min(100%, 240px);
+  justify-self: end;
 }
 
 .maintenance-message {
@@ -2883,10 +2956,32 @@ dialog::backdrop {
   background: rgba(0, 0, 0, 0.62);
 }
 
-.empty-state,
-.danger-zone {
+.empty-state {
   background: var(--surface-soft);
   border-color: var(--line-strong);
+}
+
+@media (max-width: 700px) {
+  .maintenance-item {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "copy"
+      "options"
+      "action";
+  }
+
+  .maintenance-options { grid-template-columns: minmax(0, 1fr); }
+
+  .settings-reset-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    padding-block: 14px;
+  }
+
+  .settings-reset-row > button {
+    width: 100%;
+    justify-self: stretch;
+  }
 }
 
 .exit-download-notice > .fluent,

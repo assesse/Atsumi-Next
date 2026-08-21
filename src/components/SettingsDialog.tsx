@@ -238,26 +238,50 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                   <div><strong>요청 시작 간격</strong><span>Classic 실측 안정 기본값 25ms</span></div>
                   <input type="number" min="0" max="5000" value={draft.requestStartIntervalMs} aria-label="요청 시작 간격" onChange={(event) => patch("requestStartIntervalMs", Number(event.target.value))} />
                 </div>
-                <div className="danger-zone">
-                  <strong>저장 데이터 관리</strong>
-                  <p>원본 파일과 사용자 판정을 보존하는 복구·검사 작업과, 외부 원본을 보존하는 앱 데이터 초기화를 제공합니다.</p>
-                  {maintenanceMessage ? <p className="maintenance-message" role="status">{maintenanceMessage}</p> : null}
+                <div className="setting-row settings-reset-row">
                   <div>
-                    <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={restorePreferenceDefaults}>설정 기본값</button>
+                    <strong>설정 초기화</strong>
+                    <span>화면·미리보기·네트워크 설정을 기본값으로 되돌립니다. 저장을 눌러야 적용됩니다.</span>
                   </div>
-                  <div className="maintenance-actions">
-                    <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={() => void runMaintenance({ kind: "quickRepair" })}>{maintenanceBusy === "quickRepair" ? "복구 중" : "빠른 복구"}</button>
-                    <p>다운로드, 검색 또는 미리보기가 멈출 때 cache와 중단된 작업 상태를 정리합니다. 저장된 앨범과 원본 파일은 유지됩니다.</p>
-                    <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={() => void runMaintenance({ kind: "rebuildLibrary", rebuildThumbnailData: rebuildOptions.thumbnail, rebuildDuplicateAnalysis: rebuildOptions.duplicate, rebuildInternalAnalysis: rebuildOptions.internal, rebuildAutoFindResults: rebuildOptions.autoFind })}>{maintenanceBusy === "rebuildLibrary" ? "검사 중" : "라이브러리 검사 및 재구축"}</button>
-                    <p>DB, manifest와 실제 파일을 검사하고 필요한 파생 데이터를 다시 만듭니다. 원본과 사용자 판정은 유지됩니다.</p>
-                    <label><input type="checkbox" checked={rebuildOptions.thumbnail} onChange={(event) => setRebuildOptions((current) => ({ ...current, thumbnail: event.target.checked }))} /> 미리보기 cache 재생성</label>
-                    <label><input type="checkbox" checked={rebuildOptions.duplicate} onChange={(event) => setRebuildOptions((current) => ({ ...current, duplicate: event.target.checked }))} /> 작품 중복 분석 재실행</label>
-                    <label><input type="checkbox" checked={rebuildOptions.internal} onChange={(event) => setRebuildOptions((current) => ({ ...current, internal: event.target.checked }))} /> 내부 중복 분석 재실행</label>
-                    <label><input type="checkbox" checked={rebuildOptions.autoFind} onChange={(event) => setRebuildOptions((current) => ({ ...current, autoFind: event.target.checked }))} /> Auto Find 결과 갱신</label>
-                    <button type="button" className="text-button warning-button" disabled={maintenanceBusy !== null} onClick={() => void runMaintenance({ kind: "factoryReset", confirmation: "RESET_ALL_APP_DATA" })}>{maintenanceBusy === "factoryReset" ? "초기화 준비 중" : "앱 데이터 완전 초기화"}</button>
-                    <p>첫 실행 상태로 돌아갑니다. 외부 다운로드 원본 파일과 quarantine/recovery 파일은 유지됩니다.</p>
-                  </div>
+                  <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={restorePreferenceDefaults}>설정 기본값</button>
                 </div>
+                <section className="maintenance-panel" aria-labelledby="maintenance-panel-title">
+                  <header className="maintenance-panel-header">
+                    <strong id="maintenance-panel-title">저장 데이터 관리</strong>
+                    <p>원본 파일과 사용자 판정을 보존하는 복구·검사 작업과, 외부 원본을 보존하는 앱 데이터 초기화를 제공합니다.</p>
+                  </header>
+                  {maintenanceMessage ? <p className="maintenance-message" role="status">{maintenanceMessage}</p> : null}
+                  <div className="maintenance-list">
+                    <article className="maintenance-item maintenance-item--quick-repair">
+                      <div className="maintenance-copy">
+                        <strong>빠른 복구</strong>
+                        <p>다운로드, 검색 또는 미리보기가 멈출 때 캐시와 중단된 작업 상태를 정리합니다. 저장된 앨범과 원본 파일은 유지됩니다.</p>
+                      </div>
+                      <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={() => void runMaintenance({ kind: "quickRepair" })}>{maintenanceBusy === "quickRepair" ? "복구 중" : "빠른 복구"}</button>
+                    </article>
+                    <article className="maintenance-item maintenance-item--rebuild">
+                      <div className="maintenance-copy">
+                        <strong>라이브러리 검사 및 재구축</strong>
+                        <p>DB, manifest와 실제 파일을 검사하고 필요한 파생 데이터를 다시 만듭니다. 원본 파일과 사용자 판정은 유지됩니다.</p>
+                      </div>
+                      <fieldset className="maintenance-options">
+                        <legend className="sr-only">재구축 항목</legend>
+                        <label><input type="checkbox" checked={rebuildOptions.thumbnail} onChange={(event) => setRebuildOptions((current) => ({ ...current, thumbnail: event.target.checked }))} /> 미리보기 캐시 재생성</label>
+                        <label><input type="checkbox" checked={rebuildOptions.duplicate} onChange={(event) => setRebuildOptions((current) => ({ ...current, duplicate: event.target.checked }))} /> 작품 중복 분석 재실행</label>
+                        <label><input type="checkbox" checked={rebuildOptions.internal} onChange={(event) => setRebuildOptions((current) => ({ ...current, internal: event.target.checked }))} /> 내부 중복 분석 재실행</label>
+                        <label><input type="checkbox" checked={rebuildOptions.autoFind} onChange={(event) => setRebuildOptions((current) => ({ ...current, autoFind: event.target.checked }))} /> Auto Find 결과 갱신</label>
+                      </fieldset>
+                      <button type="button" className="text-button" disabled={maintenanceBusy !== null} onClick={() => void runMaintenance({ kind: "rebuildLibrary", rebuildThumbnailData: rebuildOptions.thumbnail, rebuildDuplicateAnalysis: rebuildOptions.duplicate, rebuildInternalAnalysis: rebuildOptions.internal, rebuildAutoFindResults: rebuildOptions.autoFind })}>{maintenanceBusy === "rebuildLibrary" ? "검사 중" : "라이브러리 검사 및 재구축"}</button>
+                    </article>
+                    <article className="maintenance-item maintenance-item--factory-reset">
+                      <div className="maintenance-copy">
+                        <strong>앱 데이터 완전 초기화</strong>
+                        <p>앱을 첫 실행 상태로 되돌립니다. 외부 다운로드 원본 파일과 quarantine/recovery 파일은 유지됩니다.</p>
+                      </div>
+                      <button type="button" className="text-button danger-button" disabled={maintenanceBusy !== null} onClick={() => void runMaintenance({ kind: "factoryReset", confirmation: "RESET_ALL_APP_DATA" })}>{maintenanceBusy === "factoryReset" ? "초기화 준비 중" : "앱 데이터 완전 초기화"}</button>
+                    </article>
+                  </div>
+                </section>
               </>
           </section>
         </div>

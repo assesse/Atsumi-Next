@@ -71,6 +71,7 @@ struct WaitingRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExpectedContent {
     Script,
+    Html,
     Nozomi,
     Image,
 }
@@ -79,6 +80,7 @@ impl ExpectedContent {
     fn accept(self) -> &'static str {
         match self {
             Self::Script => "text/javascript, application/javascript;q=0.9, text/plain;q=0.5",
+            Self::Html => "text/html, application/xhtml+xml;q=0.9",
             Self::Nozomi => "application/x-nozomi, application/octet-stream;q=0.5",
             Self::Image => "image/webp, image/avif;q=0.9, image/jpeg;q=0.8, image/png;q=0.7",
         }
@@ -99,6 +101,7 @@ impl ExpectedContent {
                     | "application/x-javascript"
                     | "text/plain"
             ),
+            Self::Html => matches!(mime.as_str(), "text/html" | "application/xhtml+xml"),
             Self::Nozomi => {
                 matches!(
                     mime.as_str(),

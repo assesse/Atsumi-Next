@@ -22,6 +22,8 @@ import type {
   MaintenanceAction,
   MaintenanceResult,
   ApiResult,
+  TagCatalogStatus,
+  TagSuggestion,
 } from "./api/contracts";
 import { ActivityDrawer } from "./components/ActivityDrawer";
 import { DetailWorkspace } from "./components/DetailWorkspace";
@@ -40,8 +42,8 @@ import { retryableDownloadStates, type DownloadState, type Gallery, type Gallery
 import { useSettings } from "./hooks/useSettings";
 import { useWindowPlacement } from "./hooks/useWindowPlacement";
 import { resolveGalleryColumns } from "./layout/galleryColumns";
-import { buildSearchSuggestionCatalog } from "./search/searchSuggestions";
-import { metadataSearchToken, searchTokenKind } from "./search/searchTokens";
+import { buildSearchSuggestionCatalog, catalogSuggestion } from "./search/searchSuggestions";
+import { activeSearchToken, metadataSearchToken, searchTokenKind } from "./search/searchTokens";
 import { applyDownloadChanged } from "./state/downloadProjection";
 import {
   duplicateEventNeedsSnapshot,
@@ -154,6 +156,10 @@ export default function App() {
   const [favoriteMetadata, setFavoriteMetadata] = useState<ReadonlySet<string>>(() => new Set());
   const [favoriteRecords, setFavoriteRecords] = useState<FavoriteRecord[]>([]);
   const [searchHistory, setSearchHistory] = useState<SearchHistoryEntry[]>([]);
+  const [tagCatalogStatus, setTagCatalogStatus] = useState<TagCatalogStatus | undefined>(undefined);
+  const [tagCatalogRefreshing, setTagCatalogRefreshing] = useState(false);
+  const [tagSuggestions, setTagSuggestions] = useState<TagSuggestion[]>([]);
+  const tagSuggestionSequence = useRef(0);
   const [autoFindSnapshot, setAutoFindSnapshot] = useState<AutoFindSnapshot>({ candidates: [], cutoffEvidence: [], truncations: [] });
   const [autoFindIds, setAutoFindIds] = useState<GalleryId[]>([]);
   const [autoFindLoading, setAutoFindLoading] = useState(true);
@@ -307,6 +313,20 @@ export default function App() {
     }
   }, []);
 
+  const hydrateTagCatalogStatus = useCallback(async () => {
+    try { const result = await backend.tagCatalogStatus(); if (result.ok) setTagCatalogStatus(result.data); } catch { /* catalog is optional until manually refreshed */ }
+  }, []);
+
+  const refreshTagCatalog = useCallback(async () => {
+    setTagCatalogRefreshing(true);
+    try {
+      const result = await backend.tagCatalogRefresh();
+      if (result.ok) { setTagCatalogStatus(result.data); showToast(`태그 최신화 완료 · 전체 ${result.data.entryCount.toLocaleString()} · F ${result.data.femaleCount.toLocaleString()} · M ${result.data.maleCount.toLocaleString()}`); }
+      else { showToast(result.error.details?.catalogRetained ? "태그 최신화에 실패했지만 기존 데이터를 유지했습니다." : result.error.message); }
+    } catch { showToast(tagCatalogStatus?.entryCount ? "태그 최신화에 실패했지만 기존 데이터를 유지했습니다." : "태그 데이터가 없습니다."); }
+    finally { setTagCatalogRefreshing(false); }
+  }, [showToast, tagCatalogStatus?.entryCount]);
+
   const hydrateAutoFind = useCallback(async (showLoading = false) => {
     const token = ++autoFindHydrationToken.current;
     if (showLoading) setAutoFindLoading(true);
@@ -406,10 +426,11 @@ export default function App() {
   useEffect(() => {
     void hydrateFavorites();
     void hydrateSearchHistory();
+    void hydrateTagCatalogStatus();
     void hydrateAutoFind(true);
     void hydrateDuplicateSnapshot(true);
     void hydrateInternalSnapshot(true);
-  }, [hydrateAutoFind, hydrateDuplicateSnapshot, hydrateFavorites, hydrateInternalSnapshot, hydrateSearchHistory]);
+  }, [hydrateAutoFind, hydrateDuplicateSnapshot, hydrateFavorites, hydrateInternalSnapshot, hydrateSearchHistory, hydrateTagCatalogStatus]);
 
   useLayoutEffect(() => {
     const viewport = galleryViewport.current;
@@ -1451,9 +1472,18 @@ export default function App() {
     [saveSettings, showToast],
   );
 
+  const requestTagSuggestions = useCallback((query: string, namespace?: "tag" | "female" | "male") => {
+    const sequence = ++tagSuggestionSequence.current;
+    if (!query) { setTagSuggestions([]); return; }
+    void backend.tagSuggestionsSearch({ query, namespace, limit: 8 }).then((result) => {
+      if (sequence !== tagSuggestionSequence.current) return;
+      setTagSuggestions(result.ok ? result.data : []);
+    }).catch(() => { if (sequence === tagSuggestionSequence.current) setTagSuggestions([]); });
+  }, []);
+
   const searchSuggestions = useMemo<SearchSuggestion[]>(() => {
-    return buildSearchSuggestionCatalog({ history: searchHistory, favorites: favoriteRecords, galleries: displayGalleries.values() });
-  }, [displayGalleries, favoriteRecords, searchHistory]);
+    return ui.search.explore.draft.trim() ? tagSuggestions.map(catalogSuggestion) : buildSearchSuggestionCatalog(searchHistory);
+  }, [searchHistory, tagSuggestions, ui.search.explore.draft]);
 
   const autoFindGroups = useMemo(() => {
     const groups = new Map<string, Gallery[]>();
@@ -1543,11 +1573,11 @@ export default function App() {
               if (ui.view === "explore") setExploreSearchOverride(null);
               dispatch({ type: "search.languages", view: ui.view, languages });
             }}
-            onRefresh={() => {
-              if (ui.view === "explore") setSearchRefresh((value) => value + 1);
-              else if (ui.view === "downloads") setDownloadsRefresh((value) => value + 1);
-              else void refreshAutoFind();
-            }}
+            onTagSuggestionQuery={requestTagSuggestions}
+            onTagCatalogRefresh={() => void refreshTagCatalog()}
+            tagCatalogStatus={tagCatalogStatus}
+            tagCatalogRefreshing={tagCatalogRefreshing}
+            tagCatalogRevision={tagCatalogStatus?.revision}
             onActivity={() => ui.overlays.activityOpen ? closeActivity() : openActivity()}
             onSettings={() => dispatch({ type: "overlay.settings", open: true })}
           />

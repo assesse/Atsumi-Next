@@ -61,11 +61,33 @@ describe("SettingsDialog operational boundaries", () => {
       expect(container.querySelector(".settings-nav")).toBeNull();
       expect(container.textContent).not.toContain("다음 단계");
 
-      const maintenance = [...container.querySelectorAll<HTMLButtonElement>(".maintenance-actions button")];
-      expect(maintenance).toHaveLength(3);
+      expect(container.querySelector(".settings-reset-row")).not.toBeNull();
+      expect(container.querySelector(".maintenance-panel .settings-reset-row")).toBeNull();
+      const maintenanceItems = [...container.querySelectorAll<HTMLElement>(".maintenance-item")];
+      expect(maintenanceItems).toHaveLength(3);
+      const [quickRepair, rebuild, factoryReset] = maintenanceItems;
+      expect(quickRepair).toHaveTextContent("빠른 복구");
+      expect(quickRepair?.querySelectorAll("button")).toHaveLength(1);
+      expect(rebuild).toHaveTextContent("라이브러리 검사 및 재구축");
+      expect(rebuild?.querySelectorAll('input[type="checkbox"]')).toHaveLength(4);
+      expect([...rebuild?.querySelectorAll<HTMLInputElement>('input[type="checkbox"]') ?? []].map((input) => input.checked)).toEqual([true, false, false, false]);
+      expect(factoryReset).toHaveTextContent("앱 데이터 완전 초기화");
+      expect(factoryReset).toHaveTextContent("외부 다운로드 원본 파일과 quarantine/recovery 파일은 유지됩니다.");
+      expect(factoryReset).toHaveClass("maintenance-item--factory-reset");
+      const maintenance = [...container.querySelectorAll<HTMLButtonElement>(".maintenance-item > button")];
       expect(maintenance.map((button) => button.textContent)).toEqual(["빠른 복구", "라이브러리 검사 및 재구축", "앱 데이터 완전 초기화"]);
       await act(async () => maintenance[0]?.click());
       expect(onMaintenance).toHaveBeenCalledWith({ kind: "quickRepair" });
+      const duplicateOption = rebuild?.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[1];
+      await act(async () => duplicateOption?.click());
+      await act(async () => maintenance[1]?.click());
+      expect(onMaintenance).toHaveBeenLastCalledWith({
+        kind: "rebuildLibrary",
+        rebuildThumbnailData: true,
+        rebuildDuplicateAnalysis: true,
+        rebuildInternalAnalysis: false,
+        rebuildAutoFindResults: false,
+      });
       await act(async () => maintenance[2]?.click());
       expect(confirm).toHaveBeenCalledWith(expect.stringContaining("외부 다운로드 원본 파일은 유지"));
 

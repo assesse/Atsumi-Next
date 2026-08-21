@@ -53,6 +53,9 @@ import type {
   ThumbnailRequestDto,
   ThumbnailRequestToken,
   ThumbnailWorkerStats,
+  TagCatalogStatus,
+  TagSuggestion,
+  TagSuggestionRequest,
   WindowPlacement,
   WindowPlacementSnapshot,
 } from "./contracts";
@@ -83,6 +86,9 @@ export interface BackendClient {
   readonly runtime: "tauri" | "browser-mock";
   settingsGet(): Promise<ApiResult<SettingsSnapshot>>;
   settingsUpdate(patch: SettingsPatch, expectedRevision: number): Promise<ApiResult<SettingsSnapshot>>;
+  tagCatalogStatus(): Promise<ApiResult<import("./contracts").TagCatalogStatus>>;
+  tagCatalogRefresh(): Promise<ApiResult<import("./contracts").TagCatalogStatus>>;
+  tagSuggestionsSearch(request: import("./contracts").TagSuggestionRequest): Promise<ApiResult<import("./contracts").TagSuggestion[]>>;
   folderNameTemplatePreview(template: string): Promise<ApiResult<string>>;
   windowPlacementGet(): Promise<ApiResult<WindowPlacementSnapshot>>;
   windowPlacementUpdate(
@@ -490,6 +496,7 @@ const cloneInternalSnapshot = (snapshot: InternalDuplicateSnapshot): InternalDup
 });
 
 type Handler<K extends keyof BackendEventMap> = (payload: BackendEventMap[K]) => void;
+const namespaceRank = (namespace: "tag" | "female" | "male") => namespace === "female" ? 0 : namespace === "male" ? 1 : 2;
 
 class BrowserMockBackend implements BackendClient {
   readonly runtime = "browser-mock" as const;
@@ -536,6 +543,16 @@ class BrowserMockBackend implements BackendClient {
   private internalPlans = new Map<string, InternalRemovalPlan>();
   private nextInternalPlanId = 1;
   private maintenancePreviews = new Map<string, MaintenanceAction>();
+  private tagCatalogStatusValue: TagCatalogStatus = { revision: 1, entryCount: 7, neutralCount: 1, femaleCount: 5, maleCount: 1, lastSuccessAt: "2026-08-21T00:00:00.000Z" };
+  private readonly tagCatalog: TagSuggestion[] = [
+    { namespace: "female", name: "big balls", token: "female:big_balls", galleryCount: 4822, favorite: false },
+    { namespace: "female", name: "ball sucking", token: "female:ball_sucking", galleryCount: 4367, favorite: false },
+    { namespace: "female", name: "balls expansion", token: "female:balls_expansion", galleryCount: 651, favorite: false },
+    { namespace: "female", name: "mind control", token: "female:mind_control", galleryCount: 810, favorite: false },
+    { namespace: "female", name: "mind break", token: "female:mind_break", galleryCount: 730, favorite: false },
+    { namespace: "male", name: "ball sucking", token: "male:ball_sucking", galleryCount: 410, favorite: false },
+    { namespace: "tag", name: "football", token: "tag:football", galleryCount: 320, favorite: false },
+  ];
 
   async settingsGet(): Promise<ApiResult<SettingsSnapshot>> {
     return ok({ ...this.settings });
@@ -565,6 +582,18 @@ class BrowserMockBackend implements BackendClient {
     persistBrowserSettings(this.settings);
     this.emit("settings:changed", { ...this.settings });
     return ok({ ...this.settings });
+  }
+
+  async tagCatalogStatus(): Promise<ApiResult<TagCatalogStatus>> { return ok({ ...this.tagCatalogStatusValue }); }
+  async tagCatalogRefresh(): Promise<ApiResult<TagCatalogStatus>> {
+    this.tagCatalogStatusValue = { ...this.tagCatalogStatusValue, revision: this.tagCatalogStatusValue.revision + 1, lastAttemptAt: new Date().toISOString(), lastSuccessAt: new Date().toISOString(), lastErrorCode: undefined, lastErrorMessage: undefined };
+    return ok({ ...this.tagCatalogStatusValue });
+  }
+  async tagSuggestionsSearch(request: TagSuggestionRequest): Promise<ApiResult<TagSuggestion[]>> {
+    const query = request.query.trim().toLowerCase().replaceAll("_", " ").replace(/\s+/g, " ");
+    if (query.length < 2) return ok([]);
+    const favorites = new Set([...this.favorites.values()].filter((value) => value.namespace === "tag").map((value) => value.value.toLowerCase().replaceAll("_", " ")));
+    return ok(this.tagCatalog.filter((entry) => (!request.namespace || entry.namespace === request.namespace) && entry.name.includes(query)).map((entry) => ({ ...entry, favorite: favorites.has(entry.namespace === "tag" ? entry.name : `${entry.namespace}:${entry.name}`) })).sort((a, b) => Number(b.favorite) - Number(a.favorite) || b.galleryCount - a.galleryCount || a.name.localeCompare(b.name) || namespaceRank(a.namespace) - namespaceRank(b.namespace) || a.token.localeCompare(b.token)).slice(0, Math.min(8, request.limit)));
   }
 
   async folderNameTemplatePreview(template: string): Promise<ApiResult<string>> {
@@ -1779,6 +1808,10 @@ class TauriBackend implements BackendClient {
   settingsUpdate(patch: SettingsPatch, expectedRevision: number): Promise<ApiResult<SettingsSnapshot>> {
     return invoke("settings_update", { patch, expectedRevision });
   }
+
+  tagCatalogStatus(): Promise<ApiResult<TagCatalogStatus>> { return invoke("tag_catalog_status"); }
+  tagCatalogRefresh(): Promise<ApiResult<TagCatalogStatus>> { return invoke("tag_catalog_refresh"); }
+  tagSuggestionsSearch(request: TagSuggestionRequest): Promise<ApiResult<TagSuggestion[]>> { return invoke("tag_suggestions_search", { request }); }
 
   folderNameTemplatePreview(template: string): Promise<ApiResult<string>> {
     return invoke("folder_name_template_preview", { template });
