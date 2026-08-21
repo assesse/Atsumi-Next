@@ -135,10 +135,10 @@ const internalStatusLabel = (loading: boolean, error: string | null, run?: Inter
   if (loading) return "저장된 내부 중복 결과를 불러오는 중";
   if (error) return `내부 중복 오류 · ${error}`;
   if (!run) return "내부 중복 검사를 아직 실행하지 않았습니다.";
-  if (run.state === "running") return `내부 중복 검사 중 · 앨범 ${run.scannedArtifacts}/${run.totalArtifacts} · 페이지 ${run.totalPages} · 행 ${run.groupsFound}`;
+  if (run.state === "running") return `내부 중복 검사 중 · 대상 ${run.scannedArtifacts}/${run.totalArtifacts}개 · 제외 ${run.skippedArtifacts}개`;
   if (run.state === "failed") return `내부 중복 검사 실패 · ${run.errorMessage ?? run.errorCode ?? "원인을 확인해 주세요."}`;
   if (run.state === "cancelled") return `내부 중복 검사 취소됨 · 기존 검토 결과 보존`;
-  return `내부 중복 검사 완료 · 앨범 ${run.scannedArtifacts}개 · 검토 행 ${run.groupsFound}개`;
+  return `내부 중복 검사 완료 · 앨범 ${run.scannedArtifacts}개 · 500p 이상 제외 ${run.skippedArtifacts}개 · 검토 행 ${run.groupsFound}개`;
 };
 
 export default function App() {
@@ -175,7 +175,7 @@ export default function App() {
   const [duplicateReviewLoading, setDuplicateReviewLoading] = useState(false);
   const [duplicateReviewError, setDuplicateReviewError] = useState<string | null>(null);
   const [duplicateDecisionPending, setDuplicateDecisionPending] = useState(false);
-  const [internalSnapshot, setInternalSnapshot] = useState<InternalDuplicateSnapshot>({ groups: [], quarantineRecords: [] });
+  const [internalSnapshot, setInternalSnapshot] = useState<InternalDuplicateSnapshot>({ groups: [], quarantineRecords: [], skips: [] });
   const [internalRun, setInternalRun] = useState<InternalScanRun | undefined>(undefined);
   const [internalLoading, setInternalLoading] = useState(true);
   const [internalError, setInternalError] = useState<string | null>(null);
@@ -1652,6 +1652,13 @@ export default function App() {
                   </div>
                   <span className={`context-summary duplicate-scan-status is-${duplicateRun?.state ?? "idle"}`} role="status">{currentDuplicateStatus}</span>
                   <span className={`context-summary duplicate-scan-status is-${internalRun?.state ?? "idle"}`} role="status">{currentInternalStatus}</span>
+                  {internalSnapshot.skips.length ? (
+                    <details className="internal-scan-skips">
+                      <summary>내부 검사 제외 항목 {internalSnapshot.skips.length}개</summary>
+                      <p>500페이지 이상 앨범은 성능 상한 때문에 내부 페이지 검사에서만 제외됩니다. 다운로드와 전체 페이지 탐색에는 제한이 없습니다.</p>
+                      <ul>{internalSnapshot.skips.map((skip) => <li key={skip.entryId}>#{skip.galleryId} · {skip.pageCount}p · 페이지 제한으로 제외</li>)}</ul>
+                    </details>
+                  ) : null}
                   {duplicateError ? <button type="button" className="text-button compact" onClick={() => void hydrateDuplicateSnapshot(true)}>결과 다시 불러오기</button> : null}
                   {internalError ? <button type="button" className="text-button compact" onClick={() => void hydrateInternalSnapshot(true)}>내부 결과 다시 불러오기</button> : null}
                 </>

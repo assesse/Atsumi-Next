@@ -13,8 +13,8 @@ use crate::{
         ArtifactManifest, ArtifactRelativePath, DownloadEntryId, HashProfile,
         InternalDuplicateReview, InternalDuplicateSnapshot, InternalRemovalApplyRequest,
         InternalRemovalPlan, InternalRemovalPlanRequest, InternalRemovalResult,
-        InternalRemovalUndoRequest, InternalScanRun, InternalScanState, PageArtifactState,
-        PageQuarantineSaga, PageQuarantineState,
+        InternalRemovalUndoRequest, InternalScanRun, InternalScanSkip, InternalScanState,
+        PageArtifactState, PageQuarantineSaga, PageQuarantineState,
     },
     thumbnail::CancellationToken,
 };
@@ -27,6 +27,9 @@ use super::{
 };
 
 const PLAN_LIFETIME_MS: u128 = 15 * 60 * 1_000;
+/// Deliberately exclusive: artifacts with 500 original pages are not scanned.
+pub(crate) const INTERNAL_DUPLICATE_PAGE_LIMIT_EXCLUSIVE: usize = 500;
+pub(crate) const INTERNAL_DUPLICATE_ALGORITHM_VERSION: u32 = 2;
 
 #[derive(Clone)]
 pub struct InternalDuplicateSupervisor {
@@ -138,11 +141,12 @@ impl InternalDuplicateSupervisor {
             return Ok(run);
         }
         let root = self.download_root()?;
-        let bundles = select_scan_bundles(
+        let candidates = select_scan_bundles(
             self.inner
                 .duplicate_repository
                 .duplicate_artifact_bundles()?,
         );
+        let (bundles, skips) = split_scan_bundles(candidates);
         let total_artifacts = u32::try_from(bundles.len()).unwrap_or(u32::MAX);
         let total_pages = bundles
             .iter()
@@ -152,8 +156,10 @@ impl InternalDuplicateSupervisor {
         let profile = HashProfile::current();
         let run = self.inner.repository.internal_scan_start(
             profile.profile_version,
+            INTERNAL_DUPLICATE_ALGORITHM_VERSION,
             total_artifacts,
             total_pages,
+            &skips,
         )?;
         if run.state != InternalScanState::Running {
             return Ok(run);
@@ -716,6 +722,35 @@ fn select_scan_bundles(
     });
     bundles.dedup_by(|left, right| left.gallery.id == right.gallery.id);
     bundles
+}
+
+fn canonical_page_count(bundle: &crate::domain::ArtifactBundle) -> usize {
+    let recorded = bundle.pages.len();
+    let artifact = bundle.artifact.expected_page_count as usize;
+    let gallery = bundle.gallery.metadata.source_page_count as usize;
+    recorded.max(artifact).max(gallery)
+}
+
+fn split_scan_bundles(
+    bundles: Vec<crate::domain::ArtifactBundle>,
+) -> (Vec<crate::domain::ArtifactBundle>, Vec<InternalScanSkip>) {
+    let mut eligible = Vec::new();
+    let mut skips = Vec::new();
+    for bundle in bundles {
+        let page_count = canonical_page_count(&bundle);
+        if page_count >= INTERNAL_DUPLICATE_PAGE_LIMIT_EXCLUSIVE {
+            skips.push(InternalScanSkip {
+                entry_id: bundle.artifact.entry_id.to_string(),
+                gallery_id: bundle.gallery.id,
+                title: bundle.gallery.metadata.title.clone(),
+                page_count: u32::try_from(page_count).unwrap_or(u32::MAX),
+                reason: "page_limit".into(),
+            });
+        } else {
+            eligible.push(bundle);
+        }
+    }
+    (eligible, skips)
 }
 
 fn validate_selections(

@@ -148,4 +148,36 @@ describe("InternalDuplicateDialog", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  it("keeps exactly one radio choice and plans every other page in an N-way row", async () => {
+    const fourWay: InternalDuplicateReview = {
+      ...review,
+      groups: [{
+        ...review.groups[0]!,
+        groupId: "group-four-way",
+        recommendedKeepSourcePage: 1,
+        pages: [1, 6, 11, 16].map((sourcePage) => ({
+          sourcePage, exactSha256: false, visualSimilarity: 0.91, detailHashDistance: 32, lowInformation: false,
+        })),
+      }],
+    };
+    const onPlan = vi.fn();
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing" as const, reason: "test" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(
+      <InternalDuplicateDialog open={false} review={fourWay} thumbnailClient={client} onClose={vi.fn()} onRetry={vi.fn()} onRescan={vi.fn()} onPlan={onPlan} onApply={vi.fn()} onUndo={vi.fn()} />,
+    ));
+    expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(4);
+    expect(container.querySelector('input[type="radio"]:checked')?.parentElement).toHaveTextContent("원본 1p");
+    const preview = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("격리 계획 미리보기"));
+    await act(async () => preview?.click());
+    expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
+      selections: [expect.objectContaining({ keepSourcePage: 1, removeSourcePages: [6, 11, 16] })],
+    }));
+    await act(async () => root.unmount());
+    client.dispose();
+    container.remove();
+  });
 });

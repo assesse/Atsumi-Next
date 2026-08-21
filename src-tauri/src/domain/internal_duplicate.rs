@@ -43,6 +43,10 @@ pub struct InternalScanRun {
     pub total_pages: u32,
     pub compared_pairs: u64,
     pub groups_found: u32,
+    /// Version of the scene-clustering algorithm. HashProfile remains separate.
+    pub algorithm_version: u32,
+    pub skipped_artifacts: u32,
+    pub skipped_pages: u32,
     pub started_at: String,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,6 +55,16 @@ pub struct InternalScanRun {
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalScanSkip {
+    pub entry_id: String,
+    pub gallery_id: GalleryId,
+    pub title: String,
+    pub page_count: u32,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -158,6 +172,7 @@ pub struct InternalDuplicateSnapshot {
     pub run: Option<InternalScanRun>,
     pub groups: Vec<InternalDuplicateGroup>,
     pub quarantine_records: Vec<PageQuarantineRecord>,
+    pub skips: Vec<InternalScanSkip>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

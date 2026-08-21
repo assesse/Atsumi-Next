@@ -1285,6 +1285,35 @@ pub const MIGRATIONS: &[Migration] = &[
             VALUES (1, 0, 0, 0, 0, 0);
         "#,
     },
+    Migration {
+        version: 21,
+        name: "internal_duplicate_nway_scene_clustering",
+        sql: r#"
+            ALTER TABLE internal_duplicate_runs
+            ADD COLUMN algorithm_version INTEGER NOT NULL DEFAULT 1
+                CHECK (algorithm_version > 0);
+            ALTER TABLE internal_duplicate_runs
+            ADD COLUMN skipped_artifacts INTEGER NOT NULL DEFAULT 0
+                CHECK (skipped_artifacts >= 0);
+            ALTER TABLE internal_duplicate_runs
+            ADD COLUMN skipped_pages INTEGER NOT NULL DEFAULT 0
+                CHECK (skipped_pages >= 0);
+
+            CREATE TABLE internal_duplicate_scan_skips (
+                run_id TEXT NOT NULL
+                    REFERENCES internal_duplicate_runs(run_id) ON DELETE CASCADE,
+                entry_id TEXT NOT NULL
+                    REFERENCES download_entries(entry_id) ON DELETE CASCADE,
+                gallery_id INTEGER NOT NULL CHECK (gallery_id > 0),
+                title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+                page_count INTEGER NOT NULL CHECK (page_count >= 500),
+                reason TEXT NOT NULL CHECK (reason = 'page_limit'),
+                PRIMARY KEY (run_id, entry_id)
+            ) STRICT;
+            CREATE INDEX internal_duplicate_scan_skips_run_idx
+                ON internal_duplicate_scan_skips(run_id, gallery_id);
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1570,7 +1599,7 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v14 to v15");
-        assert_eq!(report.applied_versions, vec![15, 16, 17, 18, 19, 20]);
+        assert_eq!(report.applied_versions, vec![15, 16, 17, 18, 19, 20, 21]);
         let historical_import_tables: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'classic_import_%'",
@@ -1666,9 +1695,9 @@ mod tests {
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
         assert_eq!(
             report.applied_versions,
-            vec![12, 13, 14, 15, 16, 17, 18, 19, 20]
+            vec![12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
         );
-        assert_eq!(report.current_version, 20);
+        assert_eq!(report.current_version, 21);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",

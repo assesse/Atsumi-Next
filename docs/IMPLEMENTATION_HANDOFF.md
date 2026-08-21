@@ -26,7 +26,7 @@
 | file open | 완료 | verified first non-quarantined page를 root 내부 canonical path로 확인하고 Windows ShellExecute로 실행 |
 | Auto Find | 완료 | SQLite favorite/history/run/candidate/exclusion/cutoff/truncation, verified-owned `source`/`policyVersion`, 실제 source supervisor, 5개 namespace projection, 명시적 갱신·취소·복원·local filter/group·batch queue 검증 완료 |
 | gallery duplicate | 완료 | verified artifact HashProfile evidence, full scan/cancel/recovery, 실제 source-page Review와 CAS decision history 검증 완료 |
-| internal duplicate | 완료 | verified artifact 내부 exact/2행 이상 visual scene scan, synchronized source-page Review, CAS plan, page quarantine·undo·startup recovery 검증 완료 |
+| internal duplicate | 완료 | verified artifact 내부 499p 상한, algorithm v2 N-way monotonic scene clustering, synchronized source-page Review, CAS plan, page quarantine·undo·startup recovery |
 | quarantine | 완료 | root 내부 atomic move, pending saga, startup 복구, undo와 무자동삭제 검증 |
 | 과거 데이터 이전 runtime | 제거 | active frontend/API/Rust source·repository·command를 제거했다. 이미 적용된 v14 migration과 역사적 table은 기존 DB 호환 때문에 불변 보존한다 |
 | 설정 초기화 | 완료 | 완료 thumbnail cache만 제거하고, 명시적 확인 뒤 favorites/history/Auto Find 데이터만 transaction으로 초기화한다. 다운로드 DB/artifact/files는 보존한다 |
@@ -85,8 +85,8 @@
 
 ### Milestone F — internal scene Review·page quarantine
 
-- `domain/internal_duplicate.rs`, `application/internal_duplicate_analyzer.rs`, `internal_duplicate_supervisor.rs`: 작품 중복 HashProfile/page cache를 공유하되 한 verified artifact 안에서만 검사한다. exact SHA 반복은 한 행을 허용하고 visual evidence는 한 장짜리 shared panel을 제외하기 위해 최소 2행의 단조 gap-tolerant block만 저장한다.
-- `migrations.rs`와 `internal_duplicate_repository.rs`: migration 13으로 scan run, block/row/page evidence, 만료형 removal plan과 page quarantine saga를 additive하게 추가했다. run은 singleton이고 start/cancel/shutdown/recovery, group replace, plan revision CAS와 apply/undo completion은 짧은 SQLite transaction이다.
+- `domain/internal_duplicate.rs`, `application/internal_duplicate_analyzer.rs`, `internal_duplicate_supervisor.rs`: HashProfile/page cache를 재사용하며 500페이지 이상(500 포함)은 canonical original page count로 먼저 제외한다. algorithm v2는 greedy pair consumption 대신 bounded monotonic pair runs를 N-way scene row로 묶으며 단일 shared panel은 bridge가 될 수 없다.
+- `migrations.rs`와 `internal_duplicate_repository.rs`: migration 21은 run algorithm version·skip count와 per-artifact `page_limit` skip을 additive하게 저장한다. 기존 run은 algorithm v1/skip 0으로 읽는다.
 - `InternalDuplicateSupervisor`: gallery별 최신 verified artifact를 hash하고 진행 event를 보낸다. 사용자가 고른 keep/remove source page와 현재 파일 수·byte 합계를 15분 계획으로 고정한다. page move는 DB intent 뒤 artifact 내부 `.atsumi-page-quarantine/<plan-id>/`로 수행하고 manifest atomic replace 뒤 DB state를 확정한다.
 - startup은 pending page move/restore를 원본·격리 경로 존재 상태로 재개한다. 양쪽이 모두 있거나 모두 없으면 overwrite/delete하지 않고 Review 오류로 남긴다. source page number, SHA·byte·format metadata는 격리와 undo 동안 유지된다.
 - `App.tsx`, typed backend와 `InternalDuplicateDialog.tsx`: Downloads에서 전체 scan 시작·취소·진행·오류·재시도, 완료 앨범 하나의 synchronized row 검토, 행별 keep 선택, 파일 수·용량 계획 preview, 명시적 격리 적용과 이력 기반 undo를 연결했다. page 이미지는 live source가 아니라 전역 coordinator의 verified `artifactPage(entryId, sourcePage)`만 사용한다.

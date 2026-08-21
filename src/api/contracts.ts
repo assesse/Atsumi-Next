@@ -466,11 +466,22 @@ export type InternalScanRun = {
   totalPages: number;
   comparedPairs: number;
   groupsFound: number;
+  algorithmVersion: number;
+  skippedArtifacts: number;
+  skippedPages: number;
   startedAt: string;
   updatedAt: string;
   finishedAt?: string;
   errorCode?: string;
   errorMessage?: string;
+};
+
+export type InternalScanSkip = {
+  entryId: string;
+  galleryId: GalleryId;
+  title: string;
+  pageCount: number;
+  reason: "page_limit";
 };
 
 export type InternalMatchKind = "exact" | "translation_visual";
@@ -523,6 +534,7 @@ export type InternalDuplicateSnapshot = {
   run?: InternalScanRun;
   groups: InternalDuplicateGroup[];
   quarantineRecords: PageQuarantineRecord[];
+  skips: InternalScanSkip[];
 };
 
 export type InternalDuplicateReview = {

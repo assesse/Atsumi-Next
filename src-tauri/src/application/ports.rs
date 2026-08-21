@@ -304,8 +304,10 @@ pub trait InternalDuplicateRepository: Send + Sync {
     fn internal_scan_start(
         &self,
         profile_version: u32,
+        algorithm_version: u32,
         total_artifacts: u32,
         total_pages: u32,
+        skips: &[crate::domain::InternalScanSkip],
     ) -> Result<InternalScanRun, RepositoryError>;
 
     fn internal_scan_progress(

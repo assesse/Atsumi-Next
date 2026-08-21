@@ -462,6 +462,7 @@ fn page_metric(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn compare_page_evidence(
     left: &DuplicatePageHash,
     right: &DuplicatePageHash,

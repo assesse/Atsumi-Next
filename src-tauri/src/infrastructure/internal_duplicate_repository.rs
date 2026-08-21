@@ -11,8 +11,8 @@ use crate::{
     domain::{
         GalleryId, InternalDuplicateGroup, InternalDuplicateReview, InternalDuplicateSnapshot,
         InternalGroupRecord, InternalMatchKind, InternalPageEvidence, InternalRemovalPlan,
-        InternalRemovalSelection, InternalScanRun, InternalScanState, PageQuarantineRecord,
-        PageQuarantineSaga, PageQuarantineState, SourcePageNumber,
+        InternalRemovalSelection, InternalScanRun, InternalScanSkip, InternalScanState,
+        PageQuarantineRecord, PageQuarantineSaga, PageQuarantineState, SourcePageNumber,
     },
 };
 
@@ -41,25 +41,31 @@ impl InternalDuplicateRepository for SqliteRepository {
     fn internal_scan_start(
         &self,
         profile_version: u32,
+        algorithm_version: u32,
         total_artifacts: u32,
         total_pages: u32,
+        skips: &[InternalScanSkip],
     ) -> Result<InternalScanRun, RepositoryError> {
-        let connection = self.connection()?;
+        let mut connection = self.connection()?;
         if let Some(run) = read_latest_internal_run(&connection)? {
             if run.state == InternalScanState::Running {
                 return Ok(run);
             }
         }
         let run_id = format!("internal-run-{}", Uuid::new_v4());
-        connection
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(repository_sql_error)?;
+        transaction
             .execute(
                 r#"
                     INSERT INTO internal_duplicate_runs (
-                        run_id, revision, state, profile_version,
+                        run_id, revision, state, profile_version, algorithm_version,
                         total_artifacts, scanned_artifacts, total_pages,
-                        compared_pairs, groups_found, started_at, updated_at
+                        compared_pairs, groups_found, skipped_artifacts, skipped_pages,
+                        started_at, updated_at
                     ) VALUES (
-                        ?1, 0, 'running', ?2, ?3, 0, ?4, 0, 0,
+                        ?1, 0, 'running', ?2, ?3, ?4, 0, ?5, 0, 0, ?6, ?7,
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                     )
@@ -67,11 +73,24 @@ impl InternalDuplicateRepository for SqliteRepository {
                 params![
                     run_id,
                     i64::from(profile_version),
+                    i64::from(algorithm_version),
                     i64::from(total_artifacts),
-                    i64::from(total_pages)
+                    i64::from(total_pages),
+                    i64::try_from(skips.len()).unwrap_or(i64::MAX),
+                    skips
+                        .iter()
+                        .map(|skip| i64::from(skip.page_count))
+                        .sum::<i64>()
                 ],
             )
             .map_err(repository_sql_error)?;
+        for skip in skips {
+            transaction.execute(
+                "INSERT INTO internal_duplicate_scan_skips (run_id, entry_id, gallery_id, title, page_count, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![run_id, skip.entry_id, skip.gallery_id.get(), skip.title, i64::from(skip.page_count), skip.reason],
+            ).map_err(repository_sql_error)?;
+        }
+        transaction.commit().map_err(repository_sql_error)?;
         read_internal_run(&connection, &run_id)?.ok_or_else(|| {
             RepositoryError::Corrupt("new internal duplicate run disappeared".into())
         })
@@ -273,6 +292,7 @@ impl InternalDuplicateRepository for SqliteRepository {
             run: read_latest_internal_run(&connection)?,
             groups: read_internal_groups(&connection, None)?,
             quarantine_records: read_page_records(&connection, None, false)?,
+            skips: read_latest_internal_skips(&connection)?,
         })
     }
 
@@ -846,7 +866,8 @@ fn read_latest_internal_run(
         .query_row(
             r#"
                 SELECT run_id, revision, state, total_artifacts, scanned_artifacts,
-                       total_pages, compared_pairs, groups_found, started_at, updated_at,
+                       total_pages, compared_pairs, groups_found, algorithm_version,
+                       skipped_artifacts, skipped_pages, started_at, updated_at,
                        finished_at, error_code, error_message
                 FROM internal_duplicate_runs
                 ORDER BY started_at DESC, run_id DESC LIMIT 1
@@ -868,7 +889,8 @@ fn read_internal_run(
         .query_row(
             r#"
                 SELECT run_id, revision, state, total_artifacts, scanned_artifacts,
-                       total_pages, compared_pairs, groups_found, started_at, updated_at,
+                       total_pages, compared_pairs, groups_found, algorithm_version,
+                       skipped_artifacts, skipped_pages, started_at, updated_at,
                        finished_at, error_code, error_message
                 FROM internal_duplicate_runs WHERE run_id = ?1
             "#,
@@ -885,6 +907,9 @@ type StoredRun = (
     String,
     i64,
     String,
+    i64,
+    i64,
+    i64,
     i64,
     i64,
     i64,
@@ -912,6 +937,9 @@ fn row_internal_run(row: &Row<'_>) -> rusqlite::Result<StoredRun> {
         row.get(10)?,
         row.get(11)?,
         row.get(12)?,
+        row.get(13)?,
+        row.get(14)?,
+        row.get(15)?,
     ))
 }
 
@@ -926,12 +954,52 @@ fn stored_run(row: StoredRun) -> Result<InternalScanRun, RepositoryError> {
         total_pages: stored_u32(row.5, "internal total pages")?,
         compared_pairs: stored_u64(row.6, "internal compared pairs")?,
         groups_found: stored_u32(row.7, "internal groups found")?,
-        started_at: row.8,
-        updated_at: row.9,
-        finished_at: row.10,
-        error_code: row.11,
-        error_message: row.12,
+        algorithm_version: stored_u32(row.8, "internal algorithm version")?,
+        skipped_artifacts: stored_u32(row.9, "internal skipped artifacts")?,
+        skipped_pages: stored_u32(row.10, "internal skipped pages")?,
+        started_at: row.11,
+        updated_at: row.12,
+        finished_at: row.13,
+        error_code: row.14,
+        error_message: row.15,
     })
+}
+
+fn read_latest_internal_skips(
+    connection: &Connection,
+) -> Result<Vec<InternalScanSkip>, RepositoryError> {
+    let Some(run) = read_latest_internal_run(connection)? else {
+        return Ok(Vec::new());
+    };
+    let mut statement = connection.prepare(
+        "SELECT entry_id, gallery_id, title, page_count, reason FROM internal_duplicate_scan_skips WHERE run_id = ?1 ORDER BY gallery_id, entry_id"
+    ).map_err(repository_sql_error)?;
+    let rows = statement
+        .query_map([run.run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(repository_sql_error)?
+        .map(|row| {
+            row.map_err(repository_sql_error).and_then(
+                |(entry_id, gallery_id, title, page_count, reason)| {
+                    Ok(InternalScanSkip {
+                        entry_id,
+                        gallery_id: valid_gallery_id(gallery_id)?,
+                        title,
+                        page_count: stored_u32(page_count, "internal skip page count")?,
+                        reason,
+                    })
+                },
+            )
+        })
+        .collect();
+    rows
 }
 
 fn read_internal_groups(

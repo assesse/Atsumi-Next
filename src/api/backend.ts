@@ -493,6 +493,7 @@ const cloneInternalSnapshot = (snapshot: InternalDuplicateSnapshot): InternalDup
     pages: group.pages.map((page) => ({ ...page })),
   })),
   quarantineRecords: snapshot.quarantineRecords.map((record) => ({ ...record })),
+  skips: snapshot.skips.map((skip) => ({ ...skip })),
 });
 
 type Handler<K extends keyof BackendEventMap> = (payload: BackendEventMap[K]) => void;
@@ -537,7 +538,7 @@ class BrowserMockBackend implements BackendClient {
   private duplicateGeneration = 0;
   private nextDuplicateRunId = 1;
   private nextDuplicateDecisionId = 1;
-  private internalSnapshotState: InternalDuplicateSnapshot = { groups: [], quarantineRecords: [] };
+  private internalSnapshotState: InternalDuplicateSnapshot = { groups: [], quarantineRecords: [], skips: [] };
   private internalGeneration = 0;
   private nextInternalRunId = 1;
   private internalPlans = new Map<string, InternalRemovalPlan>();
@@ -1050,6 +1051,9 @@ class BrowserMockBackend implements BackendClient {
       totalPages: 24,
       comparedPairs: 0,
       groupsFound: 0,
+      algorithmVersion: 2,
+      skippedArtifacts: 0,
+      skippedPages: 0,
       startedAt: now,
       updatedAt: now,
     };
