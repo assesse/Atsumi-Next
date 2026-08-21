@@ -800,6 +800,34 @@ describe("GalleryCard event projection", () => {
     container.remove();
   });
 
+  it("uses canonical structured tokens for tag search while favorite mutations keep the original value", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery: Gallery = { ...mockGalleries[0]!, tags: ["webtoon", "story arc", "female:glasses", "male:business suit"] };
+    try {
+      await act(async () => root.render(
+        <GalleryCard gallery={gallery} view="explore" selected={false} selectionContext={false} favoriteMetadata={new Set()} {...callbacks} />,
+      ));
+      const chips = [...container.querySelectorAll<HTMLButtonElement>(".tag")];
+      await act(async () => {
+        chips.find((chip) => chip.textContent?.includes("webtoon"))?.click();
+        chips.find((chip) => chip.textContent?.includes("story arc"))?.click();
+        chips.find((chip) => chip.textContent?.includes("glasses"))?.click();
+        chips.find((chip) => chip.textContent?.includes("business suit"))?.click();
+        chips.find((chip) => chip.textContent?.includes("webtoon"))?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+      });
+      expect(callbacks.onMetadataSearch).toHaveBeenNthCalledWith(1, "tag:webtoon");
+      expect(callbacks.onMetadataSearch).toHaveBeenNthCalledWith(2, "tag:story_arc");
+      expect(callbacks.onMetadataSearch).toHaveBeenNthCalledWith(3, "female:glasses");
+      expect(callbacks.onMetadataSearch).toHaveBeenNthCalledWith(4, "male:business_suit");
+      expect(callbacks.onMetadataFavorite).toHaveBeenCalledWith("webtoon");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   it("renders the measured maximum tags plus a non-interactive +N and recalculates on resize", async () => {
     let availableWidth = 175;
     let resolveFonts: (() => void) | undefined;

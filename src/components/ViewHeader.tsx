@@ -1,16 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import type { SearchRequest } from "../api/contracts";
 import type { Language, SearchUi, ViewId } from "../core/types";
 import { languageOrder, languagePresentation } from "../data/languages";
+import { filterSearchSuggestions, type SearchSuggestion } from "../search/searchSuggestions";
+import { replaceActiveSearchToken } from "../search/searchTokens";
 import { FluentIcon } from "./FluentIcon";
 
-export type SearchSuggestion = {
-  type: "HISTORY" | "ARTIST" | "TAG";
-  value: string;
-  extra: string;
-  favorite?: boolean;
-  request?: SearchRequest;
-};
+export type { SearchSuggestion } from "../search/searchSuggestions";
 
 const languageOptions = languageOrder.map((value) => ({ value, ...languagePresentation[value] }));
 
@@ -29,7 +24,8 @@ type ViewHeaderProps = {
   onDraft: (value: string) => void;
   onSuggestions: (open: boolean, active?: number | null) => void;
   onCommit: (value?: string) => void;
-  onSelectSuggestion: (suggestion: SearchSuggestion) => void;
+  onSelectSuggestion: (suggestion: SearchSuggestion, value: string) => void;
+  onCompleteSuggestion: (value: string) => void;
   onLanguages: (languages: Language[]) => void;
   onRefresh: () => void;
   onActivity: () => void;
@@ -46,6 +42,7 @@ export function ViewHeader({
   onSuggestions,
   onCommit,
   onSelectSuggestion,
+  onCompleteSuggestion,
   onLanguages,
   onRefresh,
   onActivity,
@@ -53,18 +50,19 @@ export function ViewHeader({
 }: ViewHeaderProps) {
   const host = useRef<HTMLElement>(null);
   const languageButton = useRef<HTMLButtonElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const composing = useRef(false);
   const [languageOpen, setLanguageOpen] = useState(false);
+  const [selection, setSelection] = useState({ start: 0, end: 0 });
   const visibleSuggestions = useMemo(() => {
-    const needle = search.draft.trim().toLocaleLowerCase();
-    if (!needle) return suggestions.slice(0, 7);
-    return suggestions
-      .filter((item) => item.value.toLocaleLowerCase().includes(needle))
-      .sort((left, right) => {
-        const leftPrefix = left.value.toLocaleLowerCase().startsWith(needle) ? 0 : 1;
-        const rightPrefix = right.value.toLocaleLowerCase().startsWith(needle) ? 0 : 1;
-        return leftPrefix - rightPrefix;
-      });
-  }, [search.draft, suggestions]);
+    return filterSearchSuggestions(suggestions, search.draft, selection.start, selection.end);
+  }, [search.draft, selection.end, selection.start, suggestions]);
+
+  useEffect(() => {
+    if (search.activeSuggestion !== null && search.activeSuggestion >= visibleSuggestions.length) {
+      onSuggestions(search.suggestionsOpen, null);
+    }
+  }, [onSuggestions, search.activeSuggestion, search.suggestionsOpen, visibleSuggestions.length]);
 
   useEffect(() => {
     const closeTransient = (event: PointerEvent) => {
@@ -90,12 +88,30 @@ export function ViewHeader({
     };
   }, [languageOpen, onSuggestions, search.suggestionsOpen]);
 
+  const complete = (item: SearchSuggestion, submitNow: boolean) => {
+    const caretStart = input.current?.selectionStart ?? selection.start;
+    const caretEnd = input.current?.selectionEnd ?? selection.end;
+    const nextValue = item.request
+      ? item.token
+      : replaceActiveSearchToken(search.draft, caretStart, item.token, caretEnd);
+    if (item.request || submitNow) onSelectSuggestion(item, nextValue);
+    else {
+      onCompleteSuggestion(nextValue);
+      window.requestAnimationFrame(() => {
+        input.current?.focus();
+        const nextCaret = nextValue.length;
+        input.current?.setSelectionRange(nextCaret, nextCaret);
+      });
+    }
+  };
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    if (composing.current) return;
     if (search.activeSuggestion !== null) {
       const item = visibleSuggestions[search.activeSuggestion];
       if (item) {
-        onSelectSuggestion(item);
+        complete(item, true);
         return;
       }
     }
@@ -103,6 +119,7 @@ export function ViewHeader({
   };
 
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing || composing.current) return;
     if (event.key === "ArrowDown" && visibleSuggestions.length) {
       event.preventDefault();
       const next = search.activeSuggestion === null ? 0 : (search.activeSuggestion + 1) % visibleSuggestions.length;
@@ -115,6 +132,11 @@ export function ViewHeader({
       onSuggestions(true, next);
     } else if (event.key === "Escape") {
       onSuggestions(false);
+    } else if (event.key === "Tab" && search.activeSuggestion !== null) {
+      const item = visibleSuggestions[search.activeSuggestion];
+      if (!item) return;
+      event.preventDefault();
+      complete(item, false);
     }
   };
 
@@ -130,6 +152,7 @@ export function ViewHeader({
       <form id="gallery-search-form" className="search-box" autoComplete="off" onSubmit={submit}>
         <FluentIcon glyph="\uE721" />
         <input
+          ref={input}
           type="search"
           role="combobox"
           aria-autocomplete="list"
@@ -141,18 +164,27 @@ export function ViewHeader({
           aria-activedescendant={
             search.activeSuggestion === null ? undefined : `search-suggestion-${search.activeSuggestion}`
           }
-          onFocus={() => onSuggestions(true)}
+          onFocus={(event) => {
+            setSelection({ start: event.currentTarget.selectionStart ?? 0, end: event.currentTarget.selectionEnd ?? 0 });
+            onSuggestions(true);
+          }}
+          onClick={(event) => setSelection({ start: event.currentTarget.selectionStart ?? 0, end: event.currentTarget.selectionEnd ?? 0 })}
           onChange={(event) => {
             onDraft(event.target.value);
             onSuggestions(true);
+            setSelection({ start: event.target.selectionStart ?? event.target.value.length, end: event.target.selectionEnd ?? event.target.value.length });
           }}
+          onSelect={(event) => setSelection({ start: event.currentTarget.selectionStart ?? 0, end: event.currentTarget.selectionEnd ?? 0 })}
+          onKeyUp={(event) => setSelection({ start: event.currentTarget.selectionStart ?? 0, end: event.currentTarget.selectionEnd ?? 0 })}
+          onCompositionStart={() => { composing.current = true; }}
+          onCompositionEnd={(event) => { composing.current = false; setSelection({ start: event.currentTarget.selectionStart ?? 0, end: event.currentTarget.selectionEnd ?? 0 }); }}
           onKeyDown={keyDown}
         />
         {search.suggestionsOpen && visibleSuggestions.length ? (
           <div className="suggestions" id="search-suggestions" role="listbox" aria-label="검색 제안">
             {visibleSuggestions.map((item, index) => (
               <button
-                key={`${item.type}-${item.value}`}
+                key={`${item.type}-${item.token}`}
                 id={`search-suggestion-${index}`}
                 type="button"
                 role="option"
@@ -163,11 +195,11 @@ export function ViewHeader({
                 }`}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => {
-                  onSelectSuggestion(item);
+                  complete(item, true);
                 }}
               >
                 <span className="suggestion-type">{item.type}</span>
-                <strong>{item.favorite ? `★ ${item.value}` : item.value}</strong>
+                <strong>{item.favorite ? `★ ${item.label}` : item.label}</strong>
                 <small>{item.extra}</small>
               </button>
             ))}

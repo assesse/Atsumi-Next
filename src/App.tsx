@@ -40,6 +40,8 @@ import { retryableDownloadStates, type DownloadState, type Gallery, type Gallery
 import { useSettings } from "./hooks/useSettings";
 import { useWindowPlacement } from "./hooks/useWindowPlacement";
 import { resolveGalleryColumns } from "./layout/galleryColumns";
+import { buildSearchSuggestionCatalog } from "./search/searchSuggestions";
+import { metadataSearchToken, searchTokenKind } from "./search/searchTokens";
 import { applyDownloadChanged } from "./state/downloadProjection";
 import {
   duplicateEventNeedsSnapshot,
@@ -102,9 +104,6 @@ const favoriteKeyFromToken = (token: string): FavoriteKey => {
   }
   return { namespace: "tag", value: normalized };
 };
-
-const historySuggestionValue = (entry: SearchHistoryEntry): string =>
-  entry.text || entry.includeTags.at(0) || entry.excludeTags.at(0) || "";
 
 const autoFindStatusLabel = (loading: boolean, error: string | null, run?: AutoFindRun): string => {
   if (loading) return "저장된 자동 탐색 결과를 불러오는 중";
@@ -1025,12 +1024,31 @@ export default function App() {
   );
 
   const searchMetadata = useCallback((value: string) => {
-    setExploreSearchOverride(null);
+    const target = metadataSearchToken(value);
+    const kind = searchTokenKind(target.displayToken);
+    const request: SearchRequest = target.includeTag
+      ? {
+        text: "",
+        includeTags: [target.includeTag],
+        excludeTags: [],
+        languages: ui.search.explore.languages,
+        sort: ui.exploreSort,
+        pageSize: 50,
+      }
+      : {
+        text: target.displayToken,
+        includeTags: [],
+        excludeTags: [],
+        languages: ui.search.explore.languages,
+        sort: ui.exploreSort,
+        pageSize: 50,
+      };
+    if (!kind && !target.displayToken) return;
+    setExploreSearchOverride(request);
     dispatch({ type: "navigate", view: "explore" });
-    dispatch({ type: "search.commit", view: "explore", value });
-    setSearchRefresh((refresh) => refresh + 1);
+    dispatch({ type: "search.commit", view: "explore", value: target.displayToken });
     if (galleryViewport.current) galleryViewport.current.scrollTop = 0;
-  }, []);
+  }, [ui.exploreSort, ui.search.explore.languages]);
 
   const toggleMetadataFavorite = useCallback(async (value: string) => {
     const token = normalizeMetadataToken(value);
@@ -1426,50 +1444,8 @@ export default function App() {
   );
 
   const searchSuggestions = useMemo<SearchSuggestion[]>(() => {
-    const suggestions: SearchSuggestion[] = [];
-    const seen = new Set<string>();
-    for (const entry of searchHistory) {
-      const value = historySuggestionValue(entry);
-      if (!value) continue;
-      const dedupeKey = `history:${JSON.stringify({
-        text: entry.text,
-        includeTags: entry.includeTags,
-        excludeTags: entry.excludeTags,
-        languages: entry.languages,
-        sort: entry.sort,
-      })}`;
-      if (seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-      const filterCount = entry.includeTags.length + entry.excludeTags.length;
-      suggestions.push({
-        type: "HISTORY",
-        value,
-        extra: `최근 검색 · ${entry.useCount}회${filterCount ? ` · 태그 조건 ${filterCount}개` : ""}`,
-        favorite: favoriteMetadata.has(normalizeMetadataToken(value)),
-        request: {
-          text: entry.text,
-          includeTags: [...entry.includeTags],
-          excludeTags: [...entry.excludeTags],
-          languages: [...entry.languages],
-          sort: entry.sort,
-          pageSize: entry.pageSize,
-        },
-      });
-    }
-    for (const favorite of favoriteRecords) {
-      const value = favoriteToken(favorite);
-      const dedupeKey = `favorite:${value}`;
-      if (seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-      suggestions.push({
-        type: favorite.namespace === "artist" ? "ARTIST" : "TAG",
-        value,
-        extra: `${favorite.namespace} 즐겨찾기`,
-        favorite: true,
-      });
-    }
-    return suggestions;
-  }, [favoriteMetadata, favoriteRecords, searchHistory]);
+    return buildSearchSuggestionCatalog({ history: searchHistory, favorites: favoriteRecords, galleries: displayGalleries.values() });
+  }, [displayGalleries, favoriteRecords, searchHistory]);
 
   const autoFindGroups = useMemo(() => {
     const groups = new Map<string, Gallery[]>();
@@ -1531,7 +1507,7 @@ export default function App() {
           <ViewHeader
             view={ui.view}
             search={ui.search[ui.view]}
-            suggestions={searchSuggestions}
+            suggestions={ui.view === "explore" ? searchSuggestions : []}
             activityCount={activeDownloadCount}
             activityOpen={ui.overlays.activityOpen}
             onDraft={(value) => dispatch({ type: "search.draft", view: ui.view, value })}
@@ -1541,7 +1517,7 @@ export default function App() {
               dispatch({ type: "search.commit", view: ui.view, value });
               if (ui.view !== "explore") showToast("현재 결과를 필터했습니다.");
             }}
-            onSelectSuggestion={(suggestion) => {
+            onSelectSuggestion={(suggestion, value) => {
               if (ui.view === "explore" && suggestion.request) {
                 setExploreSearchOverride(suggestion.request);
                 dispatch({ type: "search.languages", view: "explore", languages: suggestion.request.languages });
@@ -1549,7 +1525,11 @@ export default function App() {
               } else if (ui.view === "explore") {
                 setExploreSearchOverride(null);
               }
-              dispatch({ type: "search.commit", view: ui.view, value: suggestion.value });
+              dispatch({ type: "search.commit", view: ui.view, value });
+            }}
+            onCompleteSuggestion={(value) => {
+              dispatch({ type: "search.draft", view: ui.view, value });
+              dispatch({ type: "search.suggestions", view: ui.view, open: false });
             }}
             onLanguages={(languages) => {
               if (ui.view === "explore") setExploreSearchOverride(null);

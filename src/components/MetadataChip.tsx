@@ -1,4 +1,5 @@
 import { forwardRef, type MouseEvent, type MouseEventHandler } from "react";
+import { metadataSearchToken } from "../search/searchTokens";
 
 type MetadataIconProps = {
   kind: "artist" | "group";
@@ -79,7 +80,7 @@ export const MetadataChip = forwardRef<HTMLButtonElement, MetadataChipProps>(fun
       onClickCapture={onClickCapture}
       onClick={(event) => {
         event.stopPropagation();
-        onSearch(searchValue ?? value);
+        onSearch(kind === "tag" ? metadataSearchToken(value, searchValue).displayToken : (searchValue ?? value));
       }}
       onContextMenu={handleContextMenu}
     >
