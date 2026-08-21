@@ -66,8 +66,8 @@ pub fn parse_nozomi_ids(bytes: &[u8]) -> Result<Vec<u64>, SourceContractError> {
     }
 
     let mut ids = Vec::with_capacity(bytes.len() / 4);
-    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
-        let id = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
+        let id = u32::from_be_bytes(*chunk);
         if id == 0 {
             return Err(SourceContractError::invalid_data(
                 format!("nozomi item {index}"),
