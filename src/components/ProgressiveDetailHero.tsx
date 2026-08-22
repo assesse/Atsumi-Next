@@ -19,7 +19,6 @@ type Original = { requestId: string; url: string; width: number; height: number 
  * local-media URL, never an IPC byte array or a WebView remote fetch.
  */
 export function ProgressiveDetailHero({ gallery, pageDimension, client, backend }: ProgressiveDetailHeroProps) {
-  const [coverTerminal, setCoverTerminal] = useState(false);
   const [listenerReady, setListenerReady] = useState(false);
   const [original, setOriginal] = useState<Original | null>(null);
   const [displayOriginal, setDisplayOriginal] = useState(false);
@@ -62,7 +61,6 @@ export function ProgressiveDetailHero({ gallery, pageDimension, client, backend 
     const currentGeneration = ++generation.current;
     requestId.current = null;
     earlyReady.current.clear();
-    setCoverTerminal(false);
     setOriginal(null);
     setDisplayOriginal(false);
     return () => {
@@ -98,7 +96,11 @@ export function ProgressiveDetailHero({ gallery, pageDimension, client, backend 
   }, [acceptReady, backend]);
 
   useEffect(() => {
-    if (!listenerReady || !coverTerminal || requestId.current || original || !gallery.id) return;
+    // The retained cover is only the progressive display layer. Starting the
+    // page-one original must not depend on that shared thumbnail request
+    // reaching a terminal state; a stalled cover would otherwise stall the
+    // independent original forever.
+    if (!listenerReady || requestId.current || original || !gallery.id) return;
     let active = true;
     const requestGeneration = generation.current;
     void backend.detailOriginalRequest({ galleryId: gallery.id, sourcePage: 1 }).then((result) => {
@@ -117,7 +119,7 @@ export function ProgressiveDetailHero({ gallery, pageDimension, client, backend 
       }
     });
     return () => { active = false; };
-  }, [backend, coverTerminal, gallery.id, listenerReady, original]);
+  }, [backend, gallery.id, listenerReady, original]);
 
   const ratio = pageDimension ?? gallery.pageDimensions?.find((page) => page.sourcePage === 1);
   const expectedAspectRatio = ratio?.width !== undefined && ratio?.height !== undefined
@@ -144,7 +146,6 @@ export function ProgressiveDetailHero({ gallery, pageDimension, client, backend 
         client={client}
         sizing="container"
         expectedAspectRatio={expectedAspectRatio}
-        onTerminalSnapshot={() => setCoverTerminal(true)}
         alt={`${gallery.title} 표지`}
       />
       {original ? (

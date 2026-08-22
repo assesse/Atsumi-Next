@@ -29,6 +29,8 @@
 ## 변경과 검증
 
 - 관련 코드와 계약을 먼저 좁게 조사하고 관련 테스트를 우선 실행한다.
+- 사용자가 수정 결과를 확인하는 canonical 경로는 바탕화면의 `Atsumi Next - 최신 개발판` 바로가기와 저장소의 `start-debug-app.vbs`다. 사용자에게 보이는 기능을 변경한 뒤에는 이 current-source 개발 실행기가 미커밋 변경까지 포함한 현재 작업트리를 정상적으로 빌드·실행하는지 확인한다.
+- `start-app.vbs`의 기존 release binary를 최신 변경 확인 경로로 안내하지 않는다. 사용자가 명시적으로 release build를 요청한 경우에만 release를 새로 빌드한다.
 - fixture와 local mock server를 기본 CI에 사용하고 live smoke는 opt-in으로 분리한다.
 - generated output, `.runtime`, DB, 다운로드 이미지, `target`, `dist`, `node_modules`를 commit하지 않는다.
 - 사용자 변경을 폐기하거나 `git reset --hard`, 무검토 `git clean`, force push를 하지 않는다.

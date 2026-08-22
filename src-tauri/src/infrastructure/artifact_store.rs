@@ -670,7 +670,9 @@ fn recover_conflicting_page_files(
     Ok(())
 }
 
-fn normalized_webp_bytes(page: &DownloadPagePayload) -> Result<Vec<u8>, DownloadPipelineError> {
+pub(crate) fn normalized_webp_bytes(
+    page: &DownloadPagePayload,
+) -> Result<Vec<u8>, DownloadPipelineError> {
     if page.source_format == DownloadSourceImageFormat::Webp {
         decode_image(&page.bytes, ImageFormat::WebP)?;
         return Ok(page.bytes.clone());

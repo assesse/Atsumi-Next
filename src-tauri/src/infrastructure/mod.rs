@@ -9,6 +9,7 @@ mod sqlite_repository;
 pub mod telemetry;
 mod windows_folder_picker;
 
+pub(crate) use artifact_store::normalized_webp_bytes;
 pub use artifact_store::FilesystemArtifactStore;
 pub use artifact_thumbnail::CompositeThumbnailResolver;
 pub use fixture_search::FixtureSearchRepository;

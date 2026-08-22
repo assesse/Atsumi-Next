@@ -319,7 +319,18 @@ impl SearchRepository for HitomiLiveAdapter {
             match self.fetch_metadata(related_id) {
                 Ok(metadata) => related.push(gallery_summary(&metadata, SearchSort::Recent, 0)?),
                 Err(error) if error.code == SourceErrorCode::NotFound => {}
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    // Related galleries are supplemental. A transient or
+                    // malformed related item must not withhold the main
+                    // gallery's page dimensions and leave Detail loading
+                    // forever. Keep diagnostics sanitized to IDs and code.
+                    tracing::debug!(
+                        gallery_id = id,
+                        related_gallery_id = related_id,
+                        code = ?error.code,
+                        "skipping unavailable related gallery metadata"
+                    );
+                }
             }
         }
         let mut known_pages = HashSet::new();

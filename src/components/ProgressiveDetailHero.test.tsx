@@ -7,6 +7,40 @@ import { ThumbnailClient } from "../thumbnail";
 import { ProgressiveDetailHero } from "./ProgressiveDetailHero";
 
 describe("ProgressiveDetailHero", () => {
+  it("starts the independent original even while the shared cover is still pending", async () => {
+    const gallery = { ...mockGalleries[0]!, pageDimensions: [{ sourcePage: 1, width: 720, height: 1080 }] };
+    const request = vi.fn(async () => ({
+      ok: true as const,
+      data: { requestId: "original-pending-cover", galleryId: gallery.id, sourcePage: 1 },
+    }));
+    const backend = {
+      on: vi.fn(async () => () => undefined),
+      detailOriginalRequest: request,
+      detailOriginalCancel: vi.fn(async () => ({ ok: true as const, data: true })),
+      detailOriginalRelease: vi.fn(async () => ({ ok: true as const, data: true })),
+    } as unknown as BackendClient;
+    const client = new ThumbnailClient({
+      resolve: () => new Promise(() => undefined),
+      cancel: vi.fn(),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<ProgressiveDetailHero gallery={gallery} client={client} backend={backend} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(request).toHaveBeenCalledWith({ galleryId: gallery.id, sourcePage: 1 });
+    expect(container.querySelector(".detail-cover")).toBeTruthy();
+
+    await act(async () => root.unmount());
+    client.dispose();
+    container.remove();
+  });
+
   it("accepts a ready event that arrives before the request token response", async () => {
     let ready: ((event: BackendEventMap["detail-original:ready"]) => void) | undefined;
     const gallery = { ...mockGalleries[0]!, pageDimensions: [{ sourcePage: 1, width: 720, height: 1080 }] };

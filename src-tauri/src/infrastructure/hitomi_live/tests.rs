@@ -88,6 +88,15 @@ impl FakeTransport {
             }));
     }
 
+    fn fail(&self, url: String, error: SourceContractError) {
+        self.responses
+            .lock()
+            .unwrap()
+            .entry(url)
+            .or_default()
+            .push_back(Err(error));
+    }
+
     fn call_count(&self, url: &str) -> usize {
         self.calls
             .lock()
@@ -100,6 +109,36 @@ impl FakeTransport {
     fn was_called(&self, url: &str) -> bool {
         self.call_count(url) > 0
     }
+}
+
+#[test]
+fn detail_keeps_main_page_dimensions_when_related_metadata_is_temporarily_unavailable() {
+    let transport = Arc::new(FakeTransport::default());
+    transport.respond(
+        galleryinfo_script_url(7_001).unwrap(),
+        "text/javascript",
+        gallery_script(7_001, "Main detail fixture", "[7002]").into_bytes(),
+    );
+    transport.fail(
+        galleryinfo_script_url(7_002).unwrap(),
+        crate::source::map_http_status(503, None).unwrap_err(),
+    );
+    let adapter = HitomiLiveAdapter::with_transport(
+        HitomiLiveConfig {
+            request_start_interval: Duration::ZERO,
+            ..HitomiLiveConfig::default()
+        },
+        transport,
+    );
+
+    let detail = adapter
+        .gallery_detail_get(GalleryId::new(7_001).unwrap())
+        .expect("related failure is supplemental")
+        .expect("main detail exists");
+
+    assert_eq!(detail.summary.title, "Main detail fixture");
+    assert!(!detail.page_dimensions.is_empty());
+    assert!(detail.related.is_empty());
 }
 
 impl HttpTransport for FakeTransport {
@@ -479,6 +518,31 @@ fn gallery_script(id: u64, title: &str, related: &str) -> String {
         .replace("\"id\": \"424242\"", &format!("\"id\": \"{id}\""))
         .replace("Fixture } Landscape Collection", title)
         .replace("[424240, \"424241\", 424240]", related)
+}
+
+#[test]
+#[ignore = "opt-in live Floating Detail metadata regression smoke"]
+fn live_floating_detail_metadata_for_reported_galleries() {
+    assert_eq!(
+        std::env::var("ATSUMI_ALLOW_LIVE_SMOKE").as_deref(),
+        Ok("1"),
+        "live network access requires ATSUMI_ALLOW_LIVE_SMOKE=1"
+    );
+    let adapter = HitomiLiveAdapter::new(HitomiLiveConfig {
+        request_start_interval: Duration::ZERO,
+        ..HitomiLiveConfig::default()
+    })
+    .expect("construct live adapter");
+
+    for id in [4_133_977, 4_136_275, 4_137_316] {
+        let detail = adapter
+            .gallery_detail_get(GalleryId::new(id).unwrap())
+            .unwrap_or_else(|error| panic!("gallery {id} detail failed: {error}"))
+            .unwrap_or_else(|| panic!("gallery {id} detail was missing"));
+        assert_eq!(detail.summary.id.get(), id);
+        assert_eq!(detail.summary.pages as usize, detail.page_dimensions.len());
+        assert!(!detail.page_dimensions.is_empty());
+    }
 }
 
 #[test]

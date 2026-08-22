@@ -9,7 +9,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{domain::GalleryId, infrastructure::HitomiLiveAdapter, thumbnail::CancellationToken};
+use crate::{
+    domain::GalleryId,
+    infrastructure::{normalized_webp_bytes, HitomiLiveAdapter},
+    thumbnail::CancellationToken,
+};
 
 use super::DownloadSourcePort;
 
@@ -205,22 +209,41 @@ fn resolve_original(
     if cancellation.is_cancelled() {
         return;
     }
-    let content_type = match payload.source_format {
-        super::DownloadSourceImageFormat::Webp => "image/webp",
-        super::DownloadSourceImageFormat::Jpeg => "image/jpeg",
-        super::DownloadSourceImageFormat::Png => "image/png",
-        super::DownloadSourceImageFormat::Avif => "image/avif",
-    }
-    .to_owned();
-    let extension = match payload.source_format {
-        super::DownloadSourceImageFormat::Webp => "webp",
-        super::DownloadSourceImageFormat::Jpeg => "jpg",
-        super::DownloadSourceImageFormat::Png => "png",
-        super::DownloadSourceImageFormat::Avif => "avif",
-    };
+    // WebView2 support for AVIF varies by runtime. Downloads keep their normal
+    // storage pipeline, but the one transient Detail hero is normalized to
+    // WebP so a valid AVIF result cannot silently fail at the display boundary.
+    let (bytes, content_type, extension) =
+        if payload.source_format == super::DownloadSourceImageFormat::Avif {
+            match normalized_webp_bytes(&payload) {
+                Ok(bytes) => (bytes, "image/webp".to_owned(), "webp"),
+                Err(error) => {
+                    tracing::debug!(
+                        gallery_id = token.gallery_id,
+                        code = ?error.code,
+                        "detail original display conversion failed"
+                    );
+                    return;
+                }
+            }
+        } else {
+            let content_type = match payload.source_format {
+                super::DownloadSourceImageFormat::Webp => "image/webp",
+                super::DownloadSourceImageFormat::Jpeg => "image/jpeg",
+                super::DownloadSourceImageFormat::Png => "image/png",
+                super::DownloadSourceImageFormat::Avif => unreachable!("handled above"),
+            }
+            .to_owned();
+            let extension = match payload.source_format {
+                super::DownloadSourceImageFormat::Webp => "webp",
+                super::DownloadSourceImageFormat::Jpeg => "jpg",
+                super::DownloadSourceImageFormat::Png => "png",
+                super::DownloadSourceImageFormat::Avif => unreachable!("handled above"),
+            };
+            (payload.bytes.clone(), content_type, extension)
+        };
     let final_path = root.join(format!("{}.{}", token.request_id, extension));
     let temporary_path = root.join(format!("{}.part", token.request_id));
-    if fs::write(&temporary_path, payload.bytes).is_err() || cancellation.is_cancelled() {
+    if fs::write(&temporary_path, bytes).is_err() || cancellation.is_cancelled() {
         let _ = fs::remove_file(temporary_path);
         return;
     }
@@ -274,5 +297,46 @@ mod tests {
             DetailOriginalSupervisor::new(source, temp.path(), events).expect("supervisor");
         assert!(!stale_root.join("stale.webp").exists());
         assert!(supervisor.read_media("../outside").is_none());
+    }
+
+    #[test]
+    #[ignore = "opt-in live Floating Detail original regression smoke"]
+    fn live_reported_gallery_produces_a_webview_displayable_original() {
+        assert_eq!(
+            std::env::var("ATSUMI_ALLOW_LIVE_SMOKE").as_deref(),
+            Ok("1"),
+            "live network access requires ATSUMI_ALLOW_LIVE_SMOKE=1"
+        );
+        let temp = tempfile::tempdir().expect("temp data dir");
+        let (events, receiver) = std::sync::mpsc::channel();
+        let source = Arc::new(
+            HitomiLiveAdapter::new(crate::infrastructure::HitomiLiveConfig::default())
+                .expect("source"),
+        );
+        let supervisor =
+            DetailOriginalSupervisor::new(source, temp.path(), events).expect("supervisor");
+        let token = supervisor
+            .request(DetailOriginalRequest {
+                gallery_id: 4_133_977,
+                source_page: 1,
+            })
+            .expect("request original");
+        let ready = receiver
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("original readiness event");
+        assert_eq!(ready.request_id, token.request_id);
+        assert_ne!(ready.content_type, "image/avif");
+        let (bytes, content_type) = supervisor
+            .read_media(&ready.request_id)
+            .expect("scoped media bytes");
+        assert_eq!(content_type, ready.content_type);
+        assert!(match content_type.as_str() {
+            "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+            "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+            "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            _ => false,
+        });
+        assert!(supervisor.release(&ready.request_id));
+        assert!(supervisor.read_media(&ready.request_id).is_none());
     }
 }
