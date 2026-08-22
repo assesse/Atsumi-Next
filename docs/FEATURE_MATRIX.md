@@ -1,91 +1,66 @@
 # 기능 유지와 재설계 행렬
 
-## 분류
+2026-08-21의 schema v18과 통합 검증을 기준으로 한다. `구현`은 자동 테스트 또는 opt-in live 증거가 있는 기능, `제한`은 구현됐지만 아래 경계가 남은 기능, `보류`는 계약만 있거나 의도적으로 비활성화한 기능이다.
 
-- `유지`: 사용자 동작과 결과를 보존한다.
-- `재설계`: 목적은 유지하되 화면 또는 내부 흐름을 바꾼다.
-- `재구현`: UI는 대체로 유지하고 내부 소유권을 새로 만든다.
-- `보류`: 초기 milestone에는 포함하지 않는다.
-- `확인 필요`: 사용자 결정이 필요하다.
+## 탐색·카드·미리보기
 
-## 탐색과 검색
-
-| 기능 | Classic | Next 방향 | 완료 조건 |
-|---|---|---|---|
-| 앱 시작 시 Recent | 기본 Explore를 자동 로드 | 유지 | 시작 후 별도 입력 없이 최신 목록 표시 |
-| Hitomi 전체 검색 | 검색 버튼으로 실행 | 유지 | 입력 중 네트워크 검색 없음 |
-| 기본 포함/숨김 태그 | 검색식에 결합 | 재구현 | 서버 검색 인자로 적용되고 결과 수 손실 원인 표시 |
-| 언어 필터 | 탭별 다중 선택 | 유지 | Explore, Auto Find, Downloads가 독립 상태 보존 |
-| 정렬 | 최신 및 인기 기간 | 재구현 | Hitomi 인자 fixture와 결과 순서 검증 |
-| 검색 추천 | 전체 인덱스와 최근 기록 | 재구현 | 입력 지연 없이 prefix 우선, 즐겨찾기 표시 |
-| 페이지 탐색 | 현재와 다음 페이지 선로딩 | 유지 | 현재 텍스트 완료 후 다음 버튼 활성, 이미지 완료 상태 표시 |
-| 카드 1~4열 | 설정 기반 반응형 | 유지 | resize 중 카드가 즉시 재배치되고 내용이 넘치지 않음 |
-| 카드 선택 | 일반, Ctrl, Shift, 재선택 | 유지하되 상호작용표 승인 필요 | 모든 탭에서 같은 규칙 적용 |
+| 기능 | 상태 | 현재 계약과 증거 |
+|---|---|---|
+| 시작 Recent·명시적 검색 | 구현 | 입력 change는 local draft이고 제출만 원격 요청·이력을 만든다. |
+| Explore page cache | 구현 | query별 settled page 최대 5개, 현재 page ±2 창, 인접 page prefetch, page별 scroll 복원. |
+| 오래된 검색 취소 | 구현 | reset/query 교체가 `requestId`별 `search_page_cancel`을 호출하며 cancel-before-start와 active 취소를 backend 테스트로 고정했다. 늦은 완료도 현재 query를 덮지 않는다. |
+| 가로 밀도형 앨범 카드 | 구현 | 점수·날짜를 표시하지 않는다. grid별 행 coordinator가 같은 시각 행의 intrinsic cover 최대 높이를 공유하고 본문은 외곽 높이를 늘리지 않는다. 페이지 수·gallery ID와 기존 metadata 종류는 유지한다. |
+| 높이 제한 adaptive 태그 | 구현 | 일곱 preset이 2/2/3/4/5/6/7줄 예산을 정의하고 실제 chip과 자릿수별 `+N` 폭을 함께 측정한다. favorite 우선/Female→Male→중립 stable sort이며 namespace marker와 favorite star를 분리한다. |
+| Explore 태그 자동완성 | 구현 | 수동 최신화한 SQLite tag/female/male catalog만 조회한다. loaded gallery metadata와 synthetic 후보는 사용하지 않으며 artist/group/series/character 자동완성은 범위 밖이다. |
+| 반응형 열·카드 폭 | 구현 | 160/190/220/250/280/320/360px만 허용하고 기본 220px, 1~4열을 사용한다. 원본 비율은 `contain`으로 보존하며 각 grid·불완전 마지막 행은 독립 계산한다. |
+| 중국어 badge | 구현 | 로컬 `cn.svg`와 텍스트 `CN` fallback을 사용하며 런타임 네트워크 의존성이 없다. |
+| 전역 thumbnail coordinator | 구현 | Explore, Downloads, Detail, gallery/internal Review가 하나의 coordinator와 `galleryCover`/`galleryPage`/`artifactPage` key를 공유한다. |
+| viewport 왕복 retention | 구현 | 마지막 구독 해제 뒤 400ms orphan grace, 완료 display asset 120초·최대 256개 보존. Rust cache는 512 entries/64MiB/30분이고 retryable/permanent negative TTL은 3초/5분이다. |
 
 ## 즐겨찾기와 Auto Find
 
-| 기능 | Classic | Next 방향 | 완료 조건 |
-|---|---|---|---|
-| metadata 즐겨찾기 | 우클릭, 주황색 표시 | 유지 | 카드, 상세, Related에서 동일 |
-| 작가 최신작 갱신 | 버튼으로 실행 | 유지 | 탐색 이력과 무관하게 backend가 조회 |
-| 다운로드 기준 | 가장 예전 등록 gallery ID | 재검토 | 의미와 예외가 UI에 명확히 표시 |
-| 다운로드 이력 없음 | 작가 전체 기간 탐색 | 유지 | 사용자 명시 결정 반영 |
-| 전체/작가별 보기 | segmented control | 유지 | 중앙 정렬과 동일 높이 |
+| 기능 | 상태 | 현재 계약과 증거 |
+|---|---|---|
+| 5개 metadata 즐겨찾기 | 구현 | artist/group/series/character/tag를 SQLite에 저장하고 카드·상세·Related가 같은 projection을 쓴다. |
+| 명시적 작가 갱신 | 구현 | 현재 artist favorite만 source 조회 대상이며 동시에 한 run만 허용한다. 진행·후보·취소·실패가 재시작 뒤 복원된다. |
+| 이력 범위 정책 | 구현 | `include_all_history` 또는 `newer_than_oldest_downloaded`를 run마다 snapshot한다. |
+| cutoff 증거 | 구현 | complete 또는 quarantined이고 실제 artifact가 있는 소유 gallery만 사용한다. `source=verified_owned_artifact`, `policyVersion=1`, 작가별 oldest ID와 qualified count를 저장한다. 증거가 없으면 cutoff하지 않는다. |
+| 대형 작가 제한 | 제한 | Nozomi ID에 cutoff를 먼저 적용한 뒤 최대 50,000 candidate를 처리한다. 초과 시 `candidate_limit_after_cutoff` truncation을 저장하며 무제한 조회를 주장하지 않는다. |
 
-## 다운로드
+## 다운로드·artifact
 
-| 기능 | Classic | Next 방향 | 완료 조건 |
-|---|---|---|---|
-| queue 추가 후 자동 시작 | 구현됨 | 유지 | 슬롯이 차면 대기 후 자동 시작 |
-| 전체 및 선택 다운로드 | 구현됨 | 재설계 | 중복 명령 없이 상태에 맞는 항목만 실행 |
-| 전역 병렬 설정 | 1~30, 실측 기본 5 | 재구현 | scheduler가 전체 이미지 요청 예산으로 해석 |
-| WebP 저장 | 우선 URL 또는 변환 | 유지 | HTML/오류 본문 저장 금지 |
-| 재시도와 cooldown | 문자열 로그 기반 | 재구현 | 오류 분류별 정책과 시도 이력 저장 |
-| 앱 종료 복구 | interrupted 변환 | 재구현 | 영속 job의 단계와 재개 지점 복원 |
-| 파일 열기 | 첫 이미지 shell open | 유지 | Explorer 더블클릭과 같은 연결 프로그램 사용 |
-| 제거 | 목록과 파일 삭제 | 재설계 | quarantine/휴지통, undo, DB transaction |
-| 무결성 | 수동 전체 검사 가능 | 재설계 | 대상 선택 또는 작업 상세에서 실행 |
+| 기능 | 상태 | 현재 계약과 증거 |
+|---|---|---|
+| queue·resume·reconcile | 구현 | 검증 page checkpoint부터 같은 entry/job attempt를 재개하고 manifest·DB·파일이 맞기 전에는 completed가 되지 않는다. |
+| 새 artifact 폴더 template | 구현 | 기본 `[{artist}] {title} [{group}] {id}`. `{id}` 필수, Windows reserved/control 문자·길이·root containment를 검증한다. |
+| 기존 artifact 자동 이름 변경 | 보류 | 구현하지 않았다. 기존 `relative_directory`와 `root_snapshot`은 DB trigger로 immutable이며 새 template은 새 artifact에만 적용된다. |
+| WebP/JPEG/PNG 입력 | 구현 | decode·검증 후 lossless WebP로 저장하고 SHA-256·manifest를 기록한다. |
+| AVIF 입력 | 제한 | 고정된 순수 Rust decoder로 bounded decode한다. experimental이며 대표 live corpus 검증은 아직 없다. |
+| JPEG XL 입력 | 보류 | 후보 형식과 diagnostic은 기록하지만 decoder는 없다. fallback 후보를 계속 시도하고 모두 실패하면 non-retryable `IMAGE_FORMAT_UNSUPPORTED`다. |
+| live Hitomi gallery download | 구현 | 2026-08-20 opt-in smoke: gallery 4113714, 18/18 WebP, selected payload 12,396,942 bytes. 단일 gallery 증거다. |
+| source revision identity | 구현 | v18에서 remote 문자열 identity와 작은 내부 revision을 분리해 4113714/4132312에서 발생한 unsigned→signed SQLite overflow 경로를 제거했다. `u64::MAX` 회귀 test가 경계를 고정한다. |
+| 격리·undo | 구현 | root 내부 crash-safe saga만 사용하고 자동 overwrite/delete/purge하지 않는다. |
 
-## 상세 보기
+## Review·운영
 
-| 기능 | Classic | Next 방향 | 완료 조건 |
-|---|---|---|---|
-| floating tabs | 여러 탭과 전체 닫기 | 유지 | 부모 자식 인접 삽입과 최소화 복원 |
-| 전체 metadata | 작가, 그룹, 언어, 시리즈, 캐릭터, 태그 | 유지 | 빈 값은 높이는 유지하되 placeholder 문구 없음 |
-| metadata 검색 이동 | 좌클릭 | 유지 | 올바른 prefix로 Explore 검색 실행 |
-| Related galleries 5개 | 카드형 | 유지 | metadata와 썸네일, 즐겨찾기 일관성 |
-| 페이지 preview | 18개 높이와 lazy loading | 재구현 | 내부 스크롤 위치로 추가 batch 로드 |
-| 페이지 확대 | thumbnail 확대 | 유지 | 원본 또는 적절한 preview 소스 정책 확정 |
+| 기능 | 상태 | 현재 계약과 증거 |
+|---|---|---|
+| 작품 중복 Review | 구현 | verified artifact, versioned hash/evidence, monotonic alignment, revision CAS, hide/series/pair-exclude 이력. 자동 파일 삭제 없음. |
+| 앨범 내부 페이지 Review | 구현 | exact 또는 최소 2행 시각 블록, immutable source page number, 계획 preview, quarantine/undo saga. |
+| 과거 데이터 이전 UI/API | 폐기 | active frontend/backend/runtime 경로를 제거했다. 기존 DB의 v14 migration과 역사적 table만 호환을 위해 보존한다. |
+| 미리보기 cache clear | 구현 | 완료된 재생성 가능 cache만 제거하고 active/visible request와 다운로드 artifact를 보존한다. |
+| 탐색 데이터 초기화 | 구현 | 명시적 확인과 단일 transaction으로 favorites/history/Auto Find 데이터만 제거한다. active run과 다운로드 DB/파일은 안전하게 보호한다. |
+| E-Hentai relation | 보류 | port와 evidence type만 있고 명시적 session이 없는 production에서는 비활성이다. |
+| 모바일 transfer | 보류 | 초기 완성 범위에 없다. |
 
-## 중복 판독
+## Floating Detail renderer stability
 
-| 기능 | Classic | Next 방향 | 완료 조건 |
-|---|---|---|---|
-| 작품 후보 생성 | 작가, 제목, 관계, 이미지 근거 혼합 | 재구현 | 보수적 후보화와 근거별 confidence |
-| 다운로드 중 exact/visual 감지 | 해시 생성 중 중단 | 유지 | 기존 숨김과 판정 이력을 반영 |
-| 전수 작품 비교 | SHA-256/dHash/pHash | 재구현 | 모든 페이지쌍 완료, 진행률과 취소 지원 |
-| 부모/후보 숨기기 | 파일, 목록, 해시 제거 | 재구현 | 하나의 domain transaction과 판정 이력 |
-| 연작 묶기 | 함께 선택/다운로드 | 유지, 명칭 확인 필요 | 그룹 단위 명령과 탭 열기 |
-| 유사 묶음 해제 | pair 제외 | 유지 | 이후 후보 생성에서 pair를 제외 |
-| 내부 중복 검사 | 다운로드 완료 항목 | 유지 | 실제 로컬 파일과 기존 thumbnail 재사용 |
-| 장면 블록 UI | 유사한 연속 토막별 행 비교 | 유지 | 행 동기 스크롤과 묶음별 선택 |
-| 페이지 제거 | 원본 번호 유지, quarantine | 유지 | 재다운로드와 무결성이 manifest 존중 |
+| 기능 | 상태 | 현재 계약과 증거 |
+|---|---|---|
+| 고정 page window | 구현 | metadata 방향에 따라 2열 8장 또는 3열 9장만 생성한다. Related/viewport 크기와 thumbnail decode가 구독량을 바꾸지 않는다. |
+| Detail source-page lifecycle | 구현 | Detail scroll root IntersectionObserver와 400ms orphan grace 뒤 source-page Blob URL을 즉시 revoke한다. cover/artifact retained cache는 유지한다. |
+| progressive hero | 구현 | cached cover를 먼저 보이고 page 1 original은 app-owned transient local protocol file을 `load`+`decode` 성공 뒤에만 겹쳐 표시한다. |
 
-## 설정과 운영
+## 완료 판단
 
-| 기능 | Classic | Next 방향 | 완료 조건 |
-|---|---|---|---|
-| 설정 영속 | localStorage + JSON | 재구현 | SQLite 한 곳이 canonical |
-| 창 크기 | 저장 시도 | 재구현 | 정상 종료와 강제 종료 후 모두 복원 |
-| 캐시/데이터/전체 제거 | 위험도별 3버튼 | 유지, 내부 범위 재정의 | 실행 전 정확한 범위와 예상 크기 표시 |
-| 작업 상태 | 카드와 토스트 | 재설계 | Activity Center와 항목별 상세 제공 |
-| 모바일 transfer | 잔여 UI | 보류 | 초기 버전에서 제거 |
-| E-Hentai 세션 | WebView 자동 조회 | 보류 후 재평가 | Classic fixture만 먼저 유지 |
-
-## 사용자 승인 대기 핵심
-
-1. 좌측 최상위 영역을 `Explore`, `Auto Find`, `Downloads` 3개로 유지할지
-2. Review를 별도 최상위 화면으로 둘지, Downloads에서만 진입할지
-3. Classic의 밝은 콘텐츠와 어두운 좌측 rail 시각 언어를 유지할지
-4. 연작 묶기의 최종 사용자 문구
-5. 내부 페이지 제거의 기본 보존 기간과 undo 범위
+현재 자동 completion gate는 통과했다. 최신 `tools/verify.ps1 -SkipInstall` 증거는 frontend 23 files/140 tests, Rust library 140 passed(외부 live smoke 1 ignored), startup 2 passed와 typecheck/build/fmt/check/clippy/whitespace, Tauri release `--no-bundle` 성공이다. 실데이터 안전 경계와 수동 검토 항목은 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)에 별도로 유지한다.

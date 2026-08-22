@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atsumi adaptive GalleryCard review</title>
+  <style>
+    /* CN flag is the hand-authored public-domain geometry in ../src/assets/flags/cn.svg. */
+    :root { color-scheme: light; font-family: "Segoe UI Variable Text", "Segoe UI", "Malgun Gothic", sans-serif; color: #16242b; background: #f3f6f5; }
+    body { margin: 0; padding: 24px; }
+    header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+    h1, p { margin: 0; }
+    h1 { font-size: 20px; }
+    p { color: #64767d; font-size: 13px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    label { color: #52676e; font-size: 13px; font-weight: 600; }
+    select, button { min-height: 34px; padding: 5px 10px; font: inherit; color: #42585f; background: #fff; border: 1px solid #cfdddb; border-radius: 8px; }
+    button[aria-pressed="true"] { color: #0879aa; background: #e8f6f9; border-color: #73bed5; }
+    .gallery-grid { display: grid; grid-template-columns: repeat(var(--columns), minmax(0, 1fr)); align-items: start; gap: 14px; }
+    .gallery-card { display: grid; grid-template-columns: minmax(112px, var(--preview)) minmax(0, 1fr); align-self: stretch; block-size: var(--row-height, auto); min-width: 0; min-height: 0; overflow: hidden; background: #fff; border: 0; border-radius: 8px; box-shadow: inset 0 0 0 1px #d5e1df, 0 1px 2px rgb(19 47 54 / 4%); }
+    .cover { position: relative; height: 100%; min-height: 0; overflow: hidden; background: #d8e4e2; border-right: 1px solid #d5e1df; }
+    .cover-art { position: absolute; top: 50%; left: 50%; width: 100%; max-height: 100%; background: linear-gradient(135deg, #a9c7c8, #e7eeed 44%, #6c9da3); transform: translate(-50%, -50%); }
+    .cover-art::after { position: absolute; inset: 16% 14%; content: ""; border: 1px solid rgb(255 255 255 / 60%); transform: rotate(-8deg); }
+    .language-flag { position: absolute; z-index: 2; right: 8px; bottom: 8px; display: grid; place-items: center; width: 30px; height: 22px; padding: 3px; background: rgb(255 255 255 / 90%); border-radius: 6px; }
+    .language-flag img { width: 100%; height: 100%; object-fit: contain; }
+    .status-pill { position: absolute; z-index: 3; top: 8px; left: 8px; padding: 4px 7px; color: #fff; font-size: 11px; font-weight: 700; background: #d96f21; border: 0; border-radius: 999px; }
+    .status-pill.duplicate { background: #b04478; }
+    .status-pill.complete { background: #26745c; }
+    .card-content { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: var(--card-gap); block-size: 100%; min-width: 0; min-height: 0; padding: var(--card-padding); overflow: hidden; }
+    .card-title { min-width: 0; overflow: hidden; font-size: var(--title-size); line-height: var(--title-line); }
+    .card-title strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+    .card-title small { display: block; overflow: hidden; color: #52676e; font-size: var(--body-size); line-height: var(--body-line); text-overflow: ellipsis; white-space: nowrap; }
+    .byline { min-width: 0; overflow: hidden; color: #52717a; font-size: var(--body-size); line-height: var(--body-line); text-overflow: ellipsis; white-space: nowrap; }
+    .tag-list { position: relative; display: flex; flex-wrap: wrap; align-content: start; gap: var(--card-gap) 6px; min-width: 0; min-height: 0; max-height: var(--tag-max-height); overflow: hidden; }
+    .tag, .tag-overflow { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 4px; min-width: 0; max-width: min(150px, 100%); height: var(--chip-height); padding: 0 8px; overflow: hidden; color: #566b71; font-size: var(--tag-size); white-space: nowrap; background: #f3f7f6; border-radius: 999px; }
+    .tag-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .tag-namespace, .tag-favorite { flex: 0 0 auto; font-size: 11px; font-weight: 700; }
+    .tag.female .tag-namespace { color: #cb2b68; }
+    .tag.male .tag-namespace { color: #1674bc; }
+    .tag.favorite { color: #76501e; background: #fff7eb; box-shadow: inset 0 0 0 1px #edb36f; }
+    .tag-favorite { color: #e47d17; }
+    .tag-overflow { font-variant-numeric: tabular-nums; font-weight: 600; background: #eef4f2; }
+    .tag-overflow-measure { position: absolute; visibility: hidden; pointer-events: none; }
+    .tag[hidden],
+    .tag-overflow[hidden] { display: none; }
+    .case-label { display: block; margin-top: 4px; color: #819197; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+    .meta { display: flex; justify-content: end; gap: 5px; color: #64767d; font-size: var(--footer-size); line-height: var(--footer-line); }
+    .meta span + span::before { margin-right: 5px; color: #a2b0b2; content: "·"; }
+    @media (max-width: 1180px) { .gallery-grid { grid-template-columns: repeat(min(var(--columns), 3), minmax(0, 1fr)); } }
+    @media (max-width: 780px) { .gallery-grid { grid-template-columns: repeat(min(var(--columns), 2), minmax(0, 1fr)); } }
+    @media (max-width: 560px) { .gallery-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>GalleryCard row-height & preset review</h1><p>각 행은 가장 큰 자연 썸네일 높이를 공유하며, 짧은 표지는 contain으로 중앙 정렬됩니다. 텍스트는 행 높이를 늘리지 않습니다.</p></div>
+    <div class="controls" aria-label="Preview controls">
+      <label for="preview">Preview</label><select id="preview"><option>160</option><option>190</option><option selected>220</option><option>250</option><option>280</option><option>320</option><option>360</option></select>
+      <span aria-hidden="true">px</span>
+      <button type="button" data-columns="1" aria-pressed="false">1</button><button type="button" data-columns="2" aria-pressed="false">2</button><button type="button" data-columns="3" aria-pressed="false">3</button><button type="button" data-columns="4" aria-pressed="true">4</button>
+    </div>
+  </header>
+  <main id="gallery-grid" class="gallery-grid" style="--columns:4; --preview:220px" aria-label="GalleryCard mixed-ratio examples"></main>
+  <script>
+    const galleries = [
+      { label: "1:2 very tall · 3 tags", ratio: [1, 2], title: "Archive of Rain | 비 내리는 도시의 기록", artist: "serein", pages: 64, id: "#4051038", language: "kr", tags: ["female:glasses", "male:suit", "mystery"], favoriteTags: ["female:glasses", "male:suit"] },
+      { label: "1:1 square · 10 tags", ratio: [1, 1], title: "Summer Pool Notes | 수영부 기록", subtitle: "여름 수영부 노트", artist: "mizuno", group: "blue hour", pages: 84, id: "#4051027", language: "jp", tags: ["female:swimsuit", "male:swimsuit", "female:short hair", "school", "full color", "sports", "pool", "summer", "long hair", "short hair"], favoriteTags: ["female:swimsuit", "male:swimsuit"] },
+      { label: "3:4 · 25+ tags", ratio: [3, 4], title: "A deliberately long canonical title demonstrates tooltip and bounded two-line display | Longer secondary text | English translation", subtitle: "명시된 번역 자막", artist: "paperlane", group: "night studio", pages: 42, id: "#4050974", language: "cn", tags: ["female:schoolgirl uniform", "male:uniform", "an extraordinarily long tag label that measures", "library", "mystery", "night", "full color", "rain", "outdoors", "glasses", "long hair", "short hair", "school", "制服", "adult", "story", "monochrome", "solo", "group", "sports", "summer", "winter", "festival", "city", "translation", "bonus"], favoriteTags: ["female:schoolgirl uniform", "male:uniform"] },
+      { label: "4:3 landscape · downloading", ratio: [4, 3], title: "Platform 19", artist: "railbird", pages: 55, id: "#4050932", language: "us", tags: ["male:uniform", "female:short hair", "science fiction", "train"], favoriteTags: ["male:uniform", "female:short hair", "science fiction"], status: "downloading" },
+      { label: "1:1 · duplicate review", ratio: [1, 1], title: "Twin Copies | 중복 검토", subtitle: "검토 화면으로 이동", artist: "archivebot", group: "imports", pages: 20, id: "#4050901", language: "cn", tags: ["female:glasses", "male:suit", "duplicate", "full color"], favoriteTags: ["female:glasses"], status: "duplicate" },
+      { label: "2:3 · complete · final partial row", ratio: [2, 3], title: "Finished Library", artist: "seabird", pages: 112, id: "#4050888", language: "kr", tags: ["female:long hair", "male:glasses", "favorite neutral", "complete"], favoriteTags: ["female:long hair", "male:glasses", "favorite neutral"], status: "complete" },
+    ];
+    const presets = {
+      160: { rows:2,title:14,body:11,tag:11,footer:10.5,titleLine:18,bodyLine:15,tagLine:15,footerLine:15,chip:22,padding:9,gap:3 },
+      190: { rows:2,title:15,body:11.5,tag:11,footer:11,titleLine:19,bodyLine:16,tagLine:15,footerLine:15,chip:22,padding:10,gap:4 },
+      220: { rows:3,title:16,body:12,tag:12,footer:12,titleLine:20,bodyLine:16,tagLine:16,footerLine:16,chip:24,padding:12,gap:4 },
+      250: { rows:4,title:17,body:12.5,tag:12.5,footer:12,titleLine:21,bodyLine:17,tagLine:17,footerLine:16,chip:25,padding:13,gap:5 },
+      280: { rows:5,title:18,body:13,tag:13,footer:12.5,titleLine:22,bodyLine:18,tagLine:18,footerLine:17,chip:26,padding:14,gap:5 },
+      320: { rows:6,title:19,body:14,tag:14,footer:13,titleLine:24,bodyLine:19,tagLine:19,footerLine:18,chip:28,padding:15,gap:6 },
+      360: { rows:7,title:20,body:15,tag:15,footer:14,titleLine:25,bodyLine:20,tagLine:20,footerLine:19,chip:30,padding:16,gap:6 },
+    };
+    const tagParts = (tag) => { const [namespace, ...rest] = tag.split(":"); return { namespace: rest.length ? namespace : "", label: (rest.length ? rest.join(":") : tag).replaceAll("_", " ") }; };
+    const titleParts = (title, subtitle) => {
+      const [primary, ...piped] = title.split("|");
+      const safePrimary = primary.trim();
+      const parts = [...piped.flatMap((part) => part.split("|")), subtitle || ""].map((part) => part.trim()).filter(Boolean);
+      return { primary: safePrimary, secondary: [...new Set(parts.filter((part) => part !== safePrimary))].join(" · ") };
+    };
+    const flag = (language) => language === "cn" ? "../src/assets/flags/cn.svg" : language === "kr" ? "../src/assets/flags/classic-runtime/kr.png" : language === "us" ? "../src/assets/flags/classic-runtime/us.png" : "../src/assets/flags/classic-runtime/jp.png";
+    const languageLabel = (language) => ({ cn: "중국어", kr: "한국어", us: "영어", jp: "일본어" }[language]);
+    const sortedTags = (gallery) => gallery.tags
+      .map((tag, index) => { const parts = tagParts(tag); return { tag, index, parts, favorite: gallery.favoriteTags?.includes(tag) }; })
+      .sort((left, right) => Number(right.favorite) - Number(left.favorite)
+        || ({ female: 0, male: 1 }[left.parts.namespace] ?? 2) - ({ female: 0, male: 1 }[right.parts.namespace] ?? 2)
+        || left.index - right.index);
+    const chipsFit = (chips, width, height, gapX, gapY) => {
+      let rowWidth = 0, rowHeight = 0, usedHeight = 0;
+      for (const chip of chips) {
+        const rect = chip.getBoundingClientRect();
+        const itemWidth = Math.min(width, rect.width);
+        const nextRow = rowWidth > 0 && rowWidth + gapX + itemWidth > width;
+        if (nextRow) { usedHeight += rowHeight + gapY; rowWidth = 0; rowHeight = 0; }
+        if (usedHeight + rect.height > height) return false;
+        rowWidth = rowWidth ? rowWidth + gapX + itemWidth : itemWidth;
+        rowHeight = Math.max(rowHeight, rect.height);
+      }
+      return true;
+    };
+    const fitTagChips = (tagList) => {
+      const tags = [...tagList.querySelectorAll(".tag")];
+      const overflow = tagList.querySelector(".tag-overflow-value");
+      const overflowMeasures = [...tagList.querySelectorAll(".tag-overflow-measure")];
+      const style = getComputedStyle(tagList);
+      const gapX = parseFloat(style.columnGap) || 0;
+      const gapY = parseFloat(style.rowGap) || 0;
+      if (!tagList.clientWidth || !tagList.clientHeight) return;
+      tags.forEach((tag) => { tag.hidden = false; });
+      overflow.hidden = true;
+      if (chipsFit(tags, tagList.clientWidth, tagList.clientHeight, gapX, gapY)) return;
+      for (let visible = tags.length - 1; visible >= 0; visible -= 1) {
+        const hidden = tags.length - visible;
+        const measure = overflowMeasures[String(hidden).length - 1];
+        if (!measure || !chipsFit([...tags.slice(0, visible), measure], tagList.clientWidth, tagList.clientHeight, gapX, gapY)) continue;
+        tags.slice(visible).forEach((tag) => { tag.hidden = true; });
+        overflow.hidden = false;
+        overflow.textContent = "+" + hidden;
+        overflow.setAttribute("aria-label", "추가 태그 " + hidden + "개");
+        overflow.title = tags.slice(visible).map((tag) => tag.dataset.value).join(", ");
+        return;
+      }
+      tags.forEach((tag) => { tag.hidden = true; });
+    };
+    const grid = document.querySelector("#gallery-grid");
+    const coordinateRows = () => {
+      const rows = [];
+      [...grid.querySelectorAll(":scope > .gallery-card")].forEach((card) => {
+        const cover = card.querySelector(".cover");
+        const width = Number(cover.dataset.width);
+        const height = Number(cover.dataset.height);
+        const naturalHeight = cover.getBoundingClientRect().width * height / width;
+        let row = rows.find((candidate) => Math.abs(candidate.top - card.offsetTop) <= 1);
+        if (!row) { row = { top: card.offsetTop, cards: [], height: 0 }; rows.push(row); }
+        row.cards.push(card);
+        row.height = Math.max(row.height, naturalHeight);
+      });
+      rows.forEach((row) => row.cards.forEach((card) => card.style.setProperty("--row-height", `${Math.round(row.height * 100) / 100}px`)));
+    };
+    const render = () => {
+      const preview = Number(document.querySelector("#preview").value);
+      const preset = presets[preview];
+      grid.style.setProperty("--preview", `${preview}px`);
+      grid.style.setProperty("--title-size", `${preset.title}px`);
+      grid.style.setProperty("--body-size", `${preset.body}px`);
+      grid.style.setProperty("--tag-size", `${preset.tag}px`);
+      grid.style.setProperty("--footer-size", `${preset.footer}px`);
+      grid.style.setProperty("--title-line", `${preset.titleLine}px`);
+      grid.style.setProperty("--body-line", `${preset.bodyLine}px`);
+      grid.style.setProperty("--tag-line", `${preset.tagLine}px`);
+      grid.style.setProperty("--footer-line", `${preset.footerLine}px`);
+      grid.style.setProperty("--chip-height", `${preset.chip}px`);
+      grid.style.setProperty("--card-padding", `${preset.padding}px`);
+      grid.style.setProperty("--card-gap", `${preset.gap}px`);
+      grid.style.setProperty("--tag-max-height", `${preset.chip * preset.rows + preset.gap * (preset.rows - 1)}px`);
+      grid.innerHTML = galleries.map((gallery) => {
+        const title = titleParts(gallery.title, gallery.subtitle);
+        const statusLabel = gallery.status === "duplicate" ? "중복 후보" : gallery.status === "complete" ? "완료" : "다운로드 중";
+        const status = gallery.status ? `<span class="status-pill ${gallery.status}">${statusLabel}</span>` : "";
+        const group = gallery.group ? ` <span aria-label="그룹">· ${gallery.group}</span>` : "";
+        const ordered = sortedTags(gallery);
+        const tags = ordered.map(({ tag, parts, favorite }) => {
+          const marker = parts.namespace === "female" ? '<span class="tag-namespace" aria-hidden="true">F</span>' : parts.namespace === "male" ? '<span class="tag-namespace" aria-hidden="true">M</span>' : "";
+          const star = favorite ? '<span class="tag-favorite" aria-hidden="true">★</span>' : "";
+          return `<span class="tag ${parts.namespace}${favorite ? " favorite" : ""}" data-value="${tag}">${marker}<span class="tag-label">${parts.label}</span>${star}</span>`;
+        }).join("");
+        const overflowMeasures = ["+8", "+88", "+888"].map((value) => `<span class="tag-overflow tag-overflow-measure" aria-hidden="true">${value}</span>`).join("");
+        return `<article class="gallery-card" aria-label="${gallery.title}" title="${gallery.title}"><div class="cover" data-width="${gallery.ratio[0]}" data-height="${gallery.ratio[1]}"><span class="cover-art" style="aspect-ratio:${gallery.ratio[0]}/${gallery.ratio[1]}"></span>${status}<span class="language-flag"><img src="${flag(gallery.language)}" alt="${languageLabel(gallery.language)}"></span></div><div class="card-content"><div class="card-title" title="${gallery.title}"><strong>${title.primary}</strong>${title.secondary ? `<small>${title.secondary}</small>` : ""}<span class="case-label">${gallery.label}</span></div><div class="byline">${gallery.artist}${group}</div><div class="tag-list" aria-label="태그: ${gallery.tags.join(", ")}">${tags}<span class="tag-overflow tag-overflow-value" role="note" hidden></span>${overflowMeasures}</div><div class="meta"><span>${gallery.pages}p</span><span>${gallery.id}</span></div></div></article>`;
+      }).join("");
+      requestAnimationFrame(() => {
+        coordinateRows();
+        grid.querySelectorAll(".tag-list").forEach(fitTagChips);
+      });
+    };
+    document.querySelector("#preview").addEventListener("change", render);
+    document.querySelectorAll("[data-columns]").forEach((button) => button.addEventListener("click", () => { grid.style.setProperty("--columns", button.dataset.columns); document.querySelectorAll("[data-columns]").forEach((item) => item.setAttribute("aria-pressed", String(item === button))); requestAnimationFrame(render); }));
+    new ResizeObserver(() => requestAnimationFrame(() => {
+      coordinateRows();
+      grid.querySelectorAll(".tag-list").forEach(fitTagChips);
+    })).observe(grid);
+    render();
+  </script>
+</body>
+</html>

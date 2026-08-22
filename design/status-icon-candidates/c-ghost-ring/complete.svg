@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" style="color:var(--status-color,#34785f)" role="img" aria-labelledby="title">
+  <title id="title">다운로드 완료</title>
+  <circle cx="12" cy="12" r="8.25" stroke="currentColor" stroke-width="1.5"/>
+  <path d="m8 12.1 2.65 2.65 5.45-5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

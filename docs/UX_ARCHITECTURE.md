@@ -46,7 +46,10 @@
 - 앨범 목록만 스크롤
 - 1~4열 responsive grid
 - 카드 최소 폭을 우선하고 설정의 최대 열 수를 상한으로 사용
-- resize 시 JavaScript로 매 카드 폭을 계산하지 않고 CSS layout을 우선 사용
+- 미리보기 폭은 160/190/220/250/280/320/360px 일곱 단계이며 기본은 220px이다.
+- 각 grid는 직접 자식 카드의 시각적 행을 관찰한다. 같은 행은 원본 thumbnail 비율로 계산한 가장 높은 cover 높이를 공유하고, 다른 grid와 불완전 마지막 행은 독립적으로 계산한다.
+- cover는 중립 frame 안에 `contain`/center로 표시해 가로·세로 비율이 서로 다른 이미지도 찌그러뜨리거나 잘라내지 않는다.
+- 작가와 선택적 그룹은 카드 좌측 정렬 바이라인 한 줄에 namespace 아이콘과 함께 표시한다.
 
 ## 화면별 구조
 
@@ -76,10 +79,12 @@
 ### Detail workspace
 
 - 화면 위에 떠 있지만 자체 tab strip과 scroll context를 가진다.
+- Classic과 같은 중앙 정렬 1120px 폭을 기준으로 하되, 충분히 넓은 앱 창에서는 최대 1860px까지 연속적으로 확장한다.
 - 전체 닫기는 tab strip 최우측, 탭 닫기는 각 탭에 위치한다.
 - 최소화 시 view header 중앙의 복원 control로 돌아온다.
 - Related gallery를 열면 현재 탭 바로 다음에 자식 탭으로 삽입한다.
-- 페이지 preview 영역은 우측 metadata 높이에 맞추되 내부 최대 높이와 독립 스크롤을 갖는다.
+- browser review sprite는 실제 cell 비율인 1:1을 보존하고, production thumbnail은 resolver가 전달한 width/height와 `object-fit: contain`으로 source 비율을 유지한다. page를 누르면 같은 전역 coordinator의 critical 요청을 사용하는 확대 dialog가 열린다.
+- 페이지 preview 전체는 잘라내거나 짧은 중첩 스크롤에 가두지 않고 상세 본문의 단일 scroll context에서 확인한다.
 
 ### Review workspace
 
@@ -112,7 +117,7 @@
 공통 작업 상태:
 
 - 대기
-- 받는 중 N%
+- 다운로드 중 animation icon과 접근 가능한 진행률
 - 해시 중
 - 검사 중
 - 중단됨
@@ -133,6 +138,14 @@ type WorkPresentation = {
 ```
 
 카드에는 label과 progress만 표시하고, 오류 원문과 재시도 이력은 detail에 둔다.
+
+## 설정과 초기화
+
+- 설정은 불필요한 좌측 하위 navigation 없이 한 scroll panel에서 일반·저장·초기화를 구분한다.
+- `미리보기 캐시 비우기`는 다시 받을 수 있는 완료 cache만 대상으로 하며 현재 화면과 다운로드 파일을 지우지 않는다.
+- `화면·네트워크 기본값 복원`은 저장 전 draft만 바꾸고 download root와 folder template은 유지한다.
+- `탐색 데이터 초기화`는 favorites·검색 이력·Auto Find 데이터 범위를 보여 주고 명시적 확인 뒤 실행한다. 실행 중 Auto Find가 있으면 아무것도 지우지 않고 완료/취소 후 재시도를 안내한다.
+- 다운로드 DB, artifact, manifest와 사용자 파일의 일괄 삭제는 이 화면에 제공하지 않는다.
 
 ## 프로토타입 검증 과제
 
