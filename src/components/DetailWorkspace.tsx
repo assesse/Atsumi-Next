@@ -7,13 +7,9 @@ import {
 } from "../thumbnail";
 import { FluentIcon } from "./FluentIcon";
 import { GalleryThumbnail } from "./GalleryThumbnail";
+import { ProgressiveDetailHero } from "./ProgressiveDetailHero";
 import { MetadataChip } from "./MetadataChip";
-import {
-  DETAIL_ORIENTATION_SAMPLE_SIZE,
-  detailPreviewLayout,
-  type DetailPreviewLayout,
-  type DetailPreviewSample,
-} from "./detailPreviewLayout";
+import { detailPreviewLayout, type DetailPreviewLayout } from "./detailPreviewLayout";
 import { sortGalleryTags } from "./galleryCardLayout";
 import { galleryPreviewPreset, galleryPreviewPresetStyle } from "../layout/galleryPreviewPresets";
 import {
@@ -21,6 +17,7 @@ import {
   detailPreviewWindowRange,
   detailPreviewWindowSize,
 } from "./detailPreviewWindow";
+import { backend as defaultBackend, type BackendClient } from "../api/backend";
 
 type DetailWorkspaceProps = {
   tabs: GalleryId[];
@@ -31,6 +28,7 @@ type DetailWorkspaceProps = {
   previewWidth?: number;
   relatedPreviewWidth?: number;
   thumbnailClient?: ThumbnailClient;
+  backend?: BackendClient;
   onActivate: (id: GalleryId) => void;
   onClose: (id: GalleryId) => void;
   onCloseAll: () => void;
@@ -57,6 +55,16 @@ const galleryPageCount = (pages: number): number =>
 
 const metadataSearchToken = (namespace: string, value: string): string =>
   `${namespace}:${value.trim().replace(/\s+/g, "_")}`;
+
+const relatedCoverAspectRatio = (gallery: Gallery): string => {
+  const width = gallery.thumbnailWidth;
+  const height = gallery.thumbnailHeight;
+  if (
+    typeof width === "number" && Number.isFinite(width) && width > 0
+    && typeof height === "number" && Number.isFinite(height) && height > width
+  ) return `${width} / ${height}`;
+  return "2 / 3";
+};
 
 function MetadataBox({ label, values, type, favorite, favoriteMetadata, onSearch, onFavorite }: MetadataBoxProps) {
   return (
@@ -89,6 +97,7 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
     previewWidth = 220,
     relatedPreviewWidth = 240,
     thumbnailClient,
+    backend = defaultBackend,
     onActivate,
     onClose,
     onCloseAll,
@@ -99,7 +108,6 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
     onMetadataSearch,
     onMetadataFavorite,
   } = props;
-  const detailBody = useRef<HTMLDivElement>(null);
   const workspace = useRef<HTMLElement>(null);
   const restoreButton = useRef<HTMLButtonElement>(null);
   const previousVisible = useRef(false);
@@ -109,14 +117,10 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
   const previewCloseButton = useRef<HTMLButtonElement>(null);
   const previewOpener = useRef<HTMLButtonElement | null>(null);
   const previewClosingInternally = useRef(false);
-  const detailMedia = useRef<HTMLElement>(null);
-  const relatedList = useRef<HTMLDivElement>(null);
   const [previewPage, setPreviewPage] = useState<number | null>(null);
-  const previewTerminals = useRef(new Map<GalleryId, Map<number, DetailPreviewSample>>());
   const previewLayouts = useRef(new Map<GalleryId, DetailPreviewLayout>());
-  const previewWindowSizes = useRef(new Map<GalleryId, number>());
   const previewWindowStarts = useRef(new Map<GalleryId, number>());
-  const [, setPreviewLayoutRevision] = useState(0);
+  const [, setPreviewRevision] = useState(0);
 
   useEffect(() => {
     const visible = tabs.length > 0 && !minimized;
@@ -143,14 +147,8 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
 
   useEffect(() => {
     const activeTabs = new Set(tabs);
-    for (const id of previewTerminals.current.keys()) {
-      if (!activeTabs.has(id)) previewTerminals.current.delete(id);
-    }
     for (const id of previewLayouts.current.keys()) {
       if (!activeTabs.has(id)) previewLayouts.current.delete(id);
-    }
-    for (const id of previewWindowSizes.current.keys()) {
-      if (!activeTabs.has(id)) previewWindowSizes.current.delete(id);
     }
     for (const id of previewWindowStarts.current.keys()) {
       if (!activeTabs.has(id)) previewWindowStarts.current.delete(id);
@@ -158,7 +156,7 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
   }, [tabs]);
 
   useEffect(() => {
-    detailBody.current?.scrollTo?.({ top: 0, left: 0 });
+    workspace.current?.querySelector<HTMLElement>(".detail-body")?.scrollTo?.({ top: 0, left: 0 });
     if (!minimized && activeId !== null) {
       window.requestAnimationFrame(() => {
         workspace.current?.querySelector<HTMLElement>("[role='tab'][aria-selected='true']")?.focus();
@@ -186,64 +184,31 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
 
   const gallery = activeId === null ? undefined : galleries.get(activeId);
   const totalPageCount = gallery ? galleryPageCount(gallery.pages) : 0;
-  const previewPageCount = gallery ? (previewWindowSizes.current.get(gallery.id) ?? Math.min(totalPageCount, 12)) : 0;
+  const pageOneDimension = gallery?.pageDimensions?.find((page) => page.sourcePage === 1);
+  const metadataReady = gallery?.pageDimensions !== undefined;
+  const metadataLayout = gallery && metadataReady
+    ? detailPreviewLayout((gallery.pageDimensions ?? []).slice(0, 8))
+    : undefined;
+  const lockedPreviewLayout = gallery ? previewLayouts.current.get(gallery.id) : undefined;
+  const previewLayout = lockedPreviewLayout ?? metadataLayout ?? { columns: 3 as const, orientation: "pending" as const };
+  const previewPageCount = gallery && metadataReady
+    ? detailPreviewWindowSize(totalPageCount, previewLayout.columns)
+    : 0;
   const previewWindowStart = gallery ? (previewWindowStarts.current.get(gallery.id) ?? 1) : 1;
   const previewPages = detailPreviewWindowRange(previewWindowStart, totalPageCount, previewPageCount);
-  const previewSampleCount = Math.min(previewPages.length, DETAIL_ORIENTATION_SAMPLE_SIZE);
-  const lockedPreviewLayout = gallery ? previewLayouts.current.get(gallery.id) : undefined;
-  const previewLayout = lockedPreviewLayout ?? { columns: 3 as const, orientation: "pending" as const };
-
-  const recordPreviewTerminal = (page: number, terminal: DetailPreviewSample) => {
-    if (!gallery || !previewPages.includes(page) || previewLayouts.current.has(gallery.id)) return;
-    const entries = previewTerminals.current.get(gallery.id) ?? new Map<number, DetailPreviewSample>();
-    const previous = entries.get(page);
-    if (previous?.status === terminal.status && previous?.width === terminal.width && previous?.height === terminal.height) return;
-    entries.set(page, terminal);
-    previewTerminals.current.set(gallery.id, entries);
-    if (entries.size !== previewSampleCount) return;
-    const samples = previewPages.slice(0, previewSampleCount).map((pageNumber) => entries.get(pageNumber)!);
-    previewLayouts.current.set(gallery.id, detailPreviewLayout(samples));
-    setPreviewLayoutRevision((revision) => revision + 1);
-  };
 
   useEffect(() => {
-    if (!gallery) return;
-    const updateWindow = () => {
-      const nextSize = detailPreviewWindowSize({
-        pageCount: totalPageCount,
-        columns: previewLayout.columns,
-        gridWidth: detailMedia.current?.clientWidth ?? 0,
-        relatedHeight: relatedList.current?.getBoundingClientRect().height ?? 0,
-        viewportHeight: detailBody.current?.clientHeight ?? 0,
-        rowGap: 8,
-        layout: previewLayout,
-      });
-      const currentSize = previewWindowSizes.current.get(gallery.id);
-      const currentStart = previewWindowStarts.current.get(gallery.id) ?? 1;
-      const nextStart = detailPreviewWindowClampStart(currentStart, totalPageCount, nextSize);
-      if (currentSize === nextSize && currentStart === nextStart) return;
-      previewWindowSizes.current.set(gallery.id, nextSize);
-      previewWindowStarts.current.set(gallery.id, nextStart);
-      setPreviewLayoutRevision((revision) => revision + 1);
-    };
-    updateWindow();
-    const Observer = globalThis.ResizeObserver;
-    if (!Observer) return;
-    const observer = new Observer(updateWindow);
-    // detailMedia contains the preview grid itself. Observing it feeds a new
-    // window size back from the thumbnails we just rendered, which can keep
-    // resizing the detail and eventually subscribe an entire album at once.
-    // Workspace width and the Related list are stable outer metrics instead.
-    [workspace.current, relatedList.current].forEach((node) => node && observer.observe(node));
-    return () => observer.disconnect();
-  }, [gallery?.id, gallery?.relatedIds?.length, previewLayout.columns, relatedPreviewWidth, totalPageCount]);
+    if (!gallery || !metadataLayout || previewLayouts.current.has(gallery.id)) return;
+    previewLayouts.current.set(gallery.id, metadataLayout);
+    setPreviewRevision((revision) => revision + 1);
+  }, [gallery?.id, metadataLayout]);
 
   const setPreviewWindowStart = (start: number) => {
     if (!gallery || !previewPageCount) return;
     const nextStart = detailPreviewWindowClampStart(start, totalPageCount, previewPageCount);
     if (previewWindowStarts.current.get(gallery.id) === nextStart) return;
     previewWindowStarts.current.set(gallery.id, nextStart);
-    setPreviewLayoutRevision((revision) => revision + 1);
+    setPreviewRevision((revision) => revision + 1);
   };
 
   useEffect(() => {
@@ -340,31 +305,27 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
           </div>
           <div
             className="detail-body"
-            ref={detailBody}
+            data-thumbnail-scroll-root
             id={`detail-panel-${gallery.id}`}
             role="tabpanel"
             aria-labelledby={`detail-tab-${gallery.id}`}
           >
             <div className="detail-layout">
-              <section ref={detailMedia} className="detail-media">
-                <GalleryThumbnail
-                  className="detail-cover"
-                  thumbnailKey={galleryCoverThumbnailKey(gallery)}
-                  consumer="detail"
-                  priority="critical"
-                  client={thumbnailClient}
-                  sizing="intrinsic"
-                  expectedAspectRatio={gallery.thumbnailWidth !== undefined && gallery.thumbnailHeight !== undefined
-                    ? { width: gallery.thumbnailWidth, height: gallery.thumbnailHeight }
-                    : undefined}
-                  alt={`${gallery.title} 표지`}
-                />
+              <section className="detail-media">
+                <ProgressiveDetailHero gallery={gallery} pageDimension={pageOneDimension} client={thumbnailClient} backend={backend} />
                 <div
                   className="preview-grid"
                   data-preview-columns={previewLayout.columns}
                   data-preview-orientation={previewLayout.orientation}
                 >
-                  {previewPages.map((page) => (
+                  {!metadataReady ? (
+                    <div className="preview-grid-placeholder" role="status">페이지 정보를 불러오는 중…</div>
+                  ) : previewPages.map((page, index) => {
+                    const dimension = gallery?.pageDimensions?.find((item) => item.sourcePage === page);
+                    const fallback = previewLayout.columns === 2
+                      ? { width: 16, height: 9 }
+                      : { width: 2, height: 3 };
+                    return (
                     <button
                       key={page}
                       type="button"
@@ -379,15 +340,18 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                         as="span"
                         thumbnailKey={sourcePageThumbnailKey(gallery, page)}
                         consumer="detail"
-                        priority={page - previewWindowStart < DETAIL_ORIENTATION_SAMPLE_SIZE ? "visible" : "prefetch"}
+                        priority={index < previewLayout.columns ? "visible" : "prefetch"}
                         client={thumbnailClient}
                         sizing="intrinsic"
-                        onTerminalSnapshot={(terminal) => recordPreviewTerminal(page, terminal)}
+                        expectedAspectRatio={dimension?.width !== undefined && dimension?.height !== undefined
+                          ? { width: dimension.width, height: dimension.height }
+                          : fallback}
                         alt={`${gallery.title} ${page}페이지 미리보기`}
                       />
                       <span>{page}</span>
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
                 {totalPageCount > 0 ? (
                   <nav className="preview-window-nav" aria-label="상세 페이지 탐색">
@@ -412,13 +376,15 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                     <FluentIcon glyph="\uE896" />
                   </button>
                 </div>
-                <div className="metadata-grid">
-                  <MetadataBox label="작가" values={[gallery.artist]} type="artist" favorite={gallery.favorite} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
-                  <MetadataBox label="그룹" values={gallery.group ? [gallery.group] : []} type="group" favoriteMetadata={favoriteMetadata} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
-                  <MetadataBox label="언어" values={[gallery.language]} type="language" onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
-                  <MetadataBox label="시리즈" values={gallery.series ?? []} type="series" favoriteMetadata={favoriteMetadata} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
-                  <MetadataBox label="캐릭터" values={gallery.characters ?? []} type="character" favoriteMetadata={favoriteMetadata} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
-                  <div className="metadata-box tags-box">
+                <div className="detail-metadata-layout">
+                  <div className="detail-metadata-primary">
+                    <MetadataBox label="작가" values={[gallery.artist]} type="artist" favorite={gallery.favorite} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
+                    <MetadataBox label="그룹" values={gallery.group ? [gallery.group] : []} type="group" favoriteMetadata={favoriteMetadata} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
+                    <MetadataBox label="언어" values={[gallery.language]} type="language" onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
+                    <MetadataBox label="시리즈" values={gallery.series ?? []} type="series" favoriteMetadata={favoriteMetadata} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
+                    <MetadataBox label="캐릭터" values={gallery.characters ?? []} type="character" favoriteMetadata={favoriteMetadata} onSearch={onMetadataSearch} onFavorite={onMetadataFavorite} />
+                  </div>
+                  <div className="metadata-box tags-box detail-metadata-tags">
                     <span>태그</span>
                     <div className="metadata-value">
                       {sortGalleryTags(gallery.tags, favoriteMetadata).map((tag) => (
@@ -430,9 +396,8 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                 <section className="related-section">
                   <div className="section-heading">
                     <h3>Related galleries</h3>
-                    <span>{Math.min(5, gallery.relatedIds?.length ?? 0)}</span>
                   </div>
-                  <div ref={relatedList} className="related-list">
+                  <div className="related-list">
                     {(gallery.relatedIds ?? [])
                       .flatMap((id) => {
                         const item = galleries.get(id);
@@ -444,7 +409,11 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                           key={item.id}
                           className="related-card"
                           tabIndex={0}
-                          style={{ ...galleryPreviewPresetStyle(galleryPreviewPreset(previewWidth)), "--related-preview-width": `${relatedPreviewWidth}px` } as CSSProperties}
+                          style={{
+                            ...galleryPreviewPresetStyle(galleryPreviewPreset(previewWidth)),
+                            "--related-preview-width": `${relatedPreviewWidth}px`,
+                            "--related-cover-aspect-ratio": relatedCoverAspectRatio(item),
+                          } as CSSProperties}
                           title="더블클릭 또는 Enter로 상세 열기"
                           onDoubleClick={(event) => {
                             if ((event.target as Element).closest("button")) return;
@@ -460,12 +429,9 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                             className="related-cover"
                             thumbnailKey={galleryCoverThumbnailKey(item)}
                             consumer="detail"
-                            priority="visible"
+                            priority="prefetch"
                             client={thumbnailClient}
-                            sizing="intrinsic"
-                            expectedAspectRatio={item.thumbnailWidth !== undefined && item.thumbnailHeight !== undefined
-                              ? { width: item.thumbnailWidth, height: item.thumbnailHeight }
-                              : undefined}
+                            sizing="container"
                             alt={`${item.title} 표지`}
                           />
                           <div className="related-copy card-content">

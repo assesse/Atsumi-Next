@@ -182,7 +182,7 @@ describe("App Phase 3A backend flow", () => {
       await settle();
     });
     expect(searchPageGet.mock.calls.filter(([, page]) => page === 3)).toHaveLength(thirdCallsBeforeReturn);
-    expect(viewport.scrollTop).toBe(417);
+    await vi.waitFor(() => expect(viewport.scrollTop).toBe(417));
 
     await act(async () => root.unmount());
     container.remove();
@@ -289,7 +289,7 @@ describe("App Phase 3A backend flow", () => {
       expect(container.querySelector(".detail-workspace")).not.toBeNull();
 
       const cardTag = [...archive.querySelectorAll<HTMLButtonElement>(".tag")]
-        .find((chip) => chip.title.startsWith("full color"));
+        .find((chip) => chip.querySelector(".tag-label")?.textContent === "full color");
       if (!cardTag) throw new Error("Selected-card neutral tag was not rendered");
       await act(async () => {
         archive.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
@@ -305,7 +305,7 @@ describe("App Phase 3A backend flow", () => {
         await settle();
       });
       const detailTag = [...container.querySelectorAll<HTMLButtonElement>(".detail-workspace .tags-box .tag")]
-        .find((chip) => chip.title.startsWith("full color"));
+        .find((chip) => chip.querySelector(".tag-label")?.textContent === "full color");
       if (!detailTag) throw new Error("Floating Detail neutral tag was not rendered");
       await act(async () => {
         detailTag.click();
@@ -318,7 +318,7 @@ describe("App Phase 3A backend flow", () => {
         await settle();
       });
       const relatedTag = [...container.querySelectorAll<HTMLButtonElement>(".detail-workspace .related-card .tag")]
-        .find((chip) => chip.title.startsWith("coat"));
+        .find((chip) => chip.querySelector(".tag-label")?.textContent === "coat");
       if (!relatedTag) throw new Error("Related neutral tag was not rendered");
       const callsBeforeRepeat = search.mock.calls.length;
       await act(async () => {
@@ -330,7 +330,7 @@ describe("App Phase 3A backend flow", () => {
         container.querySelector<HTMLButtonElement>(".detail-restore")?.click();
         await settle();
         [...container.querySelectorAll<HTMLButtonElement>(".detail-workspace .related-card .tag")]
-          .find((chip) => chip.title.startsWith("coat"))?.click();
+          .find((chip) => chip.querySelector(".tag-label")?.textContent === "coat")?.click();
         await settle();
       });
       expect(search.mock.calls).toHaveLength(callsBeforeRepeat + 2);

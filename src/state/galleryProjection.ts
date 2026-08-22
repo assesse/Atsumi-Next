@@ -1,4 +1,4 @@
-import type { DownloadEntry, GalleryDetail, GalleryPage, GallerySummary } from "../api/contracts";
+import type { DownloadEntry, GalleryDetail, GalleryPage, GalleryPageDimension, GallerySummary } from "../api/contracts";
 import type { Gallery, GalleryId, Language } from "../core/types";
 
 type RuntimeGallerySummary = Partial<Record<keyof GallerySummary, unknown>>;
@@ -25,6 +25,20 @@ const language = (value: unknown): Language | undefined => {
     default:
       return undefined;
   }
+};
+
+const pageDimensions = (values: readonly GalleryPageDimension[]): Gallery["pageDimensions"] => {
+  const known = new Set<number>();
+  const result: GalleryPageDimension[] = [];
+  for (const value of values) {
+    const sourcePage = positiveInteger(value.sourcePage);
+    if (sourcePage === undefined || known.has(sourcePage)) continue;
+    known.add(sourcePage);
+    const width = positiveInteger(value.width);
+    const height = positiveInteger(value.height);
+    result.push({ sourcePage, ...(width !== undefined ? { width } : {}), ...(height !== undefined ? { height } : {}) });
+  }
+  return result;
 };
 
 const publishedAtFromRank = (rank: number): string => {
@@ -93,7 +107,11 @@ export function mergeGalleryDetail(
 ): ReadonlyMap<GalleryId, Gallery> {
   const next = new Map(galleries);
   const projected = projectGallerySummary(detail, next.get(detail.id));
-  next.set(detail.id, { ...projected, relatedIds: detail.related.map((item) => item.id) });
+  next.set(detail.id, {
+    ...projected,
+    relatedIds: detail.related.map((item) => item.id),
+    pageDimensions: pageDimensions(detail.pageDimensions),
+  });
   for (const related of detail.related) {
     next.set(related.id, projectGallerySummary(related, next.get(related.id)));
   }

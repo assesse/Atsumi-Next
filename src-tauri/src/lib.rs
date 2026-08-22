@@ -16,9 +16,10 @@ use std::{
 
 use application::{
     ApplicationService, ArtifactRepository, ArtifactStore, AutoFindSource, AutoFindSupervisor,
-    AutomationRepository, DisabledDuplicateRelationProvider, DownloadPipelineRepository,
-    DownloadSourcePort, DownloadSupervisor, DuplicateRepository, DuplicateSupervisor,
-    InternalDuplicateRepository, InternalDuplicateSupervisor, StateRepository,
+    AutomationRepository, DetailOriginalReady, DetailOriginalSupervisor,
+    DisabledDuplicateRelationProvider, DownloadPipelineRepository, DownloadSourcePort,
+    DownloadSupervisor, DuplicateRepository, DuplicateSupervisor, InternalDuplicateRepository,
+    InternalDuplicateSupervisor, StateRepository,
 };
 use domain::{AutoFindRun, DownloadJobProjection, DuplicateScanRun, InternalScanRun};
 use infrastructure::{
@@ -27,6 +28,8 @@ use infrastructure::{
 };
 use interface::AppState;
 use tauri::{
+    http::Response,
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
     Emitter, Manager,
 };
@@ -56,10 +59,50 @@ fn apply_pending_factory_reset(data_dir: &std::path::Path) -> std::io::Result<()
     Ok(())
 }
 
+const TRAY_WORK_STATUS_ID: &str = "tray-work-status";
+const TRAY_QUIT_ID: &str = "tray-quit";
+
+struct TrayMenuState {
+    work_status: MenuItem<tauri::Wry>,
+}
+
+fn tray_work_status_label(active_downloads: Option<u64>) -> String {
+    match active_downloads {
+        Some(0) => "작업 상태: 진행 중인 다운로드 없음".into(),
+        Some(count) => format!("작업 상태: 다운로드 {count}개 진행 중"),
+        None => "작업 상태: 다운로드 확인 불가".into(),
+    }
+}
+
+fn refresh_tray_work_status(app: &tauri::AppHandle) {
+    let active_downloads = app.state::<AppState>().active_download_count().ok();
+    let label = tray_work_status_label(active_downloads);
+    if let Err(error) = app.state::<TrayMenuState>().work_status.set_text(&label) {
+        tracing::warn!(error = %error, "could not update tray work status");
+    }
+    if let Some(tray) = app.tray_by_id("main") {
+        if let Err(error) = tray.set_tooltip(Some(&label)) {
+            tracing::warn!(error = %error, "could not update tray tooltip");
+        }
+    }
+}
+
 pub fn run() -> tauri::Result<()> {
     infrastructure::telemetry::init();
 
     let result = tauri::Builder::default()
+        .register_uri_scheme_protocol("detail-original", |context, request| {
+            let request_id = request.uri().path().trim_matches('/');
+            let state = context.app_handle().state::<AppState>();
+            match state.detail_original_media(request_id) {
+                Some((bytes, content_type)) => Response::builder()
+                    .header("content-type", content_type)
+                    .header("cache-control", "no-store")
+                    .body(bytes)
+                    .unwrap_or_else(|_| Response::new(Vec::new())),
+                None => Response::builder().status(404).body(Vec::new()).unwrap_or_else(|_| Response::new(Vec::new())),
+            }
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(error) = window
@@ -72,6 +115,17 @@ pub fn run() -> tauri::Result<()> {
             }
         }))
         .on_tray_icon_event(|app, event| {
+            let refresh_status = matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Right,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            );
+            if refresh_status {
+                refresh_tray_work_status(app);
+            }
             let restore = matches!(
                 event,
                 TrayIconEvent::Click {
@@ -177,6 +231,18 @@ pub fn run() -> tauri::Result<()> {
                     while let Ok(event) = thumbnail_completion_rx.recv() {
                         if let Err(error) = thumbnail_app.emit("thumbnail:ready", &event) {
                             tracing::warn!(error = %error, "could not emit thumbnail:ready");
+                        }
+                    }
+                })?;
+            let (detail_original_tx, detail_original_rx) = mpsc::channel::<DetailOriginalReady>();
+            let detail_originals = DetailOriginalSupervisor::new(live_source.clone(), &data_dir, detail_original_tx)?;
+            let detail_original_app = app.handle().clone();
+            thread::Builder::new()
+                .name("atsumi-detail-original-events".into())
+                .spawn(move || {
+                    while let Ok(event) = detail_original_rx.recv() {
+                        if let Err(error) = detail_original_app.emit("detail-original:ready", &event) {
+                            tracing::warn!(error = %error, "could not emit detail original readiness");
                         }
                     }
                 })?;
@@ -287,6 +353,7 @@ pub fn run() -> tauri::Result<()> {
                 service,
                 thumbnails,
                 thumbnail_completion_tx,
+                detail_originals,
                 downloads,
                 auto_find,
                 duplicates,
@@ -296,6 +363,29 @@ pub fn run() -> tauri::Result<()> {
                 live_source.clone(),
                 data_dir,
             ));
+            let tray_status = MenuItem::with_id(
+                app,
+                TRAY_WORK_STATUS_ID,
+                tray_work_status_label(None),
+                false,
+                None::<&str>,
+            )?;
+            let tray_quit = MenuItem::with_id(app, TRAY_QUIT_ID, "종료", true, None::<&str>)?;
+            let tray_separator = PredefinedMenuItem::separator(app)?;
+            let tray_menu = Menu::with_items(app, &[&tray_status, &tray_separator, &tray_quit])?;
+            let tray = app
+                .tray_by_id("main")
+                .ok_or_else(|| tauri::Error::AssetNotFound("main tray icon".into()))?;
+            tray.set_menu(Some(tray_menu))?;
+            tray.on_menu_event(|app, event| {
+                if event.id() == TRAY_QUIT_ID {
+                    app.state::<AppState>().begin_graceful_quit(app.clone());
+                }
+            });
+            app.manage(TrayMenuState {
+                work_status: tray_status,
+            });
+            refresh_tray_work_status(app.handle());
             if let Some(window) = app.get_webview_window("main") {
                 window.show()?;
                 window.unminimize()?;
@@ -365,6 +455,9 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::thumbnail_reprioritize,
             interface::commands::thumbnail_stats,
             interface::commands::thumbnail_cache_clear,
+            interface::commands::detail_original_request,
+            interface::commands::detail_original_cancel,
+            interface::commands::detail_original_release,
             interface::commands::app_minimize_to_tray,
             interface::commands::app_quit,
         ])
@@ -374,4 +467,25 @@ pub fn run() -> tauri::Result<()> {
         tracing::error!(error_type = %std::any::type_name_of_val(error), "Atsumi Next exited with an error");
     }
     result
+}
+
+#[cfg(test)]
+mod tray_menu_tests {
+    use super::tray_work_status_label;
+
+    #[test]
+    fn labels_active_and_idle_download_work_without_exposing_internal_details() {
+        assert_eq!(
+            tray_work_status_label(Some(0)),
+            "작업 상태: 진행 중인 다운로드 없음"
+        );
+        assert_eq!(
+            tray_work_status_label(Some(2)),
+            "작업 상태: 다운로드 2개 진행 중"
+        );
+        assert_eq!(
+            tray_work_status_label(None),
+            "작업 상태: 다운로드 확인 불가"
+        );
+    }
 }

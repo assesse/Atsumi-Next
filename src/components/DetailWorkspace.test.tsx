@@ -12,8 +12,8 @@ afterEach(() => {
 });
 
 describe("DetailWorkspace page previews", () => {
-  it("keeps a second source-page window when Related covers make the measured column tall", () => {
-    expect(detailPreviewWindowSize({ pageCount: 18, columns: 3, gridWidth: 600, relatedHeight: 10_000, viewportHeight: 800, rowGap: 8, layout: { orientation: "portrait" } })).toBe(9);
+  it("uses the fixed window regardless of Related height", () => {
+    expect(detailPreviewWindowSize(18, 3)).toBe(9);
   });
   it("renders only the current page window and keeps a zero-page gallery safe", async () => {
     vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
@@ -37,7 +37,7 @@ describe("DetailWorkspace page previews", () => {
       value: vi.fn(),
     });
     const source = mockGalleries[0]!;
-    const gallery: Gallery = { ...source, pages: 99 };
+    const gallery: Gallery = { ...source, pages: 99, pageDimensions: Array.from({ length: 99 }, (_, index) => ({ sourcePage: index + 1, width: 720, height: 1080 })) };
     const client = new ThumbnailClient({
       resolve: () => ({ kind: "missing", reason: "test fixture" }),
     });
@@ -71,7 +71,7 @@ describe("DetailWorkspace page previews", () => {
       expect(container.querySelectorAll(".preview-thumb").length).toBeLessThan(gallery.pages);
       expect(container.querySelectorAll('[data-thumbnail-kind="source-page"]')).toHaveLength(container.querySelectorAll(".preview-thumb").length);
       expect(container.querySelector(".preview-grid")).toHaveAttribute("data-preview-columns", "3");
-      expect(container.querySelector(".preview-grid")).toHaveAttribute("data-preview-orientation", "mixed");
+      expect(container.querySelector(".preview-grid")).toHaveAttribute("data-preview-orientation", "portrait");
       expect(container.querySelector(".detail-cover")).toHaveAttribute("data-thumbnail-kind", "gallery-cover");
 
       await act(async () => {
@@ -116,7 +116,7 @@ describe("DetailWorkspace page previews", () => {
       disconnect() {}
     }
     vi.stubGlobal("ResizeObserver", TestResizeObserver);
-    const gallery: Gallery = { ...mockGalleries[0]!, pages: 5000 };
+    const gallery: Gallery = { ...mockGalleries[0]!, pages: 5000, pageDimensions: Array.from({ length: 8 }, (_, index) => ({ sourcePage: index + 1, width: 720, height: 1080 })) };
     const client = new ThumbnailClient({ resolve: () => ({ kind: "missing", reason: "test fixture" }) });
     const container = document.createElement("div");
     document.body.append(container);
@@ -158,7 +158,7 @@ describe("DetailWorkspace page previews", () => {
 
   it("locks a landscape preview grid for the active detail tab", async () => {
     vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
-    const gallery: Gallery = { ...mockGalleries[0]!, pages: 8 };
+    const gallery: Gallery = { ...mockGalleries[0]!, pages: 8, pageDimensions: Array.from({ length: 8 }, (_, index) => ({ sourcePage: index + 1, width: 1600, height: 900 })) };
     const client = new ThumbnailClient({
       resolve: () => ({ kind: "image" as const, url: "https://images.example.test/landscape.jpg", width: 1600, height: 900 }),
     });
@@ -202,7 +202,7 @@ describe("DetailWorkspace page previews", () => {
       configurable: true,
       value: vi.fn(function (this: HTMLDialogElement) { this.setAttribute("open", ""); }),
     });
-    const gallery: Gallery = { ...mockGalleries[0]!, pages: 25 };
+    const gallery: Gallery = { ...mockGalleries[0]!, pages: 25, pageDimensions: Array.from({ length: 8 }, (_, index) => ({ sourcePage: index + 1, width: 800, height: 1000 })) };
     const client = new ThumbnailClient({
       resolve: () => ({ kind: "image" as const, url: "https://images.example.test/page.jpg", width: 800, height: 1000 }),
     });
@@ -296,6 +296,63 @@ describe("DetailWorkspace page previews", () => {
         relatedCard?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
       });
       expect(onOpenRelated).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      client.dispose();
+      container.remove();
+    }
+  });
+
+  it("uses primary metadata and tags columns, with portrait-only intrinsic related frames", async () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
+    const parent: Gallery = { ...mockGalleries[0]!, relatedIds: [mockGalleries[6]!.id] };
+    const portrait: Gallery = { ...mockGalleries[6]!, thumbnailWidth: 600, thumbnailHeight: 900 };
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing", reason: "test fixture" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const render = (related: Gallery) => root.render(
+      <DetailWorkspace tabs={[parent.id]} activeId={parent.id} minimized={false} galleries={new Map([[parent.id, parent], [related.id, related]])} favoriteMetadata={new Set()} thumbnailClient={client} onActivate={vi.fn()} onClose={vi.fn()} onCloseAll={vi.fn()} onMinimize={vi.fn()} onRestore={vi.fn()} onOpenRelated={vi.fn()} onQueue={vi.fn()} onMetadataSearch={vi.fn()} onMetadataFavorite={vi.fn()} />,
+    );
+    try {
+      await act(async () => render(portrait));
+      expect(container.querySelector(".detail-metadata-layout")).not.toBeNull();
+      expect(container.querySelectorAll(".detail-metadata-primary > .metadata-box")).toHaveLength(5);
+      expect(container.querySelector(".detail-metadata-tags")).not.toBeNull();
+      expect(container.querySelector(".section-heading > span")).toBeNull();
+      expect(container.querySelector<HTMLElement>(".related-card")).toHaveStyle({ "--related-cover-aspect-ratio": "600 / 900" });
+
+      await act(async () => render({ ...portrait, thumbnailWidth: 1200, thumbnailHeight: 600 }));
+      expect(container.querySelector<HTMLElement>(".related-card")).toHaveStyle({ "--related-cover-aspect-ratio": "2 / 3" });
+      expect(container.querySelector(".related-cover")).toHaveAttribute("data-thumbnail-priority", "prefetch");
+    } finally {
+      await act(async () => root.unmount());
+      client.dispose();
+      container.remove();
+    }
+  });
+
+  it("uses the same translated tag tooltip for Detail and Related cards", async () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
+    const parent: Gallery = { ...mockGalleries[0]!, tags: ["female:mind_control"], relatedIds: [mockGalleries[6]!.id] };
+    const related: Gallery = { ...mockGalleries[6]!, tags: ["female:mind_control"] };
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing", reason: "test fixture" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(
+        <DetailWorkspace tabs={[parent.id]} activeId={parent.id} minimized={false} galleries={new Map([[parent.id, parent], [related.id, related]])} favoriteMetadata={new Set()} thumbnailClient={client} onActivate={vi.fn()} onClose={vi.fn()} onCloseAll={vi.fn()} onMinimize={vi.fn()} onRestore={vi.fn()} onOpenRelated={vi.fn()} onQueue={vi.fn()} onMetadataSearch={vi.fn()} onMetadataFavorite={vi.fn()} />,
+      ));
+      const detailTag = container.querySelector<HTMLButtonElement>(".detail-metadata-tags .tag")!;
+      const relatedTag = container.querySelector<HTMLButtonElement>(".related-card .tag")!;
+      expect(detailTag).toHaveAttribute("data-tag-tooltip-language", "ko");
+      expect(relatedTag).toHaveAttribute("data-tag-tooltip-language", "ko");
+      await act(async () => detailTag.focus());
+      expect(document.body.querySelector("[role='tooltip']")).toHaveTextContent("정신조종");
+      await act(async () => detailTag.blur());
+      await act(async () => relatedTag.focus());
+      expect(document.body.querySelector("[role='tooltip']")).toHaveTextContent("정신조종");
     } finally {
       await act(async () => root.unmount());
       client.dispose();

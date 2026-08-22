@@ -81,6 +81,10 @@ const priorityRank: Record<ThumbnailPriority, number> = {
   critical: 2,
 };
 
+/** Full source pages can be much larger than covers. Keep their canonical bytes
+ * in the backend cache, but never retain WebView Blob URLs between Detail windows. */
+const retainsDisplayHandle = (request: ThumbnailRequest): boolean => request.key.kind !== "source-page";
+
 const retryableThumbnailErrorNames = new Set([
   "THUMBNAIL_cancelled",
   "THUMBNAIL_temporarilyUnavailable",
@@ -253,7 +257,7 @@ export class ThumbnailClient {
         || entry.listeners.size > 0
         || this.entries.get(entry.identity) !== entry
       ) return;
-      if (entry.snapshot.status === "resolved") {
+      if (entry.snapshot.status === "resolved" && retainsDisplayHandle(entry.request)) {
         this.retain(entry);
       } else {
         this.cleanup(entry);

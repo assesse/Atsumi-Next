@@ -53,6 +53,14 @@
 | E-Hentai relation | 보류 | port와 evidence type만 있고 명시적 session이 없는 production에서는 비활성이다. |
 | 모바일 transfer | 보류 | 초기 완성 범위에 없다. |
 
+## Floating Detail renderer stability
+
+| 기능 | 상태 | 현재 계약과 증거 |
+|---|---|---|
+| 고정 page window | 구현 | metadata 방향에 따라 2열 8장 또는 3열 9장만 생성한다. Related/viewport 크기와 thumbnail decode가 구독량을 바꾸지 않는다. |
+| Detail source-page lifecycle | 구현 | Detail scroll root IntersectionObserver와 400ms orphan grace 뒤 source-page Blob URL을 즉시 revoke한다. cover/artifact retained cache는 유지한다. |
+| progressive hero | 구현 | cached cover를 먼저 보이고 page 1 original은 app-owned transient local protocol file을 `load`+`decode` 성공 뒤에만 겹쳐 표시한다. |
+
 ## 완료 판단
 
 현재 자동 completion gate는 통과했다. 최신 `tools/verify.ps1 -SkipInstall` 증거는 frontend 23 files/140 tests, Rust library 140 passed(외부 live smoke 1 ignored), startup 2 passed와 typecheck/build/fmt/check/clippy/whitespace, Tauri release `--no-bundle` 성공이다. 실데이터 안전 경계와 수동 검토 항목은 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)에 별도로 유지한다.

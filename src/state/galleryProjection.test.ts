@@ -89,7 +89,7 @@ describe("gallery API projection", () => {
   });
 
   it("hydrates related summaries and projects queue snapshots onto the same galleries", () => {
-    const detail: GalleryDetail = { ...summary(1), related: [summary(2), summary(3)] };
+    const detail: GalleryDetail = { ...summary(1), related: [summary(2), summary(3)], pageDimensions: [{ sourcePage: 1, width: 720, height: 1080 }] };
     const hydrated = mergeGalleryDetail(new Map(), detail);
     const entries: DownloadEntry[] = [{
       entryId: "entry-1",

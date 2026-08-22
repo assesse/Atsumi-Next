@@ -32,7 +32,8 @@ pub fn parse_all_tags_page(html: &str) -> Result<Vec<TagCatalogEntry>, SourceCon
             ));
         };
         let text = strip_html(&rest[..close]);
-        cursor = &rest[close + 4..];
+        let after_anchor = &rest[close + 4..];
+        cursor = after_anchor;
         let Some(href) = attribute(attrs, "href") else {
             continue;
         };
@@ -41,7 +42,7 @@ pub fn parse_all_tags_page(html: &str) -> Result<Vec<TagCatalogEntry>, SourceCon
         };
         let name = percent_decode(&encoded_name)?;
         let name = normalize_tag_name(&name);
-        let count = anchor_count(&text)?;
+        let count = anchor_count(&text, after_anchor)?;
         let canonical_token = canonical_tag_token(namespace, &name)
             .map_err(|error| SourceContractError::invalid_data("all tags", error.to_string()))?;
         entries.push(TagCatalogEntry {
@@ -138,12 +139,9 @@ fn tag_href(href: &str) -> Result<Option<(TagNamespace, String)>, SourceContract
     {
         return Ok(Some((TagNamespace::Male, name.to_owned())));
     }
-    if value.contains(':') || value.contains("%3A") || value.contains("%3a") {
-        return Err(SourceContractError::invalid_data(
-            "all tags",
-            "unsupported tag namespace",
-        ));
-    }
+    // A colon inside any other percent-encoded name is part of the neutral
+    // tag itself (for example `circle: honey maple chicken`), not a namespace.
+    // The catalog intentionally owns only the two special gender namespaces.
     Ok(Some((TagNamespace::Tag, value.to_owned())))
 }
 fn percent_decode(value: &str) -> Result<String, SourceContractError> {
@@ -195,21 +193,23 @@ fn strip_html(value: &str) -> String {
     }
     out
 }
-fn anchor_count(text: &str) -> Result<u64, SourceContractError> {
-    let start = text.rfind('(').ok_or_else(|| {
-        SourceContractError::invalid_data("all tags", "anchor is missing gallery count")
-    })?;
-    let end = text[start + 1..]
-        .find(')')
-        .map(|offset| start + 1 + offset)
+fn anchor_count(text: &str, after_anchor: &str) -> Result<u64, SourceContractError> {
+    // Hitomi's all-tags pages render the count after the closing anchor:
+    // `<a ...>tag</a> (123)`. Keep support for the inline form used by older
+    // pages/fixtures, but never scan past the next HTML element.
+    count_in_text(text)
+        .or_else(|| count_in_text(after_anchor.split('<').next().unwrap_or_default()))
         .ok_or_else(|| {
             SourceContractError::invalid_data("all tags", "anchor is missing gallery count")
-        })?;
-    text[start + 1..end]
-        .trim()
-        .replace(',', "")
-        .parse()
-        .map_err(|_| SourceContractError::invalid_data("all tags", "gallery count is invalid"))
+        })
+}
+
+fn count_in_text(text: &str) -> Option<u64> {
+    let start = text.rfind('(')?;
+    let end = text[start + 1..]
+        .find(')')
+        .map(|offset| start + 1 + offset)?;
+    text[start + 1..end].trim().replace(',', "").parse().ok()
 }
 
 #[cfg(test)]
@@ -217,10 +217,11 @@ mod tests {
     use super::*;
     #[test]
     fn parses_href_and_count() {
-        let rows=parse_all_tags_page("<a href=\"/tag/female%3Abig%20balls-all.html\">big balls (4,822)</a><a href='/tag/webtoon-all.html'>webtoon (3)</a>").unwrap();
+        let rows=parse_all_tags_page("<a href=\"/tag/female%3Abig%20balls-all.html\">big balls</a> (4,822)<a href='/tag/webtoon-all.html'>webtoon (3)</a><a href='/tag/circle%3A%20honey-all.html'>circle: honey</a> (2)").unwrap();
         assert_eq!(rows[0].canonical_token, "female:big_balls");
         assert_eq!(rows[0].gallery_count, 4822);
         assert_eq!(rows[1].canonical_token, "tag:webtoon");
+        assert_eq!(rows[2].canonical_token, "tag:circle:_honey");
     }
     #[test]
     fn has_all_urls() {

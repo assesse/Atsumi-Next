@@ -45,3 +45,12 @@
 ## 완료 증거의 경계
 
 최신 전체 검증은 `tools/verify.ps1 -SkipInstall`로 실행했고 `.runtime/verification/verify-20260821-011639.log`에 있다. frontend 23 files/140 tests, Rust library 140 passed/1 opt-in live ignored, startup 2 passed, typecheck/build/fmt/check/clippy/whitespace와 Tauri release `--no-bundle`이 성공했다. live gallery smoke는 일반 CI에서 의도적으로 opt-in이며 위 단일 gallery 결과를 별도 증거로 기록한다.
+
+## Floating Detail renderer stress check
+
+- Detail은 decoded thumbnail/result height feedback, unbounded no-root prefetch, and source-page Blob retention을 제거했다. 자동 테스트는 fixed 8/9 page windows, metadata layout, explicit Detail scroll root와 cancellation/release lifecycle을 다룬다.
+- WebView renderer black screen 자체는 Windows GPU/DPI/WebView runtime 영향을 받으므로 자동 테스트만으로 완전 해결을 보장하지 않는다. release 앱에서 4113714 Detail 열기/닫기, tab 전환, minimize/restore, 다음·이전 window, 100/125/150% DPI를 반복하는 수동 stress 검증이 별도로 필요하다.
+
+## 앨범 내부 중복 검사 상한
+
+- 내부 scene clustering은 499 원본 페이지까지 지원한다. 500페이지 이상 artifact는 hash cache 조회·파일 read·pair comparison 없이 `page_limit` skip으로 run에 영속하고 UI에서 확인할 수 있다. 이 제한은 다운로드, Detail 전체 페이지 탐색, reconcile, 작품 간 중복 검사에 적용되지 않는다.

@@ -120,4 +120,17 @@ pub struct GalleryDetail {
     #[serde(flatten)]
     pub summary: GallerySummary,
     pub related: Vec<GallerySummary>,
+    pub page_dimensions: Vec<GalleryPageDimension>,
+}
+
+/// Immutable source-page dimensions from gallery metadata. Detail layout must
+/// not fetch image bytes merely to determine its thumbnail grid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GalleryPageDimension {
+    pub source_page: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }

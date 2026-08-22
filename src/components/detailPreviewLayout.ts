@@ -5,7 +5,6 @@ export type DetailPreviewOrientation = "landscape" | "portrait" | "mixed";
 export type DetailPreviewSample = Readonly<{
   width?: number;
   height?: number;
-  status?: "resolved" | "error";
 }>;
 
 export type DetailPreviewLayout = Readonly<{
@@ -14,8 +13,7 @@ export type DetailPreviewLayout = Readonly<{
 }>;
 
 const isValidSample = (sample: DetailPreviewSample): sample is Required<Pick<DetailPreviewSample, "width" | "height">> =>
-  sample.status !== "error"
-  && Number.isFinite(sample.width)
+  Number.isFinite(sample.width)
   && Number.isFinite(sample.height)
   && (sample.width ?? 0) > 0
   && (sample.height ?? 0) > 0;

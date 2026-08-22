@@ -53,8 +53,8 @@ pub use maintenance::{
     MaintenanceResult, EXPLORATION_DATA_RESET_CONFIRMATION, FACTORY_RESET_CONFIRMATION,
 };
 pub use search::{
-    GalleryDetail, GalleryPage, GallerySummary, Language, SearchRequest, SearchSort,
-    SearchSubmission,
+    GalleryDetail, GalleryPage, GalleryPageDimension, GallerySummary, Language, SearchRequest,
+    SearchSort, SearchSubmission,
 };
 pub use settings::{
     download_root_for_display, gallery_preview_preset_widths, is_gallery_preview_width,

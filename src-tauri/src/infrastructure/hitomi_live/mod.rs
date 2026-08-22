@@ -319,7 +319,17 @@ impl HitomiLiveAdapter {
         let page = metadata.page(source_page)?;
         let routing = self.fetch_gg_routing()?;
         check_cancelled(cancellation)?;
-        let candidates = webp_thumbnail_candidates(page, &routing, ThumbnailSize::Large)?;
+        let mut candidates = webp_thumbnail_candidates(page, &routing, ThumbnailSize::Large)?;
+        // Retain the established low-cost WebP path for every ordinary card
+        // and source-page preview. AVIF is only tried after those derivative
+        // candidates are exhausted.
+        if page.has_avif {
+            candidates.extend(
+                download_full_candidates(page, &routing)?
+                    .into_iter()
+                    .filter(|candidate| candidate.format == HitomiImageFormat::Avif),
+            );
+        }
         if candidates.is_empty() {
             return Err(SourceContractError::image_candidates_exhausted());
         }
@@ -646,7 +656,7 @@ fn decode_thumbnail(
     })?;
     if !matches!(
         format,
-        ImageFormat::WebP | ImageFormat::Jpeg | ImageFormat::Png
+        ImageFormat::WebP | ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::Avif
     ) {
         return Err(SourceContractError::image_response_invalid(format!(
             "thumbnail image format {format:?} is unsupported"

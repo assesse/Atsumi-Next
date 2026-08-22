@@ -400,3 +400,10 @@ type ExplorationDataResetResult = {
 - 성공하면 favorite, search history, Auto Find run/candidate/cutoff/truncation/exclusion만 `BEGIN IMMEDIATE` 한 transaction에서 삭제한다.
 - download entry/job/attempt/page, gallery, artifact, manifest, duplicate 판정, quarantine과 실제 파일은 대상이 아니다. 다운로드와 artifact를 일괄 삭제하는 유지보수 command는 없다.
 - 저장되지 않은 화면·네트워크 기본값 복원은 frontend draft 동작이며 사용자가 설정 저장을 확정하기 전 SQLite를 바꾸지 않는다. download root와 folder template은 이 기본값 복원 범위에 포함하지 않는다.
+
+## Floating Detail media contract
+
+- `GalleryDetail.pageDimensions[]` carries one-based `sourcePage` metadata dimensions. Invalid or duplicate source pages are omitted before the UI projection; preview direction is chosen from at most the first eight valid metadata records, never decoded thumbnail results.
+- Detail page windows are fixed: two columns render at most 8 pages, three columns at most 9. Related-card height, viewport size, DPI, decoded image size and ResizeObserver output cannot increase the request window.
+- `detail_original_request({ galleryId, sourcePage: 1 })` starts the one active detail-original request. `detail_original_cancel` and `detail_original_release` cancel/remove it by request ID. `detail-original:ready` returns an opaque `mediaUrl`, MIME type and dimensions; it never contains original image bytes, base64, a source URL, or a filesystem path.
+- The backend reuses the live source HTTP scheduler and full-page candidate validation, writes the accepted page atomically in the app-owned transient `detail-original` directory, and exposes it only through its request-ID custom protocol. Release, cancellation and next startup remove those transient files. This data is not part of the thumbnail success cache.

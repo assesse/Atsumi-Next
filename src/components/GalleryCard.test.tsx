@@ -25,6 +25,26 @@ const callbacks = {
 describe("GalleryCard event projection", () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it("keeps the English tag label while exposing the shared Korean tooltip", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery: Gallery = { ...mockGalleries[0]!, tags: ["female:mind_control"] };
+    try {
+      await act(async () => root.render(
+        <GalleryCard gallery={gallery} view="explore" selected={false} selectionContext={false} favoriteMetadata={new Set()} {...callbacks} />,
+      ));
+      const tag = container.querySelector<HTMLButtonElement>(".tag")!;
+      expect(tag).toHaveTextContent("mind control");
+      expect(tag).toHaveAttribute("data-tag-tooltip-language", "ko");
+      await act(async () => tag.focus());
+      expect(document.body.querySelector("[role='tooltip']")).toHaveTextContent("정신조종");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   it("does not render an untouched memoized card for a target-only download event", async () => {
     const container = document.createElement("div");
     document.body.append(container);

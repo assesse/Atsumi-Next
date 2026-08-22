@@ -205,6 +205,9 @@
 
 ## 8. Future change cautions
 
+- Floating Detail page previews use metadata-only orientation and a fixed two-column/8 or three-column/9 window. Do not restore Related height, viewport measurements, thumbnail terminal callbacks, or ResizeObserver feedback as window-size inputs.
+- `detail-original` is transient page-one hero media only. It uses the existing source scheduler/full candidate validation and an app-owned protocol file; never send original bytes through JSON IPC, put them in thumbnail caches, or widen the protocol to arbitrary local paths.
+
 - 적용된 migration의 순서와 이름을 바꾸지 않는다.
 - 기존 manifest·HashProfile을 version 없이 새 의미로 재해석하지 않는다.
 - coordinator 밖에서 UI별 이미지 worker나 직접 원격 요청을 만들지 않는다.

@@ -40,6 +40,44 @@ describe("ViewHeader language filter", () => {
     }
   });
 
+  it("shows an in-button busy indicator while the global tag catalog refresh runs", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(
+        <ViewHeader
+          view="explore"
+          search={{ draft: "", committed: "", languages: [], suggestionsOpen: false, activeSuggestion: null }}
+          suggestions={[]}
+          activityCount={0}
+          activityOpen={false}
+          onDraft={vi.fn()}
+          onSuggestions={vi.fn()}
+          onCommit={vi.fn()}
+          onSelectSuggestion={vi.fn()}
+          onCompleteSuggestion={vi.fn()}
+          onLanguages={vi.fn()}
+          onTagCatalogRefresh={vi.fn()}
+          tagCatalogStatus={{ revision: 1, entryCount: 8_000, neutralCount: 4_000, femaleCount: 3_000, maleCount: 1_000 }}
+          tagCatalogRefreshing
+          tagCatalogRevision={1}
+          onTagSuggestionQuery={vi.fn()}
+          onActivity={vi.fn()}
+          onSettings={vi.fn()}
+        />,
+      ));
+      const button = container.querySelector<HTMLButtonElement>('button[aria-label="모든 태그 최신화 중"]');
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("aria-busy", "true");
+      expect(button).toHaveClass("is-refreshing");
+      expect(button?.querySelector(".catalog-refresh-spinner")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   it("completes only the active token on Tab and submits it on Enter", async () => {
     const container = document.createElement("div");
     document.body.append(container);

@@ -34,7 +34,7 @@
         "connect-src": "ipc: http://ipc.localhost",
         "font-src": "'self'",
         "frame-src": "'none'",
-        "img-src": "'self' blob: data:",
+        "img-src": "'self' blob: data: detail-original://localhost http://detail-original.localhost",
         "object-src": "'none'",
         "script-src": "'self'",
         "style-src": "'self' 'unsafe-inline'"

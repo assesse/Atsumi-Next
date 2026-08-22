@@ -1,5 +1,7 @@
-import { forwardRef, type MouseEvent, type MouseEventHandler } from "react";
+import { forwardRef, useEffect, useId, useRef, useState, type ForwardedRef, type MouseEvent, type MouseEventHandler } from "react";
+import { tagTooltip } from "../data/tagTranslations";
 import { metadataSearchToken } from "../search/searchTokens";
+import { TagTranslationTooltip } from "./TagTranslationTooltip";
 
 type MetadataIconProps = {
   kind: "artist" | "group";
@@ -51,6 +53,10 @@ export const MetadataChip = forwardRef<HTMLButtonElement, MetadataChipProps>(fun
   onSearch,
   onToggleFavorite,
 }, ref) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const tooltipTimer = useRef<number | undefined>(undefined);
+  const tooltipId = useId();
+  const [tooltipOpen, setTooltipOpen] = useState(false);
   const [namespace = "", ...rest] = value.split(":");
   const visibleLabel = label ?? (rest.length ? rest.join(":") : namespace).replaceAll("_", " ");
   const namespaceClass = ["female", "male", "artist", "group"].includes(namespace) ? namespace : "";
@@ -63,6 +69,37 @@ export const MetadataChip = forwardRef<HTMLButtonElement, MetadataChipProps>(fun
   const accessibleLabel = kind === "tag"
     ? `${visibleLabel}, ${tagNamespaceLabel}${favorite ? ", 즐겨찾기" : ""}, 좌클릭 검색, 우클릭 즐겨찾기 변경`
     : `${visibleLabel}${favorite ? ", 즐겨찾기" : ""}, 좌클릭 검색, 우클릭 즐겨찾기 변경`;
+  const translation = kind === "tag" ? tagTooltip(value) : undefined;
+
+  useEffect(() => () => {
+    if (tooltipTimer.current !== undefined) window.clearTimeout(tooltipTimer.current);
+  }, []);
+
+  const setTriggerRef = (node: HTMLButtonElement | null) => {
+    triggerRef.current = node;
+    const forwarded = ref as ForwardedRef<HTMLButtonElement>;
+    if (typeof forwarded === "function") forwarded(node);
+    else if (forwarded) forwarded.current = node;
+  };
+
+  const showTooltip = (delayed: boolean) => {
+    if (!translation) return;
+    if (tooltipTimer.current !== undefined) window.clearTimeout(tooltipTimer.current);
+    if (!delayed) {
+      setTooltipOpen(true);
+      return;
+    }
+    tooltipTimer.current = window.setTimeout(() => {
+      tooltipTimer.current = undefined;
+      setTooltipOpen(true);
+    }, 240);
+  };
+
+  const hideTooltip = () => {
+    if (tooltipTimer.current !== undefined) window.clearTimeout(tooltipTimer.current);
+    tooltipTimer.current = undefined;
+    setTooltipOpen(false);
+  };
 
   const handleContextMenu = (event: MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -73,11 +110,21 @@ export const MetadataChip = forwardRef<HTMLButtonElement, MetadataChipProps>(fun
   return (
     <button
       type="button"
-      ref={ref}
+      ref={setTriggerRef}
       className={classes}
       aria-label={accessibleLabel}
-      title={kind === "tag" ? accessibleLabel : `${visibleLabel} · 좌클릭 검색 / 우클릭 즐겨찾기`}
+      aria-describedby={tooltipOpen && translation ? tooltipId : undefined}
+      data-tag-tooltip-language={translation?.language}
+      data-tag-translation-key={translation?.key}
+      title={kind === "tag" ? undefined : `${visibleLabel} · 좌클릭 검색 / 우클릭 즐겨찾기`}
       onClickCapture={onClickCapture}
+      onMouseEnter={() => showTooltip(true)}
+      onMouseLeave={hideTooltip}
+      onFocus={() => showTooltip(false)}
+      onBlur={hideTooltip}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") hideTooltip();
+      }}
       onClick={(event) => {
         event.stopPropagation();
         onSearch(kind === "tag" ? metadataSearchToken(value, searchValue).displayToken : (searchValue ?? value));
@@ -91,6 +138,7 @@ export const MetadataChip = forwardRef<HTMLButtonElement, MetadataChipProps>(fun
       ) : null}
       <span className={kind === "tag" ? "tag-label" : undefined}>{visibleLabel}</span>
       {kind === "tag" && favorite ? <span className="tag-favorite" aria-hidden="true">★</span> : null}
+      {translation ? <TagTranslationTooltip id={tooltipId} trigger={triggerRef} open={tooltipOpen} text={translation.text} language={translation.language} /> : null}
     </button>
   );
 });

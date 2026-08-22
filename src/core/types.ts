@@ -42,6 +42,8 @@ export type Gallery = {
   thumbnailKey?: string;
   thumbnailWidth?: number;
   thumbnailHeight?: number;
+  /** Present only after the Detail metadata request has completed. */
+  pageDimensions?: ReadonlyArray<{ readonly sourcePage: number; readonly width?: number; readonly height?: number }>;
   relatedIds?: GalleryId[];
   favorite?: boolean;
   download?: {

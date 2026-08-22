@@ -12,6 +12,9 @@ import type {
   AutoFindRun,
   AutoFindSnapshot,
   DownloadChangedEvent,
+  DetailOriginalReady,
+  DetailOriginalRequest,
+  DetailOriginalToken,
   DownloadEntry,
   DownloadListRequest,
   DownloadPage,
@@ -76,6 +79,7 @@ export type BackendEventMap = {
   "job:changed": JobEvent;
   "download:changed": DownloadChangedEvent;
   "thumbnail:ready": ThumbnailCompletionEvent;
+  "detail-original:ready": DetailOriginalReady;
   "settings:changed": SettingsSnapshot;
   "app:exit-requested": null;
 };
@@ -135,6 +139,9 @@ export interface BackendClient {
   thumbnailInvalidate(key: ThumbnailRequestDto["key"]): Promise<ApiResult<ThumbnailInvalidation>>;
   thumbnailStats(): Promise<ApiResult<ThumbnailWorkerStats>>;
   thumbnailCacheClear(): Promise<ApiResult<ThumbnailCacheClearResult>>;
+  detailOriginalRequest(request: DetailOriginalRequest): Promise<ApiResult<DetailOriginalToken>>;
+  detailOriginalCancel(requestId: string): Promise<ApiResult<boolean>>;
+  detailOriginalRelease(requestId: string): Promise<ApiResult<boolean>>;
   explorationDataReset(request: ExplorationDataResetRequest): Promise<ApiResult<ExplorationDataResetResult>>;
   appMinimizeToTray(): Promise<ApiResult<null>>;
   appQuit(): Promise<ApiResult<null>>;
@@ -510,6 +517,7 @@ class BrowserMockBackend implements BackendClient {
     "job:changed": new Set(),
     "download:changed": new Set(),
     "thumbnail:ready": new Set(),
+    "detail-original:ready": new Set(),
     "settings:changed": new Set(),
     "app:exit-requested": new Set(),
   };
@@ -1516,6 +1524,28 @@ class BrowserMockBackend implements BackendClient {
     });
   }
 
+  async detailOriginalRequest(request: DetailOriginalRequest): Promise<ApiResult<DetailOriginalToken>> {
+    if (!Number.isInteger(request.galleryId) || request.galleryId <= 0 || request.sourcePage !== 1) {
+      return validationError("detailOriginal", "galleryId must be positive and sourcePage must be 1");
+    }
+    const token: DetailOriginalToken = {
+      requestId: `browser-detail-original-${this.nextThumbnailRequestId++}`,
+      galleryId: request.galleryId,
+      sourcePage: 1,
+    };
+    queueMicrotask(() => this.emit("detail-original:ready", {
+      ...token,
+      mediaUrl: "/mock-gallery-sheet.png",
+      contentType: "image/png",
+      width: 512,
+      height: 512,
+    }));
+    return ok(token);
+  }
+
+  async detailOriginalCancel(): Promise<ApiResult<boolean>> { return ok(true); }
+  async detailOriginalRelease(): Promise<ApiResult<boolean>> { return ok(true); }
+
   async explorationDataReset(
     request: ExplorationDataResetRequest,
   ): Promise<ApiResult<ExplorationDataResetResult>> {
@@ -1999,6 +2029,16 @@ class TauriBackend implements BackendClient {
 
   thumbnailCacheClear(): Promise<ApiResult<ThumbnailCacheClearResult>> {
     return invoke("thumbnail_cache_clear");
+  }
+
+  detailOriginalRequest(request: DetailOriginalRequest): Promise<ApiResult<DetailOriginalToken>> {
+    return invoke("detail_original_request", { request });
+  }
+  detailOriginalCancel(requestId: string): Promise<ApiResult<boolean>> {
+    return invoke("detail_original_cancel", { requestId });
+  }
+  detailOriginalRelease(requestId: string): Promise<ApiResult<boolean>> {
+    return invoke("detail_original_release", { requestId });
   }
 
   explorationDataReset(

@@ -17,10 +17,10 @@ describe("detailPreviewLayout", () => {
     expect(detailPreviewLayout(samples(1600, 900, 2))).toEqual({ columns: 3, orientation: "mixed" });
   });
 
-  it("ignores failed page previews", () => {
+  it("ignores invalid metadata dimensions", () => {
     expect(detailPreviewLayout([
       ...samples(1600, 900, 3),
-      ...Array.from({ length: 5 }, () => ({ status: "error" as const })),
+      ...Array.from({ length: 5 }, () => ({ width: 0, height: 0 })),
     ])).toEqual({ columns: 2, orientation: "landscape" });
   });
 });

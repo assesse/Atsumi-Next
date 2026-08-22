@@ -1,4 +1,5 @@
 mod auto_find_supervisor;
+mod detail_original;
 mod download_pipeline;
 mod download_supervisor;
 mod duplicate_analyzer;
@@ -10,6 +11,9 @@ mod ports;
 mod service;
 
 pub use auto_find_supervisor::AutoFindSupervisor;
+pub use detail_original::{
+    DetailOriginalReady, DetailOriginalRequest, DetailOriginalSupervisor, DetailOriginalToken,
+};
 pub use download_pipeline::{
     ArtifactLayout, ArtifactStore, DownloadArtifactPlan, DownloadCheckpoint,
     DownloadGallerySnapshot, DownloadPageAttempt, DownloadPageAttemptOutcome,

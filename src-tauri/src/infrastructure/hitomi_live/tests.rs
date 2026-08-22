@@ -10,14 +10,15 @@ use reqwest::Url;
 use crate::{
     application::{
         ArtifactStore, AutoFindSource, AutoFindSourceRequest, DownloadSourcePort,
-        ExistingPageVerification, RepositoryError, SearchRepository,
+        ExistingPageVerification, RepositoryError, SearchRepository, TagCatalogSource,
     },
     domain::{ArtifactRelativePath, GalleryId, Language, SearchRequest, SearchSort},
     infrastructure::FilesystemArtifactStore,
     source::{
         hitomi::{
-            galleryinfo_script_url, gg_script_url, parse_galleryinfo_script, parse_gg_routing,
-            webp_thumbnail_candidates, ThumbnailSize, HITOMI_METADATA_ORIGIN,
+            download_full_candidates, galleryinfo_script_url, gg_script_url,
+            parse_galleryinfo_script, parse_gg_routing, webp_thumbnail_candidates, ThumbnailSize,
+            HITOMI_METADATA_ORIGIN,
         },
         SourceContractError, SourceErrorCode,
     },
@@ -287,6 +288,48 @@ fn search_and_thumbnail_share_the_same_metadata_cache_without_live_network() {
 }
 
 #[test]
+fn thumbnail_falls_back_to_avif_when_webp_derivatives_are_missing() {
+    let transport = Arc::new(FakeTransport::default());
+    let metadata = parse_galleryinfo_script(GALLERY_SCRIPT).unwrap();
+    let routing = parse_gg_routing(GG_SCRIPT).unwrap();
+    let avif = download_full_candidates(metadata.pages.first().unwrap(), &routing)
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.format == crate::source::hitomi::HitomiImageFormat::Avif)
+        .expect("fixture has an AVIF fallback");
+    transport.respond(
+        galleryinfo_script_url(424_242).unwrap(),
+        "text/javascript",
+        GALLERY_SCRIPT.as_bytes().to_vec(),
+    );
+    transport.respond(
+        gg_script_url(),
+        "text/javascript",
+        GG_SCRIPT.as_bytes().to_vec(),
+    );
+    // The fake payload is PNG so this test stays independent of the AVIF codec;
+    // it verifies resolver candidate fallback after every WebP endpoint misses.
+    transport.respond(avif.url.clone(), "image/png", one_pixel_png());
+    let adapter = HitomiLiveAdapter::with_transport(
+        HitomiLiveConfig {
+            request_start_interval: Duration::ZERO,
+            ..HitomiLiveConfig::default()
+        },
+        transport.clone(),
+    );
+
+    let resolved = adapter
+        .resolve(
+            &ThumbnailKey::gallery_page(424_242, 1).unwrap(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(resolved.content_type, "image/png");
+    assert!(transport.was_called(&avif.url));
+}
+
+#[test]
 fn live_search_contract_covers_paging_filters_popular_and_related_without_network() {
     let transport = Arc::new(FakeTransport::default());
     let origin = HITOMI_METADATA_ORIGIN;
@@ -550,6 +593,28 @@ fn live_gallery_4113714_download_pipeline() {
         verified_pages, selected_format_counts, selected_total_bytes,
     );
     assert_eq!(verified_pages, 18);
+}
+
+#[test]
+#[ignore = "opt-in live Hitomi all-tags catalog smoke"]
+fn live_tag_catalog_refresh_parses_all_allowlisted_pages() {
+    assert_eq!(
+        std::env::var("ATSUMI_ALLOW_LIVE_SMOKE").as_deref(),
+        Ok("1"),
+        "live network access requires ATSUMI_ALLOW_LIVE_SMOKE=1"
+    );
+    let adapter =
+        HitomiLiveAdapter::new(HitomiLiveConfig::default()).expect("construct live adapter");
+    let entries = adapter
+        .tag_catalog_fetch_all()
+        .expect("fetch and parse all allowlisted tag pages");
+    assert!(entries.len() >= 1_000);
+    assert!(entries
+        .iter()
+        .any(|entry| entry.canonical_token == "female:big_balls"));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.canonical_token == "female:ball_sucking"));
 }
 
 fn one_pixel_png() -> Vec<u8> {

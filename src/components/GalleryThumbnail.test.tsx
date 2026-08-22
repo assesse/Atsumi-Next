@@ -253,4 +253,35 @@ describe("GalleryThumbnail", () => {
     expect(disconnect).toHaveBeenCalledOnce();
     container.remove();
   });
+
+  it("uses the Detail scroll root instead of activating an offscreen prefetch immediately", async () => {
+    const observe = vi.fn();
+    class TestIntersectionObserver {
+      static root: Element | Document | null = null;
+      constructor(_callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        TestIntersectionObserver.root = options?.root ?? null;
+      }
+      observe = observe;
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+      takeRecords = () => [];
+    }
+    vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
+    const resolve = vi.fn(() => ({ kind: "missing" as const, reason: "fixture" }));
+    const client = new ThumbnailClient({ resolve });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const pageKey = { kind: "source-page" as const, galleryId: galleryId(4051038), page: 3 };
+    await act(async () => root.render(
+      <div data-thumbnail-scroll-root>
+        <GalleryThumbnail thumbnailKey={pageKey} consumer="detail" priority="prefetch" client={client} alt="상세 화면 밖 페이지" />
+      </div>,
+    ));
+    expect(resolve).not.toHaveBeenCalled();
+    expect(TestIntersectionObserver.root).toBe(container.querySelector("[data-thumbnail-scroll-root]"));
+    await act(async () => root.unmount());
+    client.dispose();
+    container.remove();
+  });
 });

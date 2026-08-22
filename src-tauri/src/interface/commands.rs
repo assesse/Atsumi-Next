@@ -9,8 +9,9 @@ use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use crate::{
     application::{
         ApplicationError, ApplicationService, ArtifactStore, AutoFindSupervisor,
-        DownloadPipelineError, DownloadPipelineErrorCode, DownloadRootPicker, DownloadSupervisor,
-        DuplicateSupervisor, InternalDuplicateSupervisor, ReconcileReport,
+        DetailOriginalRequest, DetailOriginalSupervisor, DownloadPipelineError,
+        DownloadPipelineErrorCode, DownloadRootPicker, DownloadSupervisor, DuplicateSupervisor,
+        InternalDuplicateSupervisor, ReconcileReport,
     },
     domain::{
         AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot, DownloadChangedEvent,
@@ -40,6 +41,7 @@ pub struct AppState {
     service: ApplicationService,
     thumbnails: ThumbnailCoordinator,
     thumbnail_completions: Sender<ThumbnailCompletionEventDto>,
+    detail_originals: DetailOriginalSupervisor,
     downloads: DownloadSupervisor,
     auto_find: AutoFindSupervisor,
     duplicates: DuplicateSupervisor,
@@ -125,6 +127,7 @@ impl AppState {
         service: ApplicationService,
         thumbnails: ThumbnailCoordinator,
         thumbnail_completions: Sender<ThumbnailCompletionEventDto>,
+        detail_originals: DetailOriginalSupervisor,
         downloads: DownloadSupervisor,
         auto_find: AutoFindSupervisor,
         duplicates: DuplicateSupervisor,
@@ -138,6 +141,7 @@ impl AppState {
             service,
             thumbnails,
             thumbnail_completions,
+            detail_originals,
             downloads,
             auto_find,
             duplicates,
@@ -149,6 +153,30 @@ impl AppState {
             search_pages: SearchPageRequests::default(),
             maintenance_previews: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn active_download_count(&self) -> Result<u64, ApplicationError> {
+        self.service.download_active_count()
+    }
+
+    pub(crate) fn begin_graceful_quit(&self, app: AppHandle) {
+        let downloads = self.downloads.clone();
+        let auto_find = self.auto_find.clone();
+        let duplicates = self.duplicates.clone();
+        let internal_duplicates = self.internal_duplicates.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
+                internal_duplicates.shutdown_and_wait();
+                duplicates.shutdown_and_wait();
+                auto_find.shutdown_and_wait();
+                downloads.shutdown_and_wait();
+            })
+            .await
+            {
+                tracing::warn!(error = %error, "background workers did not finish shutdown cleanly");
+            }
+            app.exit(0);
+        });
     }
 
     fn remember_maintenance_preview(&self, action: MaintenanceAction) -> String {
@@ -166,6 +194,49 @@ impl AppState {
             .unwrap_or_else(|error| error.into_inner())
             .remove(preview_id)
             .is_some_and(|previewed| previewed == *action)
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn detail_original_request(
+    state: State<'_, AppState>,
+    request: DetailOriginalRequest,
+) -> Result<ApiResult<crate::application::DetailOriginalToken>, ApiError> {
+    match state.detail_originals.request(request) {
+        Ok(token) => Ok(ApiResult::success(token)),
+        Err(message) => Ok(ApiResult::failure(ApiError {
+            code: "VALIDATION_ERROR".into(),
+            message,
+            retryable: false,
+            action: Some(super::ApiAction::None),
+            details: None,
+        })),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn detail_original_cancel(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<ApiResult<bool>, ApiError> {
+    Ok(ApiResult::success(
+        state.detail_originals.cancel(request_id.trim()),
+    ))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn detail_original_release(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<ApiResult<bool>, ApiError> {
+    Ok(ApiResult::success(
+        state.detail_originals.release(request_id.trim()),
+    ))
+}
+
+impl AppState {
+    pub(crate) fn detail_original_media(&self, request_id: &str) -> Option<(Vec<u8>, String)> {
+        self.detail_originals.read_media(request_id)
     }
 }
 
@@ -503,7 +574,7 @@ pub async fn download_entries_list(
 
 #[tauri::command]
 pub async fn download_active_count(state: State<'_, AppState>) -> Result<ApiResult<u64>, ApiError> {
-    Ok(state.service.download_active_count().into())
+    Ok(state.active_download_count().into())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -849,21 +920,7 @@ pub async fn app_quit(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ApiResult<()>, ApiError> {
-    let downloads = state.downloads.clone();
-    let auto_find = state.auto_find.clone();
-    let duplicates = state.duplicates.clone();
-    let internal_duplicates = state.internal_duplicates.clone();
-    if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
-        internal_duplicates.shutdown_and_wait();
-        duplicates.shutdown_and_wait();
-        auto_find.shutdown_and_wait();
-        downloads.shutdown_and_wait();
-    })
-    .await
-    {
-        tracing::warn!(error = %error, "download workers did not finish shutdown cleanly");
-    }
-    app.exit(0);
+    state.begin_graceful_quit(app);
     Ok(ApiResult::success(()))
 }
 

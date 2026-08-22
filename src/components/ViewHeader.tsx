@@ -261,8 +261,21 @@ export function ViewHeader({
           </div>
         ) : null}
       </div>
-      <button type="button" className="icon-button" title={tagCatalogStatus?.entryCount ? `모든 태그 최신화 · ${tagCatalogStatus.entryCount.toLocaleString()}개` : "모든 태그 최신화 · 태그 데이터 없음"} aria-label="모든 태그 최신화" disabled={tagCatalogRefreshing} onClick={onTagCatalogRefresh}>
-        <FluentIcon glyph={tagCatalogRefreshing ? "\uE895" : "\uE72C"} />
+      <button
+        type="button"
+        className={`icon-button tag-catalog-refresh${tagCatalogRefreshing ? " is-refreshing" : ""}`}
+        title={tagCatalogRefreshing
+          ? "모든 태그 최신화 중 · Hitomi 태그 목록을 가져오는 중"
+          : tagCatalogStatus?.entryCount
+            ? `모든 태그 최신화 · ${tagCatalogStatus.entryCount.toLocaleString()}개`
+            : "모든 태그 최신화 · 태그 데이터 없음"}
+        aria-label={tagCatalogRefreshing ? "모든 태그 최신화 중" : "모든 태그 최신화"}
+        aria-busy={tagCatalogRefreshing || undefined}
+        disabled={tagCatalogRefreshing}
+        onClick={onTagCatalogRefresh}
+      >
+        {tagCatalogRefreshing ? <span className="spinner catalog-refresh-spinner" aria-hidden="true" /> : <FluentIcon glyph="\uE72C" />}
+        {tagCatalogRefreshing ? <span className="sr-only">Hitomi 태그 목록을 최신화하는 중</span> : null}
         {!tagCatalogStatus?.entryCount ? <span className="catalog-warning" aria-hidden="true">!</span> : null}
       </button>
       <button

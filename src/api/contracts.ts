@@ -172,6 +172,25 @@ export type ThumbnailWorkerStats = {
   cancelledWork: number;
 };
 
+export type DetailOriginalRequest = {
+  galleryId: GalleryId;
+  sourcePage: number;
+};
+
+export type DetailOriginalToken = {
+  requestId: string;
+  galleryId: GalleryId;
+  sourcePage: number;
+};
+
+/** Opaque custom-protocol URL only; no filesystem path is exposed to the UI. */
+export type DetailOriginalReady = DetailOriginalToken & {
+  mediaUrl: string;
+  contentType: string;
+  width: number;
+  height: number;
+};
+
 export type JobEvent = {
   jobId: string;
   galleryId?: number;
@@ -578,8 +597,16 @@ export type InternalRemovalResult = {
   records: PageQuarantineRecord[];
 };
 
+export type GalleryPageDimension = {
+  /** Immutable one-based source page number. */
+  sourcePage: number;
+  width?: number;
+  height?: number;
+};
+
 export type GalleryDetail = GallerySummary & {
   related: GallerySummary[];
+  pageDimensions: GalleryPageDimension[];
 };
 
 export type DownloadEntry = {

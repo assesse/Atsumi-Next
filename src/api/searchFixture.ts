@@ -166,7 +166,16 @@ export function galleryDetailFixture(galleryIdValue: GallerySummary["id"]): Gall
     .map((id) => fixture.find((item) => item.id === id))
     .filter((item): item is FixtureGallery => item !== undefined)
     .map(toSummary);
-  return { ...toSummary(gallery), tags: normalizedFixtureTags(gallery), related };
+  return {
+    ...toSummary(gallery),
+    tags: normalizedFixtureTags(gallery),
+    related,
+    pageDimensions: Array.from({ length: gallery.pages }, (_, index) => ({
+      sourcePage: index + 1,
+      width: 512,
+      height: 512,
+    })),
+  };
 }
 
 export function searchRequestValidationError(request: SearchRequest): { field: string; reason: string } | null {

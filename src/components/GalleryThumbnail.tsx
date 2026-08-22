@@ -53,6 +53,7 @@ const fullBleedStyle: CSSProperties = {
 
 const deferredSnapshot: ThumbnailSnapshot = { status: "idle" };
 const nearViewportMargin = "600px 0px";
+const detailViewportMargin = "260px 0px";
 
 const loadingForPriority = (priority: ThumbnailPriority): "eager" | "lazy" =>
   priority === "prefetch" ? "lazy" : "eager";
@@ -259,13 +260,8 @@ export function GalleryThumbnail({
     if (priority === "critical" || typeof IntersectionObserver !== "function") return undefined;
     const element = elementRef.current;
     if (!element) return undefined;
-    const viewportRoot = element.closest<HTMLElement>(".gallery-viewport");
-    if (!viewportRoot) {
-      // Dialogs and isolated embeds do not have the Explore scroller. They
-      // should resolve normally rather than silently using the window root.
-      setActivatedIdentity(identity);
-      return undefined;
-    }
+    const detailRoot = element.closest<HTMLElement>("[data-thumbnail-scroll-root]");
+    const viewportRoot = detailRoot ?? element.closest<HTMLElement>(".gallery-viewport");
     const observer = new IntersectionObserver((entries) => {
       const visible = entries.some((entry) => entry.isIntersecting);
       setActivatedIdentity((current) => visible
@@ -273,7 +269,7 @@ export function GalleryThumbnail({
         : current === identity ? null : current);
     }, {
       root: viewportRoot,
-      rootMargin: nearViewportMargin,
+      rootMargin: detailRoot ? detailViewportMargin : nearViewportMargin,
       threshold: 0.01,
     });
     observer.observe(element);

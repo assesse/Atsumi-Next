@@ -1728,6 +1728,7 @@ export default function App() {
         favoriteMetadata={favoriteMetadataForDisplay}
         previewWidth={previewWidth}
         relatedPreviewWidth={settings.relatedPreviewWidth}
+        backend={backend}
         onActivate={(id) => dispatch({ type: "detail.activate", id })}
         onClose={(id) => dispatch({ type: "detail.close", id })}
         onCloseAll={() => dispatch({ type: "detail.closeAll" })}

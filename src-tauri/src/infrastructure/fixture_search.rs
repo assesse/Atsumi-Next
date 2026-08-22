@@ -8,8 +8,8 @@ use serde::Deserialize;
 use crate::{
     application::{RepositoryError, SearchRepository},
     domain::{
-        GalleryDetail, GalleryId, GalleryPage, GallerySummary, Language, SearchRequest, SearchSort,
-        SearchSubmission,
+        GalleryDetail, GalleryId, GalleryPage, GalleryPageDimension, GallerySummary, Language,
+        SearchRequest, SearchSort, SearchSubmission,
     },
 };
 
@@ -178,6 +178,13 @@ impl SearchRepository for FixtureSearchRepository {
         Ok(Some(GalleryDetail {
             summary: gallery_summary(gallery),
             related,
+            page_dimensions: (1..=gallery.pages)
+                .map(|source_page| GalleryPageDimension {
+                    source_page,
+                    width: Some(512),
+                    height: Some(512),
+                })
+                .collect(),
         }))
     }
 }

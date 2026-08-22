@@ -444,4 +444,28 @@ describe("ThumbnailClient", () => {
       vi.useRealTimers();
     }
   });
+
+  it("releases source-page Blob URLs after the orphan grace instead of retaining them", async () => {
+    vi.useFakeTimers();
+    try {
+      const release = vi.fn();
+      const cancel = vi.fn();
+      const client = new ThumbnailClient({
+        resolve: () => ({ kind: "image", url: "blob:detail-page", width: 1200, height: 1800 }),
+        release,
+        cancel,
+      });
+      const pageKey = { kind: "source-page" as const, galleryId: galleryId(4051038), page: 1 };
+      const request: ThumbnailRequest = { key: pageKey, consumer: "detail", priority: "visible" };
+      const unsubscribe = client.subscribe(request, vi.fn());
+      await Promise.resolve();
+      unsubscribe();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(release).toHaveBeenCalledWith(request, expect.objectContaining({ url: "blob:detail-page" }));
+      expect(client.getSnapshot(pageKey)).toEqual({ status: "idle" });
+      expect(cancel).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

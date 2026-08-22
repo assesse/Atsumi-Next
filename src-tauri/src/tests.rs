@@ -1832,8 +1832,26 @@ fn fixture_gallery_detail_matches_the_typescript_projection() {
     assert!(detail.summary.tags.contains(&"female:glasses".into()));
     assert_eq!(detail.related.len(), 2);
 
+    let mut serialized =
+        serde_json::to_value(ApiResult::success(detail)).expect("serialize gallery detail");
+    let dimensions = serialized["data"]["pageDimensions"]
+        .as_array()
+        .expect("page dimensions");
+    assert_eq!(dimensions.len(), 64);
     assert_eq!(
-        serde_json::to_value(ApiResult::success(detail)).expect("serialize gallery detail"),
+        dimensions.first(),
+        Some(&json!({ "sourcePage": 1, "width": 512, "height": 512 }))
+    );
+    assert_eq!(
+        dimensions.last(),
+        Some(&json!({ "sourcePage": 64, "width": 512, "height": 512 }))
+    );
+    serialized["data"]
+        .as_object_mut()
+        .expect("detail data")
+        .remove("pageDimensions");
+    assert_eq!(
+        serialized,
         json!({
             "ok": true,
             "data": {

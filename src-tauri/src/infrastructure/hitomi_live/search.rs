@@ -11,8 +11,8 @@ use crate::{
         SearchRepository,
     },
     domain::{
-        GalleryDetail, GalleryId, GalleryPage, GallerySummary, Language, SearchRequest, SearchSort,
-        SearchSubmission,
+        GalleryDetail, GalleryId, GalleryPage, GalleryPageDimension, GallerySummary, Language,
+        SearchRequest, SearchSort, SearchSubmission,
     },
     source::{
         hitomi::{HitomiGalleryMetadata, HitomiTagKind},
@@ -322,7 +322,25 @@ impl SearchRepository for HitomiLiveAdapter {
                 Err(error) => return Err(error.into()),
             }
         }
-        Ok(Some(GalleryDetail { summary, related }))
+        let mut known_pages = HashSet::new();
+        let page_dimensions = metadata
+            .pages
+            .iter()
+            .filter_map(|page| {
+                (page.source_page > 0 && known_pages.insert(page.source_page)).then_some(
+                    GalleryPageDimension {
+                        source_page: page.source_page,
+                        width: page.width.filter(|value| *value > 0),
+                        height: page.height.filter(|value| *value > 0),
+                    },
+                )
+            })
+            .collect();
+        Ok(Some(GalleryDetail {
+            summary,
+            related,
+            page_dimensions,
+        }))
     }
 }
 
