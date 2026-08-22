@@ -53,4 +53,4 @@
 
 ## 앨범 내부 중복 검사 상한
 
-- 내부 scene clustering은 499 원본 페이지까지 지원한다. 500페이지 이상 artifact는 hash cache 조회·파일 read·pair comparison 없이 `page_limit` skip으로 run에 영속하고 UI에서 확인할 수 있다. 이 제한은 다운로드, Detail 전체 페이지 탐색, reconcile, 작품 간 중복 검사에 적용되지 않는다.
+- 내부 scene clustering은 499 원본 페이지까지 지원한다. 500페이지 이상 artifact는 hash cache 조회·파일 read·pair comparison 없이 `page_limit` skip으로 run에 영속하고 UI에서 확인할 수 있다. 이 제한은 다운로드, Detail 전체 페이지 탐색, reconcile, 작품 간 중복 검사에 적용되지 않는다. algorithm v3의 세트 선택은 파일 언어를 추측하지 않으며, 선택 세트에 없는 장면은 보존한다.

@@ -2563,6 +2563,155 @@ dialog::backdrop {
   margin-top: 10px;
 }
 
+.internal-track-selector {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 8px;
+  min-width: 0;
+  margin: 12px 0 0;
+  padding: 8px;
+  border: 1px solid #dce8e6;
+  border-radius: 6px;
+}
+
+.internal-track-selector legend {
+  padding: 0 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.internal-track-option {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+  gap: 2px 7px;
+  min-width: 0;
+  padding: 7px;
+  background: #fff;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.internal-track-option:hover,
+.internal-track-option:focus-within {
+  border-color: var(--line-strong);
+}
+
+.internal-track-option.is-selected {
+  background: var(--primary-soft);
+  border-color: #2c7f98;
+  box-shadow: 0 0 0 1px #2c7f98;
+}
+
+.internal-track-option input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+.internal-track-option strong,
+.internal-track-option span,
+.internal-track-option small {
+  grid-column: 2;
+  min-width: 0;
+}
+
+.internal-track-option span,
+.internal-track-option small,
+.internal-scene-cell small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.internal-track-image {
+  grid-row: 1 / span 3;
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  border-radius: 4px;
+}
+
+.internal-scene-matrix {
+  display: grid;
+  gap: 4px;
+  min-width: max-content;
+  margin-top: 10px;
+  overflow-x: auto;
+  border: 1px solid #dce8e6;
+  border-radius: 6px;
+}
+
+.internal-scene-matrix-row {
+  display: grid;
+  grid-template-columns: 88px repeat(var(--internal-track-count, 2), minmax(132px, 1fr));
+  gap: 4px;
+  min-width: max-content;
+  padding: 4px;
+}
+
+.internal-scene-matrix-row > :first-child {
+  align-self: start;
+  padding: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.internal-scene-matrix-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fbfa;
+  border-bottom: 1px solid var(--line);
+}
+
+.internal-scene-matrix-header strong {
+  padding: 5px;
+  font-size: 11px;
+}
+
+.internal-scene-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 132px;
+  padding: 5px;
+  background: #f3f7f6;
+  border: 1px solid transparent;
+  border-radius: 5px;
+}
+
+.internal-scene-cell.is-kept {
+  background: var(--primary-soft);
+  border-color: #2c7f98;
+}
+
+.internal-scene-cell.is-quarantine {
+  opacity: .78;
+}
+
+.internal-scene-cell.is-missing {
+  min-height: 54px;
+  place-content: center;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  border-style: dashed;
+}
+
+.internal-selection-summary {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.internal-selection-summary strong {
+  color: var(--text);
+}
+
 .internal-scene-row {
   min-width: 0;
   margin: 0;

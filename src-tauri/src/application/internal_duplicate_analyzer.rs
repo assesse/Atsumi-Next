@@ -2,12 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::{
     DuplicatePageHash, DuplicatePagePair, HashProfile, InternalDuplicateGroup, InternalGroupRecord,
-    InternalMatchKind, InternalPageEvidence,
+    InternalMatchKind, InternalPageEvidence, INTERNAL_DUPLICATE_ALGORITHM_VERSION,
 };
 
 use super::duplicate_analyzer::HashedArtifact;
 
-pub(crate) const INTERNAL_DUPLICATE_ALGORITHM_VERSION: u32 = 2;
 const DETAIL_HASH_BYTES: usize = 128;
 const DETAIL_HASH_BITS: u32 = 1024;
 
@@ -42,6 +41,13 @@ struct PairRun {
 struct SceneBlock {
     rows: Vec<BTreeSet<usize>>,
     page_rows: BTreeMap<usize, usize>,
+}
+
+#[derive(Default, Clone)]
+struct TrackAssignments {
+    page_tracks: BTreeMap<usize, u32>,
+    tracks: BTreeMap<u32, BTreeSet<usize>>,
+    next_track: u32,
 }
 
 /// Hash features remain unchanged. Pair edges are aligned monotonically, then only runs that
@@ -80,7 +86,7 @@ pub(crate) fn detect_internal_groups(
     }
     let runs = monotonic_runs(&edges);
     let blocks = merge_runs(&runs, &edges);
-    let mut groups = rows_to_groups(run_id, artifact, &prepared, &edges, blocks);
+    let mut groups = rows_to_groups(run_id, artifact, &prepared, &edges, &runs, blocks);
 
     let scene_pages = groups
         .iter()
@@ -182,21 +188,7 @@ fn monotonic_runs(edges: &[Edge]) -> Vec<PairRun> {
         if !seen.insert(chain.clone()) {
             continue;
         }
-        let exact_count = chain
-            .iter()
-            .filter(|&&index| edges[index].evidence.exact_sha256)
-            .count();
-        let average_similarity = chain
-            .iter()
-            .map(|&index| edges[index].evidence.visual_similarity)
-            .sum::<f64>()
-            / chain.len() as f64;
-        runs.push(PairRun {
-            edges: chain,
-            average_similarity,
-            exact_count,
-            cumulative_gap: best[terminal].2,
-        });
+        runs.extend(split_pair_run(chain, edges));
     }
     runs.sort_by(|left, right| {
         right
@@ -209,6 +201,63 @@ fn monotonic_runs(edges: &[Edge]) -> Vec<PairRun> {
             .then_with(|| left.edges.cmp(&right.edges))
     });
     runs
+}
+
+/// A raw monotonic chain may pass through a page as the right endpoint of one
+/// edition relation and the left endpoint of the next (A↔B followed by B↔C).
+/// Those are separate pairwise tracks, not one A/B/C endpoint sequence.
+fn split_pair_run(chain: Vec<usize>, edges: &[Edge]) -> Vec<PairRun> {
+    let mut segments = Vec::new();
+    let mut current = Vec::new();
+    let mut left_seen = BTreeSet::new();
+    let mut right_seen = BTreeSet::new();
+    for edge_index in chain {
+        let edge = &edges[edge_index];
+        if !current.is_empty()
+            && (right_seen.contains(&edge.left) || left_seen.contains(&edge.right))
+        {
+            segments.push(pair_run(std::mem::take(&mut current), edges));
+            left_seen.clear();
+            right_seen.clear();
+        }
+        left_seen.insert(edge.left);
+        right_seen.insert(edge.right);
+        current.push(edge_index);
+    }
+    if !current.is_empty() {
+        segments.push(pair_run(current, edges));
+    }
+    segments
+        .into_iter()
+        .filter(|run| run.edges.len() >= 2)
+        .collect()
+}
+
+fn pair_run(chain: Vec<usize>, edges: &[Edge]) -> PairRun {
+    let exact_count = chain
+        .iter()
+        .filter(|&&index| edges[index].evidence.exact_sha256)
+        .count();
+    let average_similarity = chain
+        .iter()
+        .map(|&index| edges[index].evidence.visual_similarity)
+        .sum::<f64>()
+        / chain.len() as f64;
+    let cumulative_gap = chain
+        .windows(2)
+        .map(|pair| {
+            let previous = &edges[pair[0]];
+            let next = &edges[pair[1]];
+            next.left.saturating_sub(previous.left + 1)
+                + next.right.saturating_sub(previous.right + 1)
+        })
+        .sum();
+    PairRun {
+        edges: chain,
+        average_similarity,
+        exact_count,
+        cumulative_gap,
+    }
 }
 
 fn merge_runs(runs: &[PairRun], edges: &[Edge]) -> Vec<SceneBlock> {
@@ -260,10 +309,9 @@ fn merge_runs(runs: &[PairRun], edges: &[Edge]) -> Vec<SceneBlock> {
             page_rows,
         });
     }
+    blocks.retain(|block| block.rows.len() >= 2);
+
     blocks
-        .into_iter()
-        .filter(|block| block.rows.len() >= 2)
-        .collect()
 }
 
 /// A repeated cycle can produce a perfectly monotonic edge chain to the same
@@ -310,18 +358,42 @@ fn rows_to_groups(
     artifact: &HashedArtifact,
     prepared: &[PreparedInternalPage],
     edges: &[Edge],
+    runs: &[PairRun],
     blocks: Vec<SceneBlock>,
 ) -> Vec<InternalGroupRecord> {
     let mut records = Vec::new();
     for (block_index, block) in blocks.into_iter().enumerate() {
-        for (sequence, row) in block.rows.into_iter().enumerate() {
-            let mut indexes = row.into_iter().collect::<Vec<_>>();
+        let assignments = restore_edition_tracks(&block, runs, edges, prepared);
+        let mut output_rows = Vec::new();
+        for row in &block.rows {
+            let mut indexes = row
+                .iter()
+                .copied()
+                .filter(|index| assignments.page_tracks.contains_key(index))
+                .collect::<Vec<_>>();
             indexes.sort_by_key(|index| prepared[*index].original.source_page_number);
-            let representative = indexes[0];
+            if indexes.len() < 2 {
+                continue;
+            }
+            let Some(representative) = choose_row_representative(&indexes, prepared, edges) else {
+                // A transitive component without one direct-evidence medoid is
+                // not safe to render as a single scene row.
+                continue;
+            };
+            output_rows.push((indexes, representative));
+        }
+        if output_rows.len() < 2 {
+            continue;
+        }
+        let block_number = block_index as u32 + 1;
+        for (sequence, (indexes, representative)) in output_rows.into_iter().enumerate() {
             let pages = indexes
                 .iter()
-                .map(|&index| row_evidence(representative, index, prepared, edges))
+                .filter_map(|&index| row_evidence(representative, index, prepared, edges))
                 .collect::<Vec<_>>();
+            if pages.len() != indexes.len() {
+                continue;
+            }
             let relation = if pages.iter().all(|page| page.exact_sha256) {
                 InternalMatchKind::Exact
             } else {
@@ -331,18 +403,216 @@ fn rows_to_groups(
                 .iter()
                 .map(|page| page.visual_similarity)
                 .fold(1.0_f64, f64::min);
-            records.push(group_record(
+            let mut record = group_record(
                 run_id,
                 artifact,
-                block_index as u32 + 1,
+                block_number,
                 sequence as u32,
                 relation,
                 confidence,
                 pages,
-            ));
+            );
+            let track_ids = assignments.track_ids(&record.group.block_id);
+            for page in &mut record.group.pages {
+                let index = indexes
+                    .iter()
+                    .copied()
+                    .find(|index| {
+                        prepared[*index].original.source_page_number.get() == page.source_page
+                    })
+                    .expect("group page is prepared");
+                let ordinal = assignments.page_tracks[&index];
+                page.edition_track_ordinal = Some(ordinal);
+                page.edition_track_id = track_ids.get(&ordinal).cloned();
+            }
+            records.push(record);
         }
     }
     records
+}
+
+impl TrackAssignments {
+    fn canonicalize(mut self, prepared: &[PreparedInternalPage]) -> Self {
+        let mut ordered = self
+            .tracks
+            .iter()
+            .map(|(track, pages)| {
+                (
+                    *track,
+                    pages
+                        .iter()
+                        .map(|page| prepared[*page].original.source_page_number.get())
+                        .min()
+                        .unwrap_or(u32::MAX),
+                )
+            })
+            .collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, first_page)| *first_page);
+        let remap = ordered
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, (track, _))| (track, ordinal as u32))
+            .collect::<BTreeMap<_, _>>();
+        self.page_tracks = self
+            .page_tracks
+            .into_iter()
+            .map(|(page, track)| (page, remap[&track]))
+            .collect();
+        self.tracks = self
+            .tracks
+            .into_iter()
+            .map(|(track, pages)| (remap[&track], pages))
+            .collect();
+        self.next_track = self.tracks.len() as u32;
+        self
+    }
+
+    fn track_ids(&self, block_id: &str) -> BTreeMap<u32, String> {
+        self.tracks
+            .keys()
+            .copied()
+            .map(|ordinal| (ordinal, format!("{block_id}-t{ordinal}")))
+            .collect()
+    }
+
+    fn add_constraint(
+        &mut self,
+        pages: &[usize],
+        page_rows: &BTreeMap<usize, usize>,
+        prepared: &[PreparedInternalPage],
+    ) -> bool {
+        if pages.len() < 2 {
+            return false;
+        }
+        let mut track_ids = pages
+            .iter()
+            .filter_map(|page| self.page_tracks.get(page).copied())
+            .collect::<BTreeSet<_>>();
+        let mut members = pages.iter().copied().collect::<BTreeSet<_>>();
+        for track_id in &track_ids {
+            if let Some(track) = self.tracks.get(track_id) {
+                members.extend(track.iter().copied());
+            }
+        }
+        let mut ordered = members
+            .iter()
+            .filter_map(|page| {
+                page_rows.get(page).map(|row| {
+                    (
+                        *row,
+                        prepared[*page].original.source_page_number.get(),
+                        *page,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if ordered.len() != members.len() {
+            return false;
+        }
+        ordered.sort();
+        if ordered
+            .windows(2)
+            .any(|pair| pair[0].0 == pair[1].0 || pair[0].1 >= pair[1].1)
+        {
+            return false;
+        }
+        let track_id = track_ids.pop_first().unwrap_or_else(|| {
+            let next = self.next_track;
+            self.next_track = self.next_track.saturating_add(1);
+            next
+        });
+        for existing in track_ids {
+            self.tracks.remove(&existing);
+        }
+        for page in &members {
+            self.page_tracks.insert(*page, track_id);
+        }
+        self.tracks.insert(track_id, members);
+        true
+    }
+}
+
+fn restore_edition_tracks(
+    block: &SceneBlock,
+    runs: &[PairRun],
+    edges: &[Edge],
+    prepared: &[PreparedInternalPage],
+) -> TrackAssignments {
+    let mut assignments = TrackAssignments::default();
+    // Runs were score-sorted before scene components were formed. Re-evaluate
+    // them against this concrete block: a run is adopted only when at least
+    // two of its direct edges occupy ordered rows in this same block.
+    for run in runs {
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for &edge_index in &run.edges {
+            let edge = &edges[edge_index];
+            if block.page_rows.get(&edge.left) == block.page_rows.get(&edge.right)
+                && block.page_rows.contains_key(&edge.left)
+                && block.page_rows.contains_key(&edge.right)
+            {
+                left.push(edge.left);
+                right.push(edge.right);
+            }
+        }
+        if left.len() < 2
+            || right.len() < 2
+            || left.iter().collect::<BTreeSet<_>>().len() != left.len()
+            || right.iter().collect::<BTreeSet<_>>().len() != right.len()
+        {
+            continue;
+        }
+        let left_tracks = left
+            .iter()
+            .filter_map(|page| assignments.page_tracks.get(page))
+            .collect::<BTreeSet<_>>();
+        let right_tracks = right
+            .iter()
+            .filter_map(|page| assignments.page_tracks.get(page))
+            .collect::<BTreeSet<_>>();
+        if !left_tracks.is_disjoint(&right_tracks) {
+            continue;
+        }
+        let mut candidate = assignments.clone();
+        if candidate.add_constraint(&left, &block.page_rows, prepared)
+            && candidate.add_constraint(&right, &block.page_rows, prepared)
+        {
+            assignments = candidate;
+        }
+    }
+    assignments.canonicalize(prepared)
+}
+
+fn choose_row_representative(
+    indexes: &[usize],
+    prepared: &[PreparedInternalPage],
+    edges: &[Edge],
+) -> Option<usize> {
+    indexes
+        .iter()
+        .copied()
+        .filter_map(|candidate| {
+            let minimum_similarity = indexes
+                .iter()
+                .copied()
+                .filter(|index| *index != candidate)
+                .map(|index| {
+                    direct_evidence(candidate, index, edges).map(|edge| edge.visual_similarity)
+                })
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .fold(1.0_f64, f64::min);
+            Some((candidate, minimum_similarity))
+        })
+        .max_by(|(left_index, left_score), (right_index, right_score)| {
+            left_score.total_cmp(right_score).then_with(|| {
+                prepared[*right_index]
+                    .original
+                    .source_page_number
+                    .cmp(&prepared[*left_index].original.source_page_number)
+            })
+        })
+        .map(|(index, _)| index)
 }
 
 fn row_evidence(
@@ -350,30 +620,45 @@ fn row_evidence(
     index: usize,
     prepared: &[PreparedInternalPage],
     edges: &[Edge],
-) -> InternalPageEvidence {
+) -> Option<InternalPageEvidence> {
     if representative == index {
-        return evidence_for_exact(&prepared[index].original);
+        return Some(evidence_for_self(&prepared[index].original));
     }
-    let (left, right) = if representative < index {
-        (representative, index)
+    direct_evidence(representative, index, edges).map(|value| InternalPageEvidence {
+        source_page: prepared[index].original.source_page_number.get(),
+        exact_sha256: value.exact_sha256,
+        visual_similarity: value.visual_similarity,
+        detail_hash_distance: value.detail_hash_distance,
+        low_information: value.low_information,
+        edition_track_id: None,
+        edition_track_ordinal: None,
+    })
+}
+
+fn direct_evidence(left: usize, right: usize, edges: &[Edge]) -> Option<&DuplicatePagePair> {
+    let (left, right) = if left < right {
+        (left, right)
     } else {
-        (index, representative)
+        (right, left)
     };
-    let evidence = edges
+    edges
         .iter()
         .find(|edge| edge.left == left && edge.right == right)
-        .map(|edge| &edge.evidence);
-    evidence.map_or_else(
-        || evidence_for_exact(&prepared[index].original),
-        |value| InternalPageEvidence {
-            source_page: prepared[index].original.source_page_number.get(),
-            exact_sha256: value.exact_sha256,
-            visual_similarity: value.visual_similarity,
-            detail_hash_distance: value.detail_hash_distance,
-            low_information: value.low_information,
-        },
-    )
+        .map(|edge| &edge.evidence)
 }
+
+fn evidence_for_self(page: &DuplicatePageHash) -> InternalPageEvidence {
+    InternalPageEvidence {
+        source_page: page.source_page_number.get(),
+        exact_sha256: true,
+        visual_similarity: 1.0,
+        detail_hash_distance: 0,
+        low_information: page.low_information,
+        edition_track_id: None,
+        edition_track_ordinal: None,
+    }
+}
+
 fn evidence_for_exact(page: &DuplicatePageHash) -> InternalPageEvidence {
     InternalPageEvidence {
         source_page: page.source_page_number.get(),
@@ -381,6 +666,8 @@ fn evidence_for_exact(page: &DuplicatePageHash) -> InternalPageEvidence {
         visual_similarity: 1.0,
         detail_hash_distance: 0,
         low_information: page.low_information,
+        edition_track_id: None,
+        edition_track_ordinal: None,
     }
 }
 
@@ -572,6 +859,18 @@ mod tests {
             low_information: false,
         }
     }
+    fn visual_page(number: u32, scene: u64, edition: u8) -> DuplicatePageHash {
+        let mut page = page(number, scene);
+        page.artifact_sha256 = ArtifactSha256::new(format!("{:064x}", 10_000 + number)).unwrap();
+        page.coarse_d_hash ^= u64::from(edition) << 56;
+        page.p_hash ^= u64::from(edition) << 48;
+        let mut detail = page.detail_d_hash_hex.into_bytes();
+        detail[edition as usize % 32] = b'f';
+        page.detail_d_hash_hex = String::from_utf8(detail).unwrap();
+        page.edge_density += f64::from(edition) * 0.002;
+        page.std_dev += f64::from(edition) * 0.1;
+        page
+    }
     fn artifact(pages: Vec<DuplicatePageHash>) -> HashedArtifact {
         HashedArtifact {
             gallery: DuplicateGalleryRef {
@@ -591,7 +890,7 @@ mod tests {
             .flat_map(|edition| {
                 (0..5).map(move |scene| page(edition * 5 + scene + 1, u64::from(scene + 1)))
             })
-            .collect();
+            .collect::<Vec<_>>();
         let found = detect_internal_groups("run", &artifact(pages), &HashProfile::current());
         assert_eq!(found.groups.len(), 5);
         for (scene, row) in found.groups.iter().enumerate() {
@@ -609,6 +908,103 @@ mod tests {
                 ]
             );
         }
+        let tracks = found.groups[0]
+            .group
+            .pages
+            .iter()
+            .map(|page| (page.edition_track_id.clone(), page.edition_track_ordinal))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tracks,
+            vec![
+                (Some("internal-a3-p1-g1-b1-t0".into()), Some(0)),
+                (Some("internal-a3-p1-g1-b1-t1".into()), Some(1)),
+                (Some("internal-a3-p1-g1-b1-t2".into()), Some(2)),
+                (Some("internal-a3-p1-g1-b1-t3".into()), Some(3)),
+            ]
+        );
+    }
+    #[test]
+    fn visual_only_four_editions_keep_deterministic_tracks_without_forging_exact_evidence() {
+        let pages: Vec<_> = (0..4)
+            .flat_map(|edition| {
+                (0..5).map(move |scene| {
+                    visual_page(edition * 5 + scene + 1, u64::from(scene + 1), edition as u8)
+                })
+            })
+            .collect();
+        let first =
+            detect_internal_groups("run", &artifact(pages.clone()), &HashProfile::current());
+        let second = detect_internal_groups("run", &artifact(pages), &HashProfile::current());
+        assert_eq!(first.groups, second.groups);
+        assert_eq!(first.groups.len(), 5);
+        assert!(
+            first.groups.iter().all(|group| {
+                group.group.relation == InternalMatchKind::TranslationVisual
+                    && group.group.pages.len() == 4
+                    && group
+                        .group
+                        .pages
+                        .iter()
+                        .filter(|page| page.exact_sha256)
+                        .count()
+                        == 1
+            }),
+            "{:#?}",
+            first.groups
+        );
+        for ordinal in 0..4 {
+            let track_pages = first
+                .groups
+                .iter()
+                .filter_map(|group| {
+                    group
+                        .group
+                        .pages
+                        .iter()
+                        .find(|page| page.edition_track_ordinal == Some(ordinal))
+                        .map(|page| page.source_page)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                track_pages,
+                (ordinal * 5 + 1..=ordinal * 5 + 5).collect::<Vec<_>>()
+            );
+        }
+    }
+    #[test]
+    fn missing_scene_keeps_a_track_without_shifting_later_rows() {
+        let mut pages = Vec::new();
+        for edition in 0..4_u32 {
+            for scene in 0..5_u32 {
+                if edition == 2 && scene == 2 {
+                    continue;
+                }
+                pages.push(visual_page(
+                    edition * 5 + scene + 1,
+                    u64::from(scene + 1),
+                    edition as u8,
+                ));
+            }
+        }
+        let found = detect_internal_groups("run", &artifact(pages), &HashProfile::current());
+        assert_eq!(found.groups.len(), 5);
+        let third_row = &found.groups[2].group.pages;
+        assert_eq!(
+            third_row
+                .iter()
+                .map(|page| page.source_page)
+                .collect::<Vec<_>>(),
+            vec![3, 8, 18]
+        );
+        let track_c = found
+            .groups
+            .iter()
+            .flat_map(|group| group.group.pages.iter())
+            .filter(|page| page.edition_track_ordinal == Some(2))
+            .map(|page| page.source_page)
+            .collect::<Vec<_>>();
+        assert_eq!(track_c, vec![11, 12, 14, 15]);
     }
     #[test]
     fn one_shared_panel_does_not_form_a_block() {

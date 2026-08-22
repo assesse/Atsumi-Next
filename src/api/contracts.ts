@@ -511,6 +511,8 @@ export type InternalPageEvidence = {
   visualSimilarity: number;
   detailHashDistance: number;
   lowInformation: boolean;
+  editionTrackId?: string;
+  editionTrackOrdinal?: number;
 };
 
 export type InternalDuplicateGroup = {

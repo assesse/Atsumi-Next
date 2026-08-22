@@ -43,6 +43,7 @@ pub use internal_duplicate::{
     InternalRemovalPlan, InternalRemovalPlanRequest, InternalRemovalResult,
     InternalRemovalSelection, InternalRemovalUndoRequest, InternalScanRun, InternalScanSkip,
     InternalScanState, PageQuarantineRecord, PageQuarantineSaga, PageQuarantineState,
+    INTERNAL_DUPLICATE_ALGORITHM_VERSION,
 };
 pub use job::{
     DownloadChangedEvent, DownloadJobDescriptor, DownloadJobProjection, FixtureDownloadJobStep,

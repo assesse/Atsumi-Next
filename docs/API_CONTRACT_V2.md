@@ -63,7 +63,7 @@ type ApiError = {
 | `internal_removal_apply` | `{ request: InternalRemovalApplyRequest }` | `InternalRemovalResult` | prepared plan 한 번 적용 |
 | `internal_removal_undo` | `{ request: InternalRemovalUndoRequest }` | `InternalRemovalResult` | quarantined record 한 번 복원 |
 
-`InternalScanRun`은 `algorithmVersion`, `skippedArtifacts`, `skippedPages`를 포함한다. `InternalDuplicateSnapshot.skips`에는 page-limit으로 제외된 artifact의 entryId, galleryId, title, pageCount, reason(`page_limit`)이 들어간다. algorithm v2는 N-way monotonic scene rows를 사용하며 500페이지 이상 artifact는 내부 검사에만 포함하지 않는다.
+`InternalScanRun`은 `algorithmVersion`, `skippedArtifacts`, `skippedPages`를 포함한다. `InternalDuplicateSnapshot.skips`에는 page-limit으로 제외된 artifact의 entryId, galleryId, title, pageCount, reason(`page_limit`)이 들어간다. algorithm v3는 N-way monotonic scene rows와 optional `editionTrackId`/`editionTrackOrdinal`을 함께 반환한다. 다중 행 block은 track 전체를 선택해 기존 `InternalRemovalSelection[]`으로 변환하며, track page가 없는 row는 selection에서 제외한다. legacy/standalone exact row는 track field가 null/생략된 기존 개별 선택 계약을 유지한다. 500페이지 이상 artifact는 내부 검사에만 포함하지 않는다.
 | `download_queue_add` | `{ galleries: GalleryId[], requestId }` | `DownloadEntry[]` | requestId + active gallery 기반 |
 | `download_entries_list` | `DownloadListRequest` | `DownloadPage` | 예 |
 | `download_active_count` | 없음 | `number` | 예 |

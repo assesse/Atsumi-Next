@@ -189,13 +189,24 @@ impl InternalDuplicateRepository for SqliteRepository {
             )
             .map_err(repository_sql_error)?;
         for page in &group.pages {
+            if page.edition_track_id.is_some() != page.edition_track_ordinal.is_some()
+                || page
+                    .edition_track_id
+                    .as_deref()
+                    .is_some_and(|track_id| track_id.trim().is_empty())
+            {
+                return Err(RepositoryError::Corrupt(
+                    "internal duplicate page has an incomplete edition track".into(),
+                ));
+            }
             transaction
                 .execute(
                     r#"
                         INSERT INTO internal_duplicate_group_pages (
                             group_id, source_page_number, exact_sha256,
-                            visual_similarity, detail_hash_distance, low_information
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                            visual_similarity, detail_hash_distance, low_information,
+                            edition_track_id, edition_track_ordinal
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                     "#,
                     params![
                         group.group_id,
@@ -204,6 +215,8 @@ impl InternalDuplicateRepository for SqliteRepository {
                         page.visual_similarity,
                         i64::from(page.detail_hash_distance),
                         page.low_information,
+                        page.edition_track_id,
+                        page.edition_track_ordinal.map(i64::from),
                     ],
                 )
                 .map_err(repository_sql_error)?;
@@ -1071,7 +1084,7 @@ fn stored_group(
     connection: &Connection,
     row: StoredGroup,
 ) -> Result<InternalDuplicateGroup, RepositoryError> {
-    let mut statement = connection.prepare("SELECT source_page_number, exact_sha256, visual_similarity, detail_hash_distance, low_information FROM internal_duplicate_group_pages WHERE group_id = ?1 ORDER BY source_page_number").map_err(repository_sql_error)?;
+    let mut statement = connection.prepare("SELECT source_page_number, exact_sha256, visual_similarity, detail_hash_distance, low_information, edition_track_id, edition_track_ordinal FROM internal_duplicate_group_pages WHERE group_id = ?1 ORDER BY source_page_number").map_err(repository_sql_error)?;
     let pages = statement
         .query_map([&row.0], |page| {
             Ok((
@@ -1080,17 +1093,33 @@ fn stored_group(
                 page.get::<_, f64>(2)?,
                 page.get::<_, i64>(3)?,
                 page.get::<_, bool>(4)?,
+                page.get::<_, Option<String>>(5)?,
+                page.get::<_, Option<i64>>(6)?,
             ))
         })
         .map_err(repository_sql_error)?
         .map(|page| {
             let page = page.map_err(repository_sql_error)?;
+            let (edition_track_id, edition_track_ordinal) = match (page.5, page.6) {
+                (None, None) => (None, None),
+                (Some(track_id), Some(ordinal)) if !track_id.trim().is_empty() => (
+                    Some(track_id),
+                    Some(stored_u32(ordinal, "edition track ordinal")?),
+                ),
+                _ => {
+                    return Err(RepositoryError::Corrupt(
+                        "internal duplicate page has an incomplete edition track".into(),
+                    ))
+                }
+            };
             Ok(InternalPageEvidence {
                 source_page: stored_u32(page.0, "internal source page")?,
                 exact_sha256: page.1,
                 visual_similarity: page.2,
                 detail_hash_distance: stored_u32(page.3, "detail hash distance")?,
                 low_information: page.4,
+                edition_track_id,
+                edition_track_ordinal,
             })
         })
         .collect::<Result<Vec<_>, RepositoryError>>()?;

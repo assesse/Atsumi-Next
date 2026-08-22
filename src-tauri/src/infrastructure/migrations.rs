@@ -1314,6 +1314,24 @@ pub const MIGRATIONS: &[Migration] = &[
                 ON internal_duplicate_scan_skips(run_id, gallery_id);
         "#,
     },
+    Migration {
+        version: 22,
+        name: "internal_duplicate_edition_tracks",
+        sql: r#"
+            ALTER TABLE internal_duplicate_group_pages
+            ADD COLUMN edition_track_id TEXT CHECK (
+                edition_track_id IS NULL OR length(trim(edition_track_id)) > 0
+            );
+            ALTER TABLE internal_duplicate_group_pages
+            ADD COLUMN edition_track_ordinal INTEGER CHECK (
+                edition_track_ordinal IS NULL OR edition_track_ordinal >= 0
+            );
+            CREATE INDEX internal_duplicate_group_pages_track_idx
+                ON internal_duplicate_group_pages (
+                    edition_track_id, edition_track_ordinal, group_id
+                );
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1599,7 +1617,10 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v14 to v15");
-        assert_eq!(report.applied_versions, vec![15, 16, 17, 18, 19, 20, 21]);
+        assert_eq!(
+            report.applied_versions,
+            vec![15, 16, 17, 18, 19, 20, 21, 22]
+        );
         let historical_import_tables: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'classic_import_%'",
@@ -1695,9 +1716,9 @@ mod tests {
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
         assert_eq!(
             report.applied_versions,
-            vec![12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+            vec![12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
         );
-        assert_eq!(report.current_version, 21);
+        assert_eq!(report.current_version, 22);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",
@@ -1717,5 +1738,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(profile, (1, 1_024, 64));
+    }
+
+    #[test]
+    fn edition_track_migration_is_additive_from_v21() {
+        let mut connection = Connection::open_in_memory().expect("open v21 migration database");
+        connection
+            .execute_batch(
+                r#"
+                    PRAGMA foreign_keys = ON;
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT (
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    ) STRICT;
+                "#,
+            )
+            .unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 21)
+        {
+            connection.execute_batch(migration.sql).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                    params![migration.version, migration.name],
+                )
+                .unwrap();
+        }
+
+        let report = MigrationRunner::run(&mut connection).expect("migrate v21 to v22");
+        assert_eq!(report.applied_versions, vec![22]);
+        let columns = connection
+            .prepare(
+                "SELECT name FROM pragma_table_info('internal_duplicate_group_pages') ORDER BY cid",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.contains(&"edition_track_id".to_string()));
+        assert!(columns.contains(&"edition_track_ordinal".to_string()));
     }
 }

@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{GalleryId, SourcePageNumber};
 
+/// Scene rows and edition tracks are derived from existing HashProfile 1 page
+/// hashes. Bump this only when the grouping/result meaning changes.
+pub const INTERNAL_DUPLICATE_ALGORITHM_VERSION: u32 = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InternalScanState {
@@ -99,6 +103,10 @@ pub struct InternalPageEvidence {
     pub visual_similarity: f64,
     pub detail_hash_distance: u32,
     pub low_information: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edition_track_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edition_track_ordinal: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

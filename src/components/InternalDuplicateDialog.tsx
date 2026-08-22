@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type {
   InternalDuplicateReview,
   InternalRemovalPlan,
@@ -7,6 +7,11 @@ import type {
 import { artifactPageThumbnailKey, type ThumbnailClient } from "../thumbnail";
 import { FluentIcon } from "./FluentIcon";
 import { GalleryThumbnail } from "./GalleryThumbnail";
+import {
+  buildInternalRemovalSelections,
+  buildInternalReviewBlocks,
+  selectionsMatchPlan,
+} from "./internalDuplicateReviewModel";
 
 type InternalDuplicateDialogProps = {
   open: boolean;
@@ -50,6 +55,7 @@ export function InternalDuplicateDialog({
   const closeButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const [keepPages, setKeepPages] = useState<Record<string, number>>({});
+  const [selectedTrackByBlock, setSelectedTrackByBlock] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!open) return;
@@ -70,43 +76,32 @@ export function InternalDuplicateDialog({
     };
   }, [open]);
 
-  useEffect(() => {
-    if (!review) return;
-    setKeepPages(Object.fromEntries(review.groups.map((group) => [group.groupId, group.recommendedKeepSourcePage])));
-  }, [review]);
-
   const activeRecords = useMemo(
     () => review?.quarantineRecords.filter((record) => record.state !== "restored") ?? [],
     [review?.quarantineRecords],
   );
-  const activePlan = plan?.selections.every(
-    (selection) => (keepPages[selection.groupId] ?? selection.keepSourcePage) === selection.keepSourcePage,
-  ) ? plan : undefined;
-  const blocks = useMemo(() => {
-    const grouped = new Map<string, NonNullable<typeof review>["groups"]>();
-    for (const group of review?.groups ?? []) {
-      const rows = grouped.get(group.blockId) ?? [];
-      rows.push(group);
-      grouped.set(group.blockId, rows);
-    }
-    return [...grouped.entries()];
-  }, [review?.groups]);
+  const blocks = useMemo(() => buildInternalReviewBlocks(review?.groups ?? []), [review?.groups]);
+  useEffect(() => {
+    if (!review) return;
+    setKeepPages(Object.fromEntries(review.groups.map((group) => [group.groupId, group.recommendedKeepSourcePage])));
+    setSelectedTrackByBlock(Object.fromEntries(
+      buildInternalReviewBlocks(review.groups)
+        .filter((block) => block.edition)
+        .map((block) => [block.blockId, block.tracks[0]!.id]),
+    ));
+  }, [review]);
+
+  const selections = useMemo(
+    () => buildInternalRemovalSelections(blocks, selectedTrackByBlock, keepPages),
+    [blocks, keepPages, selectedTrackByBlock],
+  );
+  const activePlan = selectionsMatchPlan(selections, plan) ? plan ?? undefined : undefined;
 
   const preview = () => {
     if (!review) return;
     onPlan({
       entryId: review.entryId,
-      selections: review.groups.map((group) => {
-        const keepSourcePage = keepPages[group.groupId] ?? group.recommendedKeepSourcePage;
-        return {
-          groupId: group.groupId,
-          expectedRevision: group.revision,
-          keepSourcePage,
-          removeSourcePages: group.pages
-            .map((page) => page.sourcePage)
-            .filter((page) => page !== keepSourcePage),
-        };
-      }),
+      selections,
     });
   };
 
@@ -148,14 +143,83 @@ export function InternalDuplicateDialog({
               <span>원본 페이지 번호는 바뀌지 않습니다. 선택한 파일은 앨범 폴더 안의 격리 영역으로 이동하며 자동 영구 삭제되지 않습니다.</span>
             </div>
 
-            {blocks.length ? blocks.map(([blockId, groups], blockIndex) => (
-              <section className="internal-scene-block" key={blockId} aria-labelledby={`internal-block-${blockIndex}`}>
+            {blocks.length ? blocks.map((block, blockIndex) => (
+              <section className="internal-scene-block" key={block.blockId} aria-labelledby={`internal-block-${blockIndex}`}>
                 <header>
-                  <div><h3 id={`internal-block-${blockIndex}`}>장면 묶음 {blockIndex + 1}</h3><span>{groups[0]?.relation === "exact" ? "SHA-256 정확 일치" : "연속 장면 시각 일치"}</span></div>
-                  <span>{groups.length}행</span>
+                  <div><h3 id={`internal-block-${blockIndex}`}>장면 묶음 {blockIndex + 1}</h3><span>{block.rows[0]?.relation === "exact" ? "SHA-256 정확 일치" : "연속 장면 시각 일치"}</span></div>
+                  <span>{block.rows.length}행</span>
                 </header>
-                <div className="internal-scene-rows">
-                  {groups.map((group) => (
+                {block.edition ? (
+                  <>
+                    <fieldset className="internal-track-selector">
+                      <legend>남길 판본 세트 선택</legend>
+                      {block.tracks.map((track, trackIndex) => {
+                        const selected = (selectedTrackByBlock[block.blockId] ?? block.tracks[0]?.id) === track.id;
+                        return <label key={track.id} className={`internal-track-option${selected ? " is-selected" : ""}`}>
+                          <input
+                            type="radio"
+                            name={`track-${block.blockId}`}
+                            checked={selected}
+                            onChange={() => setSelectedTrackByBlock((current) => ({ ...current, [block.blockId]: track.id }))}
+                          />
+                          {track.firstPage ? <GalleryThumbnail
+                            className="internal-track-image"
+                            thumbnailKey={artifactPageThumbnailKey(review.entryId, track.firstPage.sourcePage, track.firstPage.sourcePage - 1)}
+                            consumer="review"
+                            priority={blockIndex === 0 && trackIndex < 2 ? "visible" : "prefetch"}
+                            client={thumbnailClient}
+                            alt={`${track.label} 첫 원본 ${track.firstPage.sourcePage}페이지`}
+                          /> : null}
+                          <strong>{track.label}</strong>
+                          <span>{track.pages[0]}–{track.pages.at(-1)}p · {track.coveredRows}/{block.rows.length}장</span>
+                          {track.missingRows ? <small>{track.missingRows}개 장면 누락</small> : null}
+                        </label>;
+                      })}
+                    </fieldset>
+                    <div
+                      className="internal-scene-matrix"
+                      role="region"
+                      aria-label={`장면 묶음 ${blockIndex + 1} 판본 행렬`}
+                      style={{ "--internal-track-count": block.tracks.length } as CSSProperties}
+                    >
+                      <div className="internal-scene-matrix-row internal-scene-matrix-header">
+                        <span>장면</span>{block.tracks.map((track) => <strong key={track.id}>{track.label}</strong>)}
+                      </div>
+                      {block.rows.map((group) => (
+                        <div className="internal-scene-matrix-row" key={group.groupId}>
+                          <strong>장면 {group.sequenceIndex + 1}</strong>
+                          {block.tracks.map((track) => {
+                            const page = group.pages.find((candidate) => candidate.editionTrackId === track.id);
+                            const selected = (selectedTrackByBlock[block.blockId] ?? block.tracks[0]?.id) === track.id;
+                            if (!page) return <span className={`internal-scene-cell is-missing${selected ? " is-kept" : ""}`} key={track.id}>{selected ? "선택 세트 누락 · 이 행 보존" : "—"}</span>;
+                            return <div className={`internal-scene-cell${selected ? " is-kept" : " is-quarantine"}`} key={track.id}>
+                              <GalleryThumbnail
+                                className="internal-page-image"
+                                thumbnailKey={artifactPageThumbnailKey(review.entryId, page.sourcePage, page.sourcePage - 1)}
+                                consumer="review"
+                                priority={blockIndex === 0 && group.sequenceIndex < 2 ? "visible" : "prefetch"}
+                                client={thumbnailClient}
+                                alt={`${track.label} 원본 ${page.sourcePage}페이지`}
+                              ><span>{page.sourcePage}p</span></GalleryThumbnail>
+                              <small>{selected ? "유지" : "격리 예정"}</small>
+                            </div>;
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                    {(() => {
+                      const selectedId = selectedTrackByBlock[block.blockId] ?? block.tracks[0]?.id;
+                      const selectedTrack = block.tracks.find((track) => track.id === selectedId);
+                      const selectionCount = buildInternalRemovalSelections([block], selectedTrackByBlock, keepPages);
+                      const removals = selectionCount.reduce((count, selection) => count + selection.removeSourcePages.length, 0);
+                      return selectedTrack ? <p className="internal-selection-summary">
+                        선택 판본: <strong>{selectedTrack.label}</strong> · 유지 페이지: {selectedTrack.coveredRows}개 · 격리 예정: {removals}개
+                        {selectedTrack.missingRows ? ` · 선택한 세트에 없는 장면 ${selectedTrack.missingRows}행은 이번 작업에서 건드리지 않습니다.` : null}
+                      </p> : null;
+                    })()}
+                  </>
+                ) : <div className="internal-scene-rows">
+                  {block.rows.map((group) => (
                     <fieldset key={group.groupId} className="internal-scene-row">
                       <legend>행 {group.sequenceIndex + 1} · 신뢰도 {percent(group.confidence)}</legend>
                       <div className="internal-page-options">
@@ -185,7 +249,7 @@ export function InternalDuplicateDialog({
                       </div>
                     </fieldset>
                   ))}
-                </div>
+                </div>}
               </section>
             )) : <div className="review-empty">현재 검토할 내부 중복 페이지가 없습니다.</div>}
 
@@ -210,7 +274,7 @@ export function InternalDuplicateDialog({
         <div className="review-actions">
           <button type="button" className="text-button" disabled={busy} onClick={onRescan}><FluentIcon glyph="\uE9D9" /> 다시 검사</button>
           <span />
-          <button type="button" className="text-button" disabled={!review?.groups.length || busy} onClick={preview}>격리 계획 미리보기</button>
+          <button type="button" className="text-button" disabled={!selections.length || busy} onClick={preview}>격리 계획 미리보기</button>
           <button type="button" className="text-button" onClick={onClose}>닫기</button>
         </div>
       </div>

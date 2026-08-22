@@ -4,7 +4,7 @@
 
 Atsumi Next는 기존 Atsumi를 보존하면서 새 구조로 재작성하는 독립 프로젝트다.
 
-승인된 UX prototype과 V2 계약을 기준으로 실제 다운로드 흐름, 영속 즐겨찾기·검색 이력·Auto Find, 작품 중복 Review, 앨범 내부 중복 페이지 검토·격리·undo를 구현했다. 현재 DB schema는 v21이고 manifest schema와 HashProfile은 계속 1이다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
+승인된 UX prototype과 V2 계약을 기준으로 실제 다운로드 흐름, 영속 즐겨찾기·검색 이력·Auto Find, 작품 중복 Review, 앨범 내부 중복 페이지 검토·격리·undo를 구현했다. 현재 DB schema는 v22이고 manifest schema와 HashProfile은 계속 1이다. Tauri production 경로는 실제 Hitomi 검색·상세·미리보기·페이지 다운로드 adapter를 사용하고, 브라우저 검토 모드와 자동 테스트만 저장 fixture를 사용한다. 탐색·다운로드·상세·Review의 미리보기는 하나의 전역 thumbnail coordinator를 공유하며, 검색·미리보기·다운로드·Auto Find는 같은 pooled HTTP scheduler의 host 제한·우선순위·취소·bounded retry 정책을 사용한다.
 
 다운로드는 SQLite queue에서 자동 시작해 source page 번호별 `.part` 기록, decode, WebP 저장, SHA-256, atomic rename, versioned manifest 검증을 마친 뒤에만 `completed`가 된다. 강제 종료된 작업은 검증된 page checkpoint부터 재개하며, 시작 시와 Downloads의 수동 명령에서 DB·manifest·실제 파일을 재조정한다. 완료 파일은 Windows 기본 뷰어로 열 수 있고, 삭제 대신 download root 내부의 crash-safe quarantine으로 옮긴 뒤 복원할 수 있다. 자동 영구 삭제는 하지 않는다.
 
@@ -18,7 +18,7 @@ Explore는 query별 최대 5개의 완료 page를 보존하고 현재 page와 �
 
 작품 중복 검사는 검증 완료된 로컬 artifact만 읽어 exact SHA-256, 64-bit perceptual hash, 1024-bit detail hash, 밝기 분산·edge gate와 단조 1:1 gap-tolerant 정렬을 versioned evidence로 저장한다. 제목·작가·그룹 metadata는 전수 비교 작업의 우선순위를 정하되 후보를 누락시키지 않는다. Review는 실제 source page 번호의 로컬 artifact preview, confidence와 판정 이력을 보여 주며 숨김·연작 연결/해제·pair 제외를 revision CAS transaction으로 적용한다. 자동 판정만으로 파일을 삭제하지 않는다. E-Hentai relation port는 명시적 적법 세션이 없는 기본 production 설정에서 비활성화된다.
 
-앨범 내부 중복 검사는 같은 verified artifact 안에서 최대 499 원본 페이지까지 정확한 SHA 반복과 N-way 단조 시각 장면 묶음만 Review에 올린다. 500페이지 이상은 성능 상한 때문에 내부 검사에서만 명시적으로 제외하며 다운로드·Detail 전체 탐색·작품 간 중복 검사에는 제한이 없다. 사용자는 각 동기화 행에서 유지할 원본 페이지를 고르고 파일 수·용량이 고정된 revision-CAS 계획을 먼저 확인한다. 적용은 앨범 폴더의 `.atsumi-page-quarantine/<plan-id>/`로만 이동하며 manifest와 SQLite가 crash-safe saga로 조정된다. 원본 페이지 번호는 바꾸지 않고 격리 이력에서 복원할 수 있으며 자동 영구 삭제는 없다.
+앨범 내부 중복 검사는 같은 verified artifact 안에서 최대 499 원본 페이지까지 정확한 SHA 반복과 N-way 단조 시각 장면 묶음만 Review에 올린다. algorithm v3는 다중 행 장면 묶음의 판본 track을 함께 보존하므로 사용자는 행마다 섞어 고르지 않고 세트 A/B… 하나를 남긴다. 선택한 세트에 없는 장면은 안전하게 그대로 둔다. standalone exact와 과거 결과만 기존 개별 행 선택을 사용한다. 500페이지 이상은 성능 상한 때문에 내부 검사에서만 명시적으로 제외하며 다운로드·Detail 전체 탐색·작품 간 중복 검사에는 제한이 없다. 적용은 앨범 폴더의 `.atsumi-page-quarantine/<plan-id>/`로만 이동하며 manifest와 SQLite가 crash-safe saga로 조정된다. 원본 페이지 번호는 바꾸지 않고 격리 이력에서 복원할 수 있으며 자동 영구 삭제는 없다.
 
 설정의 초기화 명령은 역할을 분리한다. `미리보기 캐시 비우기`는 완료된 재생성 가능 thumbnail cache만 제거하고 화면에 사용 중이거나 진행 중인 요청은 건드리지 않는다. `화면·네트워크 기본값 복원`은 저장 전 draft만 기본값으로 바꾸며 다운로드 경로와 폴더 template은 유지한다. `탐색 데이터 초기화`는 명시적 확인 문구 뒤 즐겨찾기·검색 이력·Auto Find run/후보/제외만 한 transaction에서 제거한다. 어느 명령도 다운로드 DB, artifact, manifest 또는 사용자 파일을 일괄 삭제하지 않는다.
 

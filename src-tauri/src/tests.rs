@@ -94,7 +94,7 @@ fn primary_group_migration_preserves_existing_gallery_rows() {
     let report = MigrationRunner::run(&mut connection).expect("apply v4 migration");
     assert_eq!(
         report.applied_versions,
-        vec![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        vec![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
     );
     let stored: (String, Option<String>) = connection
         .query_row(
@@ -176,7 +176,7 @@ fn lifecycle_migration_preserves_v6_download_graph_and_enables_cancelled() {
     let report = MigrationRunner::run(&mut connection).expect("apply lifecycle migration");
     assert_eq!(
         report.applied_versions,
-        vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
     );
     let lifecycle: (i64, String, Option<String>, i64) = connection
         .query_row(
@@ -284,7 +284,7 @@ fn visible_metadata_migration_defaults_existing_auto_find_candidates() {
     let report = MigrationRunner::run(&mut connection).expect("apply visible metadata migration");
     assert_eq!(
         report.applied_versions,
-        vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
     );
     let metadata: (String, String) = connection
         .query_row(
@@ -345,7 +345,7 @@ fn settings_constraint_migration_clamps_legacy_values() {
     let report = MigrationRunner::run(&mut connection).expect("upgrade legacy schema");
     assert_eq!(
         report.applied_versions,
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
     );
     let tightened: (i64, i64, i64, i64, i64, i64) = connection
         .query_row(

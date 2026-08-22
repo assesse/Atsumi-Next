@@ -180,4 +180,54 @@ describe("InternalDuplicateDialog", () => {
     client.dispose();
     container.remove();
   });
+
+  it("selects an entire edition set, preserves a missing scene, and hides a stale plan", async () => {
+    const editionReview: InternalDuplicateReview = {
+      ...review,
+      groups: Array.from({ length: 5 }, (_, sequenceIndex) => ({
+        ...review.groups[0]!,
+        groupId: `edition-row-${sequenceIndex + 1}`,
+        blockId: "edition-block",
+        sequenceIndex,
+        recommendedKeepSourcePage: sequenceIndex + 1,
+        pages: [0, 1, 2, 3]
+          .filter((track) => !(track === 2 && sequenceIndex === 2))
+          .map((track) => ({
+            sourcePage: track * 5 + sequenceIndex + 1,
+            exactSha256: track === 0,
+            visualSimilarity: track === 0 ? 1 : .92,
+            detailHashDistance: track === 0 ? 0 : 11,
+            lowInformation: false,
+            editionTrackId: `edition-block-t${track}`,
+            editionTrackOrdinal: track,
+          })),
+      })),
+    };
+    const onPlan = vi.fn();
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing" as const, reason: "test" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(
+      <InternalDuplicateDialog open={false} review={editionReview} thumbnailClient={client} onClose={vi.fn()} onRetry={vi.fn()} onRescan={vi.fn()} onPlan={onPlan} onApply={vi.fn()} onUndo={vi.fn()} />,
+    ));
+    expect(container.textContent).toContain("남길 판본 세트 선택");
+    expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(4);
+    expect(container.querySelectorAll(".internal-scene-matrix-row")).toHaveLength(6);
+    expect(container.querySelectorAll(".internal-page-option")).toHaveLength(0);
+    const setB = container.querySelectorAll<HTMLInputElement>('input[name="track-edition-block"]')[1];
+    await act(async () => setB?.click());
+    const preview = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("격리 계획 미리보기"));
+    await act(async () => preview?.click());
+    expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
+      selections: expect.arrayContaining([
+        expect.objectContaining({ groupId: "edition-row-1", keepSourcePage: 6, removeSourcePages: [1, 11, 16] }),
+        expect.objectContaining({ groupId: "edition-row-3", keepSourcePage: 8, removeSourcePages: [3, 18] }),
+      ]),
+    }));
+    expect(onPlan.mock.calls[0]?.[0].selections).toHaveLength(5);
+    await act(async () => root.unmount());
+    client.dispose();
+    container.remove();
+  });
 });

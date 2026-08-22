@@ -15,6 +15,7 @@ use crate::{
         InternalRemovalPlan, InternalRemovalPlanRequest, InternalRemovalResult,
         InternalRemovalUndoRequest, InternalScanRun, InternalScanSkip, InternalScanState,
         PageArtifactState, PageQuarantineSaga, PageQuarantineState,
+        INTERNAL_DUPLICATE_ALGORITHM_VERSION,
     },
     thumbnail::CancellationToken,
 };
@@ -29,7 +30,6 @@ use super::{
 const PLAN_LIFETIME_MS: u128 = 15 * 60 * 1_000;
 /// Deliberately exclusive: artifacts with 500 original pages are not scanned.
 pub(crate) const INTERNAL_DUPLICATE_PAGE_LIMIT_EXCLUSIVE: usize = 500;
-pub(crate) const INTERNAL_DUPLICATE_ALGORITHM_VERSION: u32 = 2;
 
 #[derive(Clone)]
 pub struct InternalDuplicateSupervisor {
