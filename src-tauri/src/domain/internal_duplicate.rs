@@ -4,7 +4,7 @@ use super::{GalleryId, SourcePageNumber};
 
 /// Scene rows and edition tracks are derived from existing HashProfile 1 page
 /// hashes. Bump this only when the grouping/result meaning changes.
-pub const INTERNAL_DUPLICATE_ALGORITHM_VERSION: u32 = 3;
+pub const INTERNAL_DUPLICATE_ALGORITHM_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

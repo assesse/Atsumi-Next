@@ -6,6 +6,8 @@ mod duplicate_analyzer;
 mod duplicate_supervisor;
 mod error;
 mod internal_duplicate_analyzer;
+#[cfg(test)]
+mod internal_duplicate_corpus;
 mod internal_duplicate_supervisor;
 mod ports;
 mod service;
