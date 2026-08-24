@@ -10,6 +10,7 @@ const fallback: SettingsSnapshot = {
   maxColumns: 3,
   previewWidth: 220,
   relatedPreviewWidth: 240,
+  privacyMode: false,
   cacheLimitGb: 10,
   concurrentImageRequests: 5,
   requestStartIntervalMs: 25,

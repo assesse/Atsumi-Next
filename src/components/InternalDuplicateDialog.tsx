@@ -272,7 +272,7 @@ export function InternalDuplicateDialog({
         ) : null}
 
         <div className="review-actions">
-          <button type="button" className="text-button" disabled={busy} onClick={onRescan}><FluentIcon glyph="\uE9D9" /> 다시 검사</button>
+          <button type="button" className="text-button" disabled={busy} onClick={onRescan}><FluentIcon glyph="\uE9D9" /> 이 앨범 다시 검사</button>
           <span />
           <button type="button" className="text-button" disabled={!selections.length || busy} onClick={preview}>격리 계획 미리보기</button>
           <button type="button" className="text-button" onClick={onClose}>닫기</button>

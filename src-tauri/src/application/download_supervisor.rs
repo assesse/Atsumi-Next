@@ -193,6 +193,32 @@ impl DownloadSupervisor {
         Ok(())
     }
 
+    pub fn open_folder(&self, entry_id: String) -> Result<(), ApplicationError> {
+        let path = self.artifact_folder_path(&entry_id)?;
+        self.inner.store.open_with_default_viewer(&path)?;
+        Ok(())
+    }
+
+    fn artifact_folder_path(&self, entry_id: &str) -> Result<PathBuf, ApplicationError> {
+        let entry_id = DownloadEntryId::new(entry_id.to_owned())?;
+        let bundle = self
+            .inner
+            .repository
+            .pipeline_artifact_bundle(&entry_id)?
+            .ok_or_else(|| {
+                DownloadPipelineError::new(
+                    DownloadPipelineErrorCode::ArtifactMissing,
+                    "The gallery storage folder is not ready yet",
+                    false,
+                )
+            })?;
+        let root = self.inner.repository.pipeline_artifact_root(&entry_id)?;
+        Ok(self
+            .inner
+            .store
+            .artifact_directory_path(&root, &bundle.artifact.relative_directory)?)
+    }
+
     pub fn quarantine_entries(
         &self,
         entry_ids: Vec<String>,
@@ -338,6 +364,16 @@ impl DownloadSupervisor {
     }
 
     pub fn reconcile(&self) -> Result<ReconcileReport, ApplicationError> {
+        let mut report = self.reconcile_without_resume()?;
+        self.resume_after_reconcile(&mut report)?;
+        Ok(report)
+    }
+
+    /// Performs filesystem/manifest reconciliation without changing an
+    /// interrupted download into runnable work. Callers can do this long phase
+    /// outside the app-exit gate and commit only `resume_after_reconcile` while
+    /// holding the gate.
+    pub fn reconcile_without_resume(&self) -> Result<ReconcileReport, ApplicationError> {
         let mut report = ReconcileReport {
             inspected_artifacts: 0,
             verified_artifacts: 0,
@@ -382,7 +418,6 @@ impl DownloadSupervisor {
                 }
             }
         }
-        report.resumed_jobs = u64::try_from(self.resume_interrupted()?).unwrap_or(u64::MAX);
         Ok(report)
     }
 
@@ -391,6 +426,16 @@ impl DownloadSupervisor {
     /// explicit `app_reconcile` command so opening the application does not
     /// scale with the user's completed library.
     pub fn recover_startup_state(&self) -> Result<ReconcileReport, ApplicationError> {
+        let mut report = self.recover_startup_state_without_resume()?;
+        self.resume_after_reconcile(&mut report)?;
+        Ok(report)
+    }
+
+    /// Reconciles pending quarantine state but deliberately leaves interrupted
+    /// downloads non-runnable until `resume_after_reconcile` is committed.
+    pub fn recover_startup_state_without_resume(
+        &self,
+    ) -> Result<ReconcileReport, ApplicationError> {
         let mut report = ReconcileReport {
             inspected_artifacts: 0,
             verified_artifacts: 0,
@@ -398,8 +443,16 @@ impl DownloadSupervisor {
             issues: Vec::new(),
         };
         self.reconcile_quarantine_sagas(&mut report)?;
-        report.resumed_jobs = u64::try_from(self.resume_interrupted()?).unwrap_or(u64::MAX);
         Ok(report)
+    }
+
+    /// The short state transition + enqueue phase of reconcile/recovery.
+    pub fn resume_after_reconcile(
+        &self,
+        report: &mut ReconcileReport,
+    ) -> Result<(), ApplicationError> {
+        report.resumed_jobs = u64::try_from(self.resume_interrupted()?).unwrap_or(u64::MAX);
+        Ok(())
     }
 
     fn reconcile_quarantine_sagas(
@@ -1527,6 +1580,14 @@ mod tests {
             .download_queue_add(vec![42], "pipeline-complete".into())
             .unwrap();
         let entry_id = queued.entries[0].entry_id.to_string();
+        let pending_error = supervisor.artifact_folder_path(&entry_id).unwrap_err();
+        assert!(matches!(
+            pending_error,
+            ApplicationError::DownloadPipeline(DownloadPipelineError {
+                code: DownloadPipelineErrorCode::ArtifactMissing,
+                ..
+            })
+        ));
         supervisor.enqueue_all(queued.jobs).unwrap();
 
         let completed = wait_for_state(&service, &entry_id, JobState::Completed, 100.0);
@@ -1555,9 +1616,17 @@ mod tests {
         assert_eq!(diagnostics, (2, "png".into(), 0, 2));
 
         let bundle = repository
-            .pipeline_artifact_bundle(&DownloadEntryId::new(entry_id).unwrap())
+            .pipeline_artifact_bundle(&DownloadEntryId::new(entry_id.clone()).unwrap())
             .unwrap()
             .unwrap();
+        let artifact_directory = supervisor.artifact_folder_path(&entry_id).unwrap();
+        assert_eq!(
+            artifact_directory,
+            root.join("downloads")
+                .join(bundle.artifact.relative_directory.as_str())
+                .canonicalize()
+                .unwrap()
+        );
         assert_eq!(bundle.artifact.state, DownloadArtifactState::Complete);
         assert_eq!(bundle.pages.len(), 2);
         assert!(bundle.pages.iter().all(|page| {
@@ -1660,7 +1729,15 @@ mod tests {
         assert_eq!(service.download_recover_interrupted().unwrap(), 1);
         let resumed_source = Arc::new(FakeDownloadSource::new(2, None));
         let (second_supervisor, _events) = launch(&repository, resumed_source.clone());
-        assert_eq!(second_supervisor.resume_interrupted().unwrap(), 1);
+        let mut prepared = second_supervisor
+            .recover_startup_state_without_resume()
+            .expect("prepare startup recovery without starting work");
+        assert_eq!(prepared.resumed_jobs, 0);
+        assert_eq!(service.download_active_count().unwrap(), 0);
+        second_supervisor
+            .resume_after_reconcile(&mut prepared)
+            .expect("commit interrupted download resume");
+        assert_eq!(prepared.resumed_jobs, 1);
         let completed = wait_for_state(&service, &entry_id, JobState::Completed, 100.0);
         second_supervisor.shutdown_and_wait();
 
@@ -1675,6 +1752,101 @@ mod tests {
         assert_eq!(bundle.pages.len(), 2);
         assert_eq!(bundle.pages[0].page_id.source_page_number.get(), 1);
         assert_eq!(bundle.pages[1].page_id.source_page_number.get(), 2);
+    }
+
+    #[test]
+    fn ambiguous_resume_file_is_preserved_and_reported_as_a_listable_failure() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let (repository, service) = configured_repository(&root);
+        let blocking_source = Arc::new(FakeDownloadSource::new(2, Some(2)));
+        let (first_supervisor, _events) = launch(&repository, blocking_source);
+        let queued = service
+            .download_queue_add(vec![4_136_275], "pipeline-recovery-conflict".into())
+            .unwrap();
+        let entry_id = queued.entries[0].entry_id.to_string();
+        first_supervisor.enqueue_all(queued.jobs).unwrap();
+        wait_for_state(&service, &entry_id, JobState::Downloading, 50.0);
+        first_supervisor.shutdown_and_wait();
+
+        let entry_key = DownloadEntryId::new(entry_id.clone()).unwrap();
+        let relative_directory = repository
+            .pipeline_artifact_bundle(&entry_key)
+            .unwrap()
+            .unwrap()
+            .artifact
+            .relative_directory;
+        let part_path = root
+            .join("downloads")
+            .join(relative_directory.as_str())
+            .join(".0002.webp.part");
+        let ambiguous_bytes = b"preserve ambiguous staging bytes";
+        std::fs::write(&part_path, ambiguous_bytes).unwrap();
+
+        assert_eq!(service.download_recover_interrupted().unwrap(), 1);
+        let resumed_source = Arc::new(FakeDownloadSource::new(2, None));
+        let (second_supervisor, _events) = launch(&repository, resumed_source.clone());
+        assert_eq!(second_supervisor.resume_interrupted().unwrap(), 1);
+        let failed = wait_for_state(&service, &entry_id, JobState::Failed, 50.0);
+        assert_eq!(second_supervisor.resume_interrupted().unwrap(), 0);
+        second_supervisor.shutdown_and_wait();
+
+        assert_eq!(failed.error_code.as_deref(), Some("RECOVERY_CONFLICT"));
+        assert_eq!(failed.error_retryable, Some(false));
+        assert_eq!(failed.review_kind, None);
+        assert_eq!(failed.review_id, None);
+        assert!(resumed_source.calls().is_empty());
+        assert!(!part_path.exists());
+        let conflict_root = root.join("downloads/.atsumi-recovery/conflicts");
+        let recovered_part = std::fs::read_dir(&conflict_root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join(".0002.webp.part"))
+            .find(|candidate| candidate.is_file())
+            .expect("ambiguous staging file remains in unique recovery storage");
+        assert_eq!(std::fs::read(recovered_part).unwrap(), ambiguous_bytes);
+        assert_eq!(service.download_recover_interrupted().unwrap(), 0);
+        let listed = service
+            .download_entries_list(DownloadListRequest {
+                state: None,
+                query: None,
+                page: 1,
+                page_size: 20,
+            })
+            .unwrap();
+        assert_eq!(listed.total_items, 1);
+        assert_eq!(listed.entries[0].state, JobState::Failed);
+        let attempt: (String, String, i64) = rusqlite::Connection::open(root.join("state.sqlite3"))
+            .unwrap()
+            .query_row(
+                r#"
+                        SELECT outcome_state, error_code, error_retryable
+                        FROM download_attempts
+                        WHERE job_id = (
+                            SELECT job_id FROM download_jobs WHERE entry_id = ?1
+                        ) AND attempt = 2
+                    "#,
+                [&entry_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(attempt, ("failed".into(), "RECOVERY_CONFLICT".into(), 0));
+
+        let retry = service.download_retry(vec![entry_id.clone()]).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].worker_attempt, 3);
+        let queued = service
+            .download_entries_list(DownloadListRequest {
+                state: None,
+                query: None,
+                page: 1,
+                page_size: 20,
+            })
+            .unwrap();
+        assert_eq!(queued.entries[0].state, JobState::Queued);
+        assert_eq!(queued.entries[0].error_code, None);
+        assert_eq!(queued.entries[0].error_message, None);
+        assert_eq!(queued.entries[0].error_retryable, None);
     }
 
     #[test]

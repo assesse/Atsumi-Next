@@ -36,6 +36,7 @@ type DetailWorkspaceProps = {
   onRestore: () => void;
   onOpenRelated: (id: GalleryId, parentId: GalleryId) => void;
   onQueue: (id: GalleryId) => void;
+  onOpenDownloadFolder?: (entryId: string) => void;
   onMetadataSearch: (value: string) => void;
   onMetadataFavorite: (value: string) => void;
 };
@@ -105,6 +106,7 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
     onRestore,
     onOpenRelated,
     onQueue,
+    onOpenDownloadFolder,
     onMetadataSearch,
     onMetadataFavorite,
   } = props;
@@ -313,53 +315,59 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
             <div className="detail-layout">
               <section className="detail-media">
                 <ProgressiveDetailHero gallery={gallery} pageDimension={pageOneDimension} client={thumbnailClient} backend={backend} />
-                <div
-                  className="preview-grid"
-                  data-preview-columns={previewLayout.columns}
-                  data-preview-orientation={previewLayout.orientation}
-                >
-                  {!metadataReady ? (
-                    <div className="preview-grid-placeholder" role="status">페이지 정보를 불러오는 중…</div>
-                  ) : previewPages.map((page, index) => {
-                    const dimension = gallery?.pageDimensions?.find((item) => item.sourcePage === page);
-                    const fallback = previewLayout.columns === 2
-                      ? { width: 16, height: 9 }
-                      : { width: 2, height: 3 };
-                    return (
-                    <button
-                      key={page}
-                      type="button"
-                      className="preview-thumb"
-                      title={`${page}페이지 확대`}
-                      onClick={(event) => {
-                        previewOpener.current = event.currentTarget;
-                        setPreviewPage(page);
-                      }}
+                {!metadataReady ? (
+                  <div className="detail-preview-loading" role="status" aria-label="추가 페이지 미리보기 준비 중">
+                    <span className="spinner" aria-hidden="true" />
+                  </div>
+                ) : (
+                  <>
+                    <div
+                      className="preview-grid"
+                      data-preview-columns={previewLayout.columns}
+                      data-preview-orientation={previewLayout.orientation}
                     >
-                      <GalleryThumbnail
-                        as="span"
-                        thumbnailKey={sourcePageThumbnailKey(gallery, page)}
-                        consumer="detail"
-                        priority={index < previewLayout.columns ? "visible" : "prefetch"}
-                        client={thumbnailClient}
-                        sizing="intrinsic"
-                        expectedAspectRatio={dimension?.width !== undefined && dimension?.height !== undefined
-                          ? { width: dimension.width, height: dimension.height }
-                          : fallback}
-                        alt={`${gallery.title} ${page}페이지 미리보기`}
-                      />
-                      <span>{page}</span>
-                    </button>
-                    );
-                  })}
-                </div>
-                {totalPageCount > 0 ? (
-                  <nav className="preview-window-nav" aria-label="상세 페이지 탐색">
-                    <button type="button" className="text-button" onClick={() => setPreviewWindowStart(Math.max(1, previewWindowStart - previewPageCount))} disabled={previewWindowStart === 1}>이전 묶음</button>
-                    <span>{previewPages.at(0) ?? 0}–{previewPages.at(-1) ?? 0} / {totalPageCount}</span>
-                    <button type="button" className="text-button" onClick={() => setPreviewWindowStart(previewWindowStart + previewPageCount)} disabled={(previewPages.at(-1) ?? 0) >= totalPageCount}>다음 묶음</button>
-                  </nav>
-                ) : null}
+                      {previewPages.map((page, index) => {
+                        const dimension = gallery?.pageDimensions?.find((item) => item.sourcePage === page);
+                        const fallback = previewLayout.columns === 2
+                          ? { width: 16, height: 9 }
+                          : { width: 2, height: 3 };
+                        return (
+                          <button
+                            key={page}
+                            type="button"
+                            className="preview-thumb"
+                            title={`${page}페이지 확대`}
+                            onClick={(event) => {
+                              previewOpener.current = event.currentTarget;
+                              setPreviewPage(page);
+                            }}
+                          >
+                            <GalleryThumbnail
+                              as="span"
+                              thumbnailKey={sourcePageThumbnailKey(gallery, page)}
+                              consumer="detail"
+                              priority={index < previewLayout.columns ? "visible" : "prefetch"}
+                              client={thumbnailClient}
+                              sizing="intrinsic"
+                              expectedAspectRatio={dimension?.width !== undefined && dimension?.height !== undefined
+                                ? { width: dimension.width, height: dimension.height }
+                                : fallback}
+                              alt={`${gallery.title} ${page}페이지 미리보기`}
+                            />
+                            <span>{page}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {totalPageCount > 0 ? (
+                      <nav className="preview-window-nav" aria-label="상세 페이지 탐색">
+                        <button type="button" className="text-button" onClick={() => setPreviewWindowStart(Math.max(1, previewWindowStart - previewPageCount))} disabled={previewWindowStart === 1}>이전 묶음</button>
+                        <span>{previewPages.at(0) ?? 0}–{previewPages.at(-1) ?? 0} / {totalPageCount}</span>
+                        <button type="button" className="text-button" onClick={() => setPreviewWindowStart(previewWindowStart + previewPageCount)} disabled={(previewPages.at(-1) ?? 0) >= totalPageCount}>다음 묶음</button>
+                      </nav>
+                    ) : null}
+                  </>
+                )}
               </section>
               <section className="detail-info">
                 <div className="detail-title-row">
@@ -372,9 +380,22 @@ export function DetailWorkspace(props: DetailWorkspaceProps) {
                     </h2>
                     <p>#{gallery.id} · {gallery.pages} pages</p>
                   </div>
-                  <button type="button" className="icon-button" title="다운로드" aria-label="다운로드" onClick={() => onQueue(gallery.id)}>
-                    <FluentIcon glyph="\uE896" />
-                  </button>
+                  <div className="detail-title-actions">
+                    <button type="button" className="icon-button" title="다운로드" aria-label="다운로드" onClick={() => onQueue(gallery.id)}>
+                      <FluentIcon glyph="\uE896" />
+                    </button>
+                    {gallery.download && gallery.download.state !== "quarantined" && onOpenDownloadFolder ? (
+                      <button
+                        type="button"
+                        className="icon-button"
+                        title="저장 폴더 열기"
+                        aria-label="저장 폴더 열기"
+                        onClick={() => onOpenDownloadFolder(gallery.download!.entryId)}
+                      >
+                        <FluentIcon glyph="\uE8B7" />
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="detail-metadata-layout">
                   <div className="detail-metadata-primary">

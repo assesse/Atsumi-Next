@@ -13,8 +13,10 @@ mod ports;
 mod service;
 
 pub use auto_find_supervisor::AutoFindSupervisor;
+pub(crate) use detail_original::canonical_request_id;
 pub use detail_original::{
-    DetailOriginalReady, DetailOriginalRequest, DetailOriginalSupervisor, DetailOriginalToken,
+    DetailOriginalError, DetailOriginalPrepareRequest, DetailOriginalPrepared,
+    DetailOriginalSupervisor,
 };
 pub use download_pipeline::{
     ArtifactLayout, ArtifactStore, DownloadArtifactPlan, DownloadCheckpoint,

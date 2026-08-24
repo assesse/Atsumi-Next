@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{ser::SerializeMap, Serialize, Serializer};
+use serde::{ser::SerializeMap, Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
 
 use crate::application::{ApplicationError, RepositoryError};
@@ -14,6 +14,99 @@ pub enum ApiAction {
     Reconnect,
     Reveal,
     None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppActiveDownloadsSnapshot {
+    pub active_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppActiveAutoFindSnapshot {
+    pub run_id: String,
+    pub completed_favorites: u32,
+    pub total_favorites: u32,
+    pub candidates_found: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppActiveDuplicateScanSnapshot {
+    pub run_id: String,
+    pub hashed_artifacts: u32,
+    pub total_artifacts: u32,
+    pub compared_pairs: u64,
+    pub total_pairs: u64,
+    pub candidates_found: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppActiveInternalDuplicateScanSnapshot {
+    pub run_id: String,
+    pub scanned_artifacts: u32,
+    pub total_artifacts: u32,
+    pub skipped_artifacts: u32,
+    pub groups_found: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppActiveWorkSnapshot {
+    pub queried_at: String,
+    pub work_set_fingerprint: String,
+    pub downloads: AppActiveDownloadsSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_find: Option<AppActiveAutoFindSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_scan: Option<AppActiveDuplicateScanSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub internal_duplicate_scan: Option<AppActiveInternalDuplicateScanSnapshot>,
+}
+
+impl AppActiveWorkSnapshot {
+    pub fn has_active_work(&self) -> bool {
+        self.downloads.active_count > 0
+            || self.auto_find.is_some()
+            || self.duplicate_scan.is_some()
+            || self.internal_duplicate_scan.is_some()
+    }
+
+    pub fn active_work_count(&self) -> u64 {
+        self.downloads
+            .active_count
+            .saturating_add(u64::from(self.auto_find.is_some()))
+            .saturating_add(u64::from(self.duplicate_scan.is_some()))
+            .saturating_add(u64::from(self.internal_duplicate_scan.is_some()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppQuitRequest {
+    pub expected_work_set_fingerprint: String,
+    pub confirm_active_work: bool,
+    #[serde(default)]
+    pub force_when_status_unknown: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppQuitRejectionReason {
+    ActiveWorkConfirmationRequired,
+    ActiveWorkChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppQuitResult {
+    pub accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<AppQuitRejectionReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<AppActiveWorkSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -203,6 +296,13 @@ impl From<ApplicationError> for ApiError {
                 retryable: false,
                 action: Some(ApiAction::Review),
                 details: Some(BTreeMap::from([("reason".into(), json!(reason))])),
+            },
+            ApplicationError::AppQuitInProgress => Self {
+                code: "APP_QUIT_IN_PROGRESS".into(),
+                message: "The application is already shutting down".into(),
+                retryable: false,
+                action: Some(ApiAction::None),
+                details: None,
             },
             ApplicationError::DownloadPipeline(error) => Self {
                 code: error.code.as_str().into(),
@@ -469,5 +569,58 @@ mod tests {
             assert!(!api.message.contains("C:\\Users"));
             assert!(api.details.is_none());
         }
+    }
+
+    #[test]
+    fn app_quit_request_defaults_the_optional_force_flag_to_false() {
+        let request: AppQuitRequest = serde_json::from_value(json!({
+            "expectedWorkSetFingerprint": "stable-work-set",
+            "confirmActiveWork": true
+        }))
+        .expect("app quit request should deserialize");
+
+        assert_eq!(request.expected_work_set_fingerprint, "stable-work-set");
+        assert!(request.confirm_active_work);
+        assert!(!request.force_when_status_unknown);
+    }
+
+    #[test]
+    fn active_work_snapshot_serializes_the_nested_public_contract() {
+        let result = AppQuitResult {
+            accepted: false,
+            reason: Some(AppQuitRejectionReason::ActiveWorkConfirmationRequired),
+            snapshot: Some(AppActiveWorkSnapshot {
+                queried_at: "123".into(),
+                work_set_fingerprint: "work-set".into(),
+                downloads: AppActiveDownloadsSnapshot { active_count: 2 },
+                auto_find: Some(AppActiveAutoFindSnapshot {
+                    run_id: "auto-run".into(),
+                    completed_favorites: 1,
+                    total_favorites: 3,
+                    candidates_found: 4,
+                }),
+                duplicate_scan: None,
+                internal_duplicate_scan: None,
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(result).expect("result should serialize"),
+            json!({
+                "accepted": false,
+                "reason": "active_work_confirmation_required",
+                "snapshot": {
+                    "queriedAt": "123",
+                    "workSetFingerprint": "work-set",
+                    "downloads": { "activeCount": 2 },
+                    "autoFind": {
+                        "runId": "auto-run",
+                        "completedFavorites": 1,
+                        "totalFavorites": 3,
+                        "candidatesFound": 4
+                    }
+                }
+            })
+        );
     }
 }

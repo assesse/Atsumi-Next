@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { galleryId } from "../core/types";
 import { backend } from "./backend";
-import type { DownloadEntry, SearchRequest } from "./contracts";
+import type {
+  AutoFindSnapshot,
+  DownloadEntry,
+  DuplicateSnapshot,
+  InternalDuplicateSnapshot,
+  SearchRequest,
+} from "./contracts";
 
 const searchRequest = (patch: Partial<SearchRequest> = {}): SearchRequest => ({
   text: "",
@@ -48,6 +54,27 @@ describe("browser backend settings contract", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(revisions).toEqual([result.data.revision]);
+  });
+
+  it("persists the visual privacy mode as a boolean setting", async () => {
+    const current = await backend.settingsGet();
+    if (!current.ok) throw new Error(current.error.message);
+    const nextPrivacyMode = !current.data.privacyMode;
+
+    const updated = await backend.settingsUpdate(
+      { privacyMode: nextPrivacyMode },
+      current.data.revision,
+    );
+    expect(updated).toMatchObject({ ok: true, data: { privacyMode: nextPrivacyMode } });
+    if (!updated.ok) return;
+    expect(JSON.parse(window.localStorage.getItem("atsumi.browser.settings.v1") ?? "{}"))
+      .toMatchObject({ privacyMode: nextPrivacyMode, revision: updated.data.revision });
+
+    const restored = await backend.settingsUpdate(
+      { privacyMode: current.data.privacyMode },
+      updated.data.revision,
+    );
+    expect(restored).toMatchObject({ ok: true, data: { privacyMode: current.data.privacyMode } });
   });
 
   it("rejects unsafe folder templates and requires the gallery id token", async () => {
@@ -135,6 +162,32 @@ describe("browser backend search contract", () => {
     expect(result.data.characters).toEqual(["mira lane", "ren kujo"]);
     expect(result.data.related).toHaveLength(2);
     expect(result.data.related.every((item) => item.id !== result.data.id)).toBe(true);
+  });
+
+  it("searches artist and group autocomplete catalogs with namespace-aware favorites", async () => {
+    const artist = await backend.tagSuggestionsSearch({ query: "miz", namespace: "artist", limit: 8 });
+    const group = await backend.tagSuggestionsSearch({ query: "circle_en", namespace: "group", limit: 8 });
+    const mixed = await backend.tagSuggestionsSearch({ query: "mizuryu", limit: 8 });
+
+    expect(artist).toMatchObject({ ok: true, data: expect.arrayContaining([
+      expect.objectContaining({ namespace: "artist", token: "artist:mizuno_tooru" }),
+    ]) });
+    expect(group).toEqual({ ok: true, data: [expect.objectContaining({
+      namespace: "group",
+      token: "group:circle_energy",
+    })] });
+    expect(mixed).toMatchObject({ ok: true, data: expect.arrayContaining([
+      expect.objectContaining({ namespace: "artist", token: "artist:mizuryu_kei" }),
+      expect.objectContaining({ namespace: "group", token: "group:mizuryu_kei_land" }),
+    ]) });
+
+    await backend.favoriteSet({ namespace: "artist", value: "mizuno tooru" }, true);
+    const favorite = await backend.tagSuggestionsSearch({ query: "miz", namespace: "artist", limit: 8 });
+    expect(favorite).toMatchObject({ ok: true, data: [
+      expect.objectContaining({ token: "artist:mizuno_tooru", favorite: true }),
+      expect.objectContaining({ token: "artist:mizuryu_kei", favorite: false }),
+    ] });
+    await backend.favoriteSet({ namespace: "artist", value: "mizuno tooru" }, false);
   });
 
   it.each([
@@ -294,6 +347,18 @@ describe("browser backend favorites and automation contract", () => {
 });
 
 describe("browser backend download contract", () => {
+  it("does not expose a fake local storage folder in browser review mode", async () => {
+    const result = await backend.artifactOpenFolder("browser-entry-folder");
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "ARTIFACT_FOLDER_UNAVAILABLE_IN_BROWSER",
+        retryable: false,
+        action: "none",
+      },
+    });
+  });
+
   it("persists idempotent cancellation and retries the same entry", async () => {
     const gallery = galleryId(7_100_000);
     const queued = await backend.downloadQueueAdd([gallery], "queue-cancel-retry-request");
@@ -386,7 +451,10 @@ describe("browser backend download contract", () => {
       [firstGallery, secondGallery, firstGallery],
       " queue-replay-request ",
     );
-    expect(await backend.downloadActiveCount()).toEqual({ ok: true, data: 2 });
+    expect(await backend.appActiveWorkSnapshot()).toMatchObject({
+      ok: true,
+      data: { downloads: { activeCount: 2 } },
+    });
     expect(first.ok).toBe(true);
     if (!first.ok) return;
     const browserState = backend as unknown as { downloadEntries: Map<string, DownloadEntry> };
@@ -686,8 +754,21 @@ describe("browser backend internal duplicate contract", () => {
     const events: string[] = [];
     const unsubscribe = await backend.on("internal-duplicate:changed", (run) => events.push(`${run.state}:${run.revision}`));
     try {
-      const started = await backend.internalDuplicateScanStart();
+      const empty = await backend.internalDuplicateScanStart({ entryIds: [] });
+      expect(empty).toMatchObject({ ok: false, error: { code: "VALIDATION_ERROR" } });
+      const started = await backend.internalDuplicateScanStart({
+        entryIds: ["browser-artifact-4051038"],
+      });
       expect(started).toMatchObject({ ok: true, data: { state: "running", totalArtifacts: 1 } });
+      const sameSelection = await backend.internalDuplicateScanStart({
+        entryIds: ["browser-artifact-4051038"],
+      });
+      if (!started.ok) throw new Error(started.error.message);
+      expect(sameSelection).toMatchObject({ ok: true, data: { runId: started.data.runId } });
+      const otherSelection = await backend.internalDuplicateScanStart({
+        entryIds: ["browser-artifact-other"],
+      });
+      expect(otherSelection).toMatchObject({ ok: false, error: { code: "OPERATION_ACTIVE" } });
       await vi.advanceTimersByTimeAsync(90);
       const snapshot = await backend.internalDuplicateSnapshot();
       if (!snapshot.ok) throw new Error(snapshot.error.message);
@@ -744,6 +825,203 @@ describe("browser backend internal duplicate contract", () => {
     } finally {
       unsubscribe();
       vi.useRealTimers();
+    }
+  });
+});
+
+describe("browser backend detail original contract", () => {
+  it("uses the caller request ID, returns a terminal media result, and disposes idempotently", async () => {
+    const requestId = "550e8400-e29b-41d4-a716-446655440000";
+    const prepared = await backend.detailOriginalPrepare({
+      requestId,
+      galleryId: galleryId(4051038),
+      sourcePage: 1,
+    });
+    expect(prepared).toMatchObject({
+      ok: true,
+      data: {
+        requestId,
+        sourcePage: 1,
+        mediaUrl: "/mock-gallery-sheet.png",
+        contentType: "image/png",
+      },
+    });
+    await expect(backend.detailOriginalDispose(requestId)).resolves.toEqual({ ok: true, data: true });
+    await expect(backend.detailOriginalDispose(requestId)).resolves.toEqual({ ok: true, data: true });
+    await expect(backend.detailOriginalPrepare({ requestId: "not-a-uuid", galleryId: galleryId(4051038), sourcePage: 1 }))
+      .resolves.toMatchObject({ ok: false, error: { code: "VALIDATION_ERROR" } });
+  });
+});
+
+describe("browser backend active-work exit contract", () => {
+  it("aggregates only running managed work and keeps progress out of the fingerprint", async () => {
+    const state = backend as unknown as {
+      downloadEntries: Map<string, DownloadEntry>;
+      autoFind: AutoFindSnapshot;
+      duplicateSnapshotState: DuplicateSnapshot;
+      internalSnapshotState: InternalDuplicateSnapshot;
+    };
+    const savedDownloads = state.downloadEntries;
+    const savedAutoFind = state.autoFind;
+    const savedDuplicate = state.duplicateSnapshotState;
+    const savedInternal = state.internalSnapshotState;
+    const now = "2026-08-23T00:00:00.000Z";
+    const firstDownload: DownloadEntry = {
+      entryId: "entry-b",
+      galleryId: galleryId(8_000_002),
+      revision: 0,
+      state: "downloading",
+      progress: 10,
+    };
+    const secondDownload: DownloadEntry = {
+      entryId: "entry-a",
+      galleryId: galleryId(8_000_001),
+      revision: 0,
+      state: "queued",
+    };
+    try {
+      state.downloadEntries = new Map([[firstDownload.entryId, firstDownload], [secondDownload.entryId, secondDownload]]);
+      state.autoFind = {
+        candidates: [], cutoffEvidence: [], truncations: [],
+        run: {
+          runId: "auto-running", revision: 0, state: "running",
+          totalFavorites: 7, completedFavorites: 3, candidatesFound: 128,
+          startedAt: now, updatedAt: now, historyMode: "include_all_history",
+        },
+      };
+      state.duplicateSnapshotState = {
+        profile: savedDuplicate.profile,
+        candidates: [],
+        run: {
+          runId: "duplicate-running", revision: 0, state: "running",
+          totalArtifacts: 80, hashedArtifacts: 12, totalPairs: 3_160,
+          comparedPairs: 340, candidatesFound: 4, startedAt: now, updatedAt: now,
+        },
+      };
+      state.internalSnapshotState = {
+        groups: [], quarantineRecords: [], skips: [],
+        run: {
+          runId: "internal-running", revision: 0, state: "running",
+          totalArtifacts: 20, scannedArtifacts: 4, totalPages: 100,
+          comparedPairs: 50, groupsFound: 3, algorithmVersion: 4,
+          skippedArtifacts: 1, skippedPages: 500, startedAt: now, updatedAt: now,
+        },
+      };
+
+      const first = await backend.appActiveWorkSnapshot();
+      expect(first).toMatchObject({
+        ok: true,
+        data: {
+          downloads: { activeCount: 2 },
+          autoFind: { runId: "auto-running", completedFavorites: 3, totalFavorites: 7, candidatesFound: 128 },
+          duplicateScan: { runId: "duplicate-running", hashedArtifacts: 12, totalArtifacts: 80, comparedPairs: 340, totalPairs: 3_160 },
+          internalDuplicateScan: { runId: "internal-running", scannedArtifacts: 4, totalArtifacts: 20, skippedArtifacts: 1, groupsFound: 3 },
+        },
+      });
+      if (!first.ok) return;
+
+      state.downloadEntries = new Map([
+        [secondDownload.entryId, secondDownload],
+        [firstDownload.entryId, { ...firstDownload, progress: 95 }],
+      ]);
+      state.autoFind = {
+        ...state.autoFind,
+        run: state.autoFind.run ? { ...state.autoFind.run, completedFavorites: 6, candidatesFound: 250 } : undefined,
+      };
+      const progressChanged = await backend.appActiveWorkSnapshot();
+      expect(progressChanged).toMatchObject({ ok: true, data: { workSetFingerprint: first.data.workSetFingerprint } });
+
+      state.downloadEntries.set("entry-c", { ...secondDownload, entryId: "entry-c", galleryId: galleryId(8_000_003) });
+      const identityChanged = await backend.appActiveWorkSnapshot();
+      expect(identityChanged.ok && identityChanged.data.workSetFingerprint).not.toBe(first.data.workSetFingerprint);
+
+      state.downloadEntries.delete("entry-c");
+      if (state.autoFind.run) state.autoFind = { ...state.autoFind, run: { ...state.autoFind.run, runId: "auto-restarted" } };
+      const runChanged = await backend.appActiveWorkSnapshot();
+      expect(runChanged.ok && runChanged.data.workSetFingerprint).not.toBe(first.data.workSetFingerprint);
+    } finally {
+      state.downloadEntries = savedDownloads;
+      state.autoFind = savedAutoFind;
+      state.duplicateSnapshotState = savedDuplicate;
+      state.internalSnapshotState = savedInternal;
+    }
+  });
+
+  it("rejects unconfirmed or stale quit requests and accepts a confirmed current work set", async () => {
+    const state = backend as unknown as { downloadEntries: Map<string, DownloadEntry> };
+    const savedDownloads = state.downloadEntries;
+    try {
+      state.downloadEntries = new Map([[
+        "quit-entry",
+        { entryId: "quit-entry", galleryId: galleryId(8_100_001), revision: 0, state: "verifying" },
+      ]]);
+      const snapshot = await backend.appActiveWorkSnapshot();
+      if (!snapshot.ok) throw new Error(snapshot.error.message);
+      const currentWork = {
+        workSetFingerprint: snapshot.data.workSetFingerprint,
+        downloads: snapshot.data.downloads,
+      };
+
+      await expect(backend.appQuit({
+        expectedWorkSetFingerprint: snapshot.data.workSetFingerprint,
+        confirmActiveWork: false,
+      })).resolves.toMatchObject({
+        ok: true,
+        data: { accepted: false, reason: "active_work_confirmation_required", snapshot: currentWork },
+      });
+      await expect(backend.appQuit({
+        expectedWorkSetFingerprint: "stale-fingerprint",
+        confirmActiveWork: true,
+      })).resolves.toMatchObject({
+        ok: true,
+        data: { accepted: false, reason: "active_work_changed", snapshot: currentWork },
+      });
+      await expect(backend.appQuit({
+        expectedWorkSetFingerprint: snapshot.data.workSetFingerprint,
+        confirmActiveWork: true,
+      })).resolves.toMatchObject({ ok: true, data: { accepted: true } });
+    } finally {
+      state.downloadEntries = savedDownloads;
+    }
+  });
+
+  it("excludes completed, failed, cancelled, interrupted, and review-only work", async () => {
+    const state = backend as unknown as {
+      downloadEntries: Map<string, DownloadEntry>;
+      autoFind: AutoFindSnapshot;
+      duplicateSnapshotState: DuplicateSnapshot;
+      internalSnapshotState: InternalDuplicateSnapshot;
+    };
+    const saved = {
+      downloads: state.downloadEntries,
+      autoFind: state.autoFind,
+      duplicate: state.duplicateSnapshotState,
+      internal: state.internalSnapshotState,
+    };
+    const terminalDownloads = ["completed", "failed", "cancelled", "interrupted", "review_required"] as const;
+    try {
+      state.downloadEntries = new Map(terminalDownloads.map((downloadState, index) => [
+        `terminal-${index}`,
+        { entryId: `terminal-${index}`, galleryId: galleryId(8_200_000 + index), revision: 0, state: downloadState },
+      ]));
+      state.autoFind = { candidates: [], cutoffEvidence: [], truncations: [], run: { ...saved.autoFind.run!, state: "completed" } };
+      state.duplicateSnapshotState = { ...saved.duplicate, run: saved.duplicate.run ? { ...saved.duplicate.run, state: "failed" } : undefined };
+      state.internalSnapshotState = { ...saved.internal, run: saved.internal.run ? { ...saved.internal.run, state: "cancelled" } : undefined };
+      const snapshot = await backend.appActiveWorkSnapshot();
+      expect(snapshot).toMatchObject({ ok: true, data: { downloads: { activeCount: 0 } } });
+      if (!snapshot.ok) return;
+      expect(snapshot.data.autoFind).toBeUndefined();
+      expect(snapshot.data.duplicateScan).toBeUndefined();
+      expect(snapshot.data.internalDuplicateScan).toBeUndefined();
+      await expect(backend.appQuit({
+        expectedWorkSetFingerprint: snapshot.data.workSetFingerprint,
+        confirmActiveWork: false,
+      })).resolves.toMatchObject({ ok: true, data: { accepted: true } });
+    } finally {
+      state.downloadEntries = saved.downloads;
+      state.autoFind = saved.autoFind;
+      state.duplicateSnapshotState = saved.duplicate;
+      state.internalSnapshotState = saved.internal;
     }
   });
 });

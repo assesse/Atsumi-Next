@@ -108,6 +108,7 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
       maxColumns,
       previewWidth,
       relatedPreviewWidth: 240,
+      privacyMode: false,
       concurrentImageRequests: 5,
       requestStartIntervalMs: 25,
     }));
@@ -132,6 +133,7 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
       maxColumns: draft.maxColumns,
       previewWidth: draft.previewWidth,
       relatedPreviewWidth: draft.relatedPreviewWidth,
+      privacyMode: draft.privacyMode,
       cacheLimitGb: draft.cacheLimitGb,
       concurrentImageRequests: draft.concurrentImageRequests,
       requestStartIntervalMs: draft.requestStartIntervalMs,
@@ -229,6 +231,22 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                 <div className="setting-row">
                   <div><strong>Related galleries 미리보기 크기</strong><span>Floating Detail 안의 Related galleries에만 적용</span></div>
                   <div className="range-wrap"><input id="settings-related-preview-width" aria-label="Related galleries 미리보기 크기" type="range" min="180" max="320" step="20" value={draft.relatedPreviewWidth} onChange={(event) => patch("relatedPreviewWidth", Number(event.target.value))} /><output htmlFor="settings-related-preview-width">{draft.relatedPreviewWidth}px</output></div>
+                </div>
+                <div className="setting-row">
+                  <div>
+                    <strong>개인정보 보호 모드</strong>
+                    <span>앨범·페이지 미리보기만 화면에서 가립니다. 이미지 요청과 캐시는 계속 사용됩니다.</span>
+                  </div>
+                  <label className="setting-checkbox">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      aria-label="개인정보 보호 모드"
+                      checked={draft.privacyMode}
+                      onChange={(event) => patch("privacyMode", event.target.checked)}
+                    />
+                    <span>{draft.privacyMode ? "사용 중" : "사용 안 함"}</span>
+                  </label>
                 </div>
                 <div className="setting-row">
                   <div><strong>동시 이미지 요청</strong><span>Classic 실측 안정 기본값 5</span></div>

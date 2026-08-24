@@ -1,123 +1,111 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
-import type { BackendClient, BackendEventMap } from "../api/backend";
+import type { BackendClient } from "../api/backend";
 import { mockGalleries } from "../data/mockGalleries";
 import { ThumbnailClient } from "../thumbnail";
 import { ProgressiveDetailHero } from "./ProgressiveDetailHero";
 
+const gallery = { ...mockGalleries[0]!, pageDimensions: [{ sourcePage: 1, width: 720, height: 1080 }] };
+const media = (requestId: string) => ({
+  requestId, galleryId: gallery.id, sourcePage: 1 as const,
+  mediaUrl: `http://detail-original.localhost/${requestId}`,
+  contentType: "image/webp" as const, width: 720, height: 1080,
+});
+
+const renderHero = async (backend: Partial<BackendClient>) => {
+  const client = new ThumbnailClient({ resolve: () => ({ kind: "image" as const, url: "blob:cover", width: 512, height: 512 }) });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ProgressiveDetailHero gallery={gallery} client={client} backend={backend as BackendClient} />);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  return { client, container, root };
+};
+
 describe("ProgressiveDetailHero", () => {
-  it("starts the independent original even while the shared cover is still pending", async () => {
-    const gallery = { ...mockGalleries[0]!, pageDimensions: [{ sourcePage: 1, width: 720, height: 1080 }] };
-    const request = vi.fn(async () => ({
-      ok: true as const,
-      data: { requestId: "original-pending-cover", galleryId: gallery.id, sourcePage: 1 },
-    }));
-    const backend = {
-      on: vi.fn(async () => () => undefined),
-      detailOriginalRequest: request,
-      detailOriginalCancel: vi.fn(async () => ({ ok: true as const, data: true })),
-      detailOriginalRelease: vi.fn(async () => ({ ok: true as const, data: true })),
-    } as unknown as BackendClient;
-    const client = new ThumbnailClient({
-      resolve: () => new Promise(() => undefined),
-      cancel: vi.fn(),
-    });
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-
-    await act(async () => {
-      root.render(<ProgressiveDetailHero gallery={gallery} client={client} backend={backend} />);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(request).toHaveBeenCalledWith({ galleryId: gallery.id, sourcePage: 1 });
-    expect(container.querySelector(".detail-cover")).toBeTruthy();
-
-    await act(async () => root.unmount());
-    client.dispose();
-    container.remove();
+  it("shows the thumbnail immediately and prepares one frontend-created request ID", async () => {
+    const prepare = vi.fn(async (request) => ({ ok: true as const, data: media(request.requestId) }));
+    const dispose = vi.fn(async () => ({ ok: true as const, data: true }));
+    const fixture = await renderHero({ detailOriginalPrepare: prepare, detailOriginalDispose: dispose });
+    expect(fixture.container.querySelector(".detail-cover")).toBeTruthy();
+    expect(prepare).toHaveBeenCalledTimes(1);
+    const request = prepare.mock.calls[0]![0] as { requestId: string; galleryId: string; sourcePage: number };
+    expect(request).toMatchObject({ galleryId: gallery.id, sourcePage: 1 });
+    expect(request.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(fixture.container.querySelector(".detail-hero")).toHaveAttribute("data-original-state", "prepared");
+    await act(async () => fixture.root.unmount());
+    expect(dispose).toHaveBeenCalledWith(request.requestId);
+    fixture.client.dispose(); fixture.container.remove();
   });
 
-  it("accepts a ready event that arrives before the request token response", async () => {
-    let ready: ((event: BackendEventMap["detail-original:ready"]) => void) | undefined;
-    const gallery = { ...mockGalleries[0]!, pageDimensions: [{ sourcePage: 1, width: 720, height: 1080 }] };
-    const token = { requestId: "original-early", galleryId: gallery.id, sourcePage: 1 };
-    const backend = {
-      on: vi.fn(async (_event: "detail-original:ready", handler: typeof ready) => {
-        ready = handler;
-        return () => { ready = undefined; };
-      }),
-      detailOriginalRequest: vi.fn(async () => {
-        // This mirrors the real worker: it can emit a cache-backed result before
-        // the asynchronous invoke response has installed requestId.current.
-        queueMicrotask(() => ready?.({
-          ...token,
-          mediaUrl: "detail-original://localhost/original-early",
-          contentType: "image/webp",
-          width: 720,
-          height: 1080,
-        }));
-        return { ok: true as const, data: token };
-      }),
-      detailOriginalCancel: vi.fn(async () => ({ ok: true as const, data: true })),
-      detailOriginalRelease: vi.fn(async () => ({ ok: true as const, data: true })),
-    } as unknown as BackendClient;
-    const client = new ThumbnailClient({
-      resolve: () => ({ kind: "image" as const, url: "blob:cover", width: 512, height: 512 }),
-    });
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-
-    await act(async () => {
-      root.render(<ProgressiveDetailHero gallery={gallery} client={client} backend={backend} />);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(container.querySelector<HTMLImageElement>(".detail-hero-original"))
-      .toHaveAttribute("src", "detail-original://localhost/original-early");
-
-    await act(async () => root.unmount());
-    client.dispose();
-    container.remove();
-  });
-
-  it("keeps the cover until the opaque original image has loaded", async () => {
-    let ready: ((event: BackendEventMap["detail-original:ready"]) => void) | undefined;
-    const request = vi.fn(async () => ({ ok: true as const, data: { requestId: "original-1", galleryId: mockGalleries[0]!.id, sourcePage: 1 } }));
-    const release = vi.fn(async () => ({ ok: true as const, data: true }));
-    const backend = {
-      on: vi.fn(async (_event: "detail-original:ready", handler: typeof ready) => {
-        ready = handler;
-        return () => { ready = undefined; };
-      }),
-      detailOriginalRequest: request,
-      detailOriginalCancel: vi.fn(async () => ({ ok: true as const, data: true })),
-      detailOriginalRelease: release,
-    } as unknown as BackendClient;
-    const client = new ThumbnailClient({ resolve: () => ({ kind: "image" as const, url: "blob:cover", width: 512, height: 512 }) });
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    const gallery = { ...mockGalleries[0]!, pageDimensions: [{ sourcePage: 1, width: 720, height: 1080 }] };
-    await act(async () => root.render(<ProgressiveDetailHero gallery={gallery} client={client} backend={backend} />));
-    await act(async () => { await Promise.resolve(); });
-    expect(request).toHaveBeenCalledWith({ galleryId: gallery.id, sourcePage: 1 });
-    expect(container.querySelector(".detail-cover")).toBeTruthy();
-    await act(async () => ready?.({ requestId: "original-1", galleryId: gallery.id, sourcePage: 1, mediaUrl: "detail-original://localhost/original-1", contentType: "image/webp", width: 720, height: 1080 }));
-    const original = container.querySelector<HTMLImageElement>(".detail-hero-original");
-    expect(original).toHaveClass("detail-hero-original");
+  it("uses the Windows custom protocol URL and only onLoad displays the original", async () => {
+    const prepare = vi.fn(async (request) => ({ ok: true as const, data: media(request.requestId) }));
+    const fixture = await renderHero({ detailOriginalPrepare: prepare, detailOriginalDispose: vi.fn(async () => ({ ok: true as const, data: true })) });
+    const original = fixture.container.querySelector<HTMLImageElement>(".detail-hero-original")!;
+    expect(original).toHaveAttribute("src", expect.stringMatching(/^http:\/\/detail-original\.localhost\/[0-9a-f-]{36}$/));
     expect(original).not.toHaveClass("is-ready");
-    Object.defineProperty(original!, "decode", { configurable: true, value: vi.fn(async () => undefined) });
-    await act(async () => original?.dispatchEvent(new Event("load")));
+    await act(async () => original.dispatchEvent(new Event("load")));
     expect(original).toHaveClass("is-ready");
-    await act(async () => root.unmount());
-    expect(release).toHaveBeenCalledWith("original-1");
-    client.dispose();
-    container.remove();
+    expect(fixture.container.querySelector(".detail-hero")).toHaveAttribute("data-original-state", "displayed");
+    await act(async () => fixture.root.unmount());
+    fixture.client.dispose(); fixture.container.remove();
+  });
+
+  it("keeps the thumbnail on command or image failure without automatic retry", async () => {
+    const prepare = vi.fn(async () => ({ ok: false as const, error: { code: "DETAIL_ORIGINAL_SOURCE_FAILED", message: "failed", retryable: false } }));
+    const first = await renderHero({ detailOriginalPrepare: prepare, detailOriginalDispose: vi.fn(async () => ({ ok: true as const, data: true })) });
+    expect(first.container.querySelector(".detail-cover")).toBeTruthy();
+    expect(first.container.querySelector(".detail-hero")).toHaveAttribute("data-original-state", "failed");
+    await act(async () => Promise.resolve());
+    expect(prepare).toHaveBeenCalledTimes(1);
+    await act(async () => first.root.unmount()); first.client.dispose(); first.container.remove();
+
+    const imagePrepare = vi.fn(async (request) => ({ ok: true as const, data: media(request.requestId) }));
+    const dispose = vi.fn(async () => ({ ok: true as const, data: true }));
+    const second = await renderHero({ detailOriginalPrepare: imagePrepare, detailOriginalDispose: dispose });
+    const image = second.container.querySelector<HTMLImageElement>(".detail-hero-original")!;
+    await act(async () => image.dispatchEvent(new Event("error")));
+    expect(second.container.querySelector(".detail-cover")).toBeTruthy();
+    expect(second.container.querySelector(".detail-hero")).toHaveAttribute("data-original-state", "failed");
+    await act(async () => Promise.resolve());
+    expect(imagePrepare).toHaveBeenCalledTimes(1);
+    await act(async () => second.root.unmount()); second.client.dispose(); second.container.remove();
+  });
+
+  it("disposes a late prepared result after its hero unmounts", async () => {
+    let resolve: ((value: { ok: true; data: ReturnType<typeof media> }) => void) | undefined;
+    const prepare = vi.fn((_request: { requestId: string }) => new Promise<{ ok: true; data: ReturnType<typeof media> }>((done) => { resolve = done; }));
+    const dispose = vi.fn(async () => ({ ok: true as const, data: true }));
+    const fixture = await renderHero({ detailOriginalPrepare: prepare, detailOriginalDispose: dispose });
+    const requestId = (prepare.mock.calls[0]![0] as { requestId: string }).requestId;
+    await act(async () => fixture.root.unmount());
+    await act(async () => resolve?.({ ok: true, data: media(requestId) }));
+    expect(dispose).toHaveBeenCalledWith(requestId);
+    fixture.client.dispose(); fixture.container.remove();
+  });
+
+  it("times out once, disposes the request, and does not resurrect a late result", async () => {
+    vi.useFakeTimers();
+    let resolve: ((value: { ok: true; data: ReturnType<typeof media> }) => void) | undefined;
+    const prepare = vi.fn((_request: { requestId: string }) => new Promise<{ ok: true; data: ReturnType<typeof media> }>((done) => { resolve = done; }));
+    const dispose = vi.fn(async () => ({ ok: true as const, data: true }));
+    try {
+      const fixture = await renderHero({ detailOriginalPrepare: prepare, detailOriginalDispose: dispose });
+      const requestId = (prepare.mock.calls[0]![0] as { requestId: string }).requestId;
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(fixture.container.querySelector(".detail-hero")).toHaveAttribute("data-original-state", "failed");
+      expect(dispose).toHaveBeenCalledWith(requestId);
+      await act(async () => resolve?.({ ok: true, data: media(requestId) }));
+      expect(fixture.container.querySelector(".detail-hero-original")).toBeNull();
+      expect(prepare).toHaveBeenCalledTimes(1);
+      await act(async () => fixture.root.unmount());
+      fixture.client.dispose(); fixture.container.remove();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

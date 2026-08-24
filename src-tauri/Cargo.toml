@@ -41,3 +41,9 @@ windows = { version = "0.61.3", features = [
 
 [dev-dependencies]
 tempfile = "3"
+
+# The current-source launcher uses the dev profile. Image decode/encode and
+# SHA-256 live mostly in dependencies, so keep app iteration fast while making
+# download throughput representative of a production build.
+[profile.dev.package."*"]
+opt-level = 3

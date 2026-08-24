@@ -61,6 +61,7 @@ metadata target이 이벤트를 처리하면 card의 상세 열기와 선택은 
 - 최우측 전체 닫기는 모든 tab을 제거한다.
 - 최소화는 tab state를 유지하고 overlay만 숨긴다.
 - 복원은 view header 중앙 control에서 수행한다.
+- 다운로드 entry가 있는 gallery는 다운로드 button 옆에 `저장 폴더 열기`를 표시한다. 폴더가 아직 예약·생성되지 않은 초기 queue 구간에는 안전 오류를 안내하고 임의 경로를 만들거나 download root를 대신 열지 않는다.
 
 ## Selection toolbar
 
@@ -76,6 +77,20 @@ metadata target이 이벤트를 처리하면 card의 상세 열기와 선택은 
 | 미리보기 cache 비우기 | 비활성 frontend retention과 backend 완료 cache 제거 | 다운로드/현재 화면 보존, 확정 |
 | 화면·네트워크 기본값 복원 | 현재 설정 draft를 기본 preset으로 변경 | 저장 전 취소 가능, download root/template 유지, 확정 |
 | 탐색 데이터 초기화 | 범위 안내 후 확인 dialog, backend transaction 실행 | active Auto Find면 거부, 다운로드 DB/files 보존, 확정 |
+
+## 앱 종료와 tray
+
+| 상황 | 입력 | 동작 | 상태 |
+|---|---|---|---|
+| main window | X | 창을 즉시 닫지 않고 backend active-work snapshot을 표시 | 확정 |
+| 종료 dialog, active work 없음 | 종료 | 최신 fingerprint를 backend에서 다시 확인한 뒤 graceful quit | 확정 |
+| 종료 dialog, active work 있음 | 작업을 중단하고 종료 | 다운로드·Auto Find·작품 중복·내부 중복 supervisor를 안전하게 cancel/join한 뒤 종료 | 확정 |
+| 종료 dialog | 트레이로 보내기 | 창만 숨기며 진행 중인 작업은 계속 실행 | 확정 |
+| tray, active work 없음 | 종료 | 최신 상태를 원자적으로 확인하고 graceful quit | 확정 |
+| tray, active work 있음 또는 상태 확인 실패 | 종료 | main window를 복원하고 같은 종료 확인 dialog를 열며 즉시 종료하지 않음 | 확정 |
+| 종료 상태 조회 연속 실패 | 다시 확인 → 상태 확인 없이 종료 | 두 번째 명시적 선택에서만 graceful quit 허용 | 확정 |
+
+종료 확인 대상은 queued/resolving/downloading/hashing/verifying/retry-wait 다운로드와 running Auto Find·작품 중복·내부 중복 run이다. 완료·실패·취소·중단·검토 상태와 검색·thumbnail·Detail media 요청은 대상이 아니다. dialog의 진행률이 달라져도 같은 work identity이면 확인은 유효하고, 작업 identity가 바뀌면 최신 snapshot을 표시한 뒤 다시 선택받는다.
 
 ## 미확정 항목
 

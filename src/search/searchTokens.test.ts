@@ -13,6 +13,8 @@ describe("search tokens", () => {
     expect(metadataSearchToken("female:glasses")).toEqual({ displayToken: "female:glasses", includeTag: "female:glasses" });
     expect(metadataSearchToken("male:business suit")).toEqual({ displayToken: "male:business_suit", includeTag: "male:business suit" });
     expect(canonicalSearchToken(" Series:Rain Archives ")).toBe("series:rain_archives");
+    expect(canonicalSearchToken(" Artist:Mizuno Tooru ")).toBe("artist:mizuno_tooru");
+    expect(canonicalSearchToken(" Group:Circle  Energy ")).toBe("group:circle_energy");
   });
 
   it("replaces only the active token and preserves a negative prefix", () => {

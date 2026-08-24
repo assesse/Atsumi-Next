@@ -1,17 +1,24 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{mpsc::Sender, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+        Arc, Mutex,
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
 use crate::{
     application::{
         ApplicationError, ApplicationService, ArtifactStore, AutoFindSupervisor,
-        DetailOriginalRequest, DetailOriginalSupervisor, DownloadPipelineError,
-        DownloadPipelineErrorCode, DownloadRootPicker, DownloadSupervisor, DuplicateSupervisor,
-        InternalDuplicateSupervisor, ReconcileReport,
+        DetailOriginalError, DetailOriginalPrepareRequest, DetailOriginalPrepared,
+        DetailOriginalSupervisor, DownloadPipelineError, DownloadPipelineErrorCode,
+        DownloadRootPicker, DownloadSupervisor, DuplicateSupervisor, InternalDuplicateSupervisor,
+        ReconcileReport,
     },
     domain::{
         AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot, DownloadChangedEvent,
@@ -20,8 +27,8 @@ use crate::{
         ExplorationDataResetResult, FavoriteKey, FavoriteMutationResult, FavoriteRecord,
         GalleryDetail, GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot,
         InternalRemovalApplyRequest, InternalRemovalPlan, InternalRemovalPlanRequest,
-        InternalRemovalResult, InternalRemovalUndoRequest, InternalScanRun, JobRef,
-        MaintenanceAction, MaintenancePreview, MaintenanceResult, SearchHistoryEntry,
+        InternalRemovalResult, InternalRemovalUndoRequest, InternalScanRequest, InternalScanRun,
+        JobRef, MaintenanceAction, MaintenancePreview, MaintenanceResult, SearchHistoryEntry,
         SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot, TagCatalogStatus,
         TagSuggestion, TagSuggestionRequest, ValidationError, WindowPlacement,
         WindowPlacementSnapshot,
@@ -35,7 +42,194 @@ use crate::{
     },
 };
 
-use super::{ApiError, ApiResult};
+use super::{
+    api::{
+        AppActiveAutoFindSnapshot, AppActiveDownloadsSnapshot, AppActiveDuplicateScanSnapshot,
+        AppActiveInternalDuplicateScanSnapshot, AppActiveWorkSnapshot, AppQuitRejectionReason,
+        AppQuitRequest, AppQuitResult,
+    },
+    ApiAction, ApiError, ApiResult,
+};
+
+#[derive(Clone)]
+struct ManagedWorkGate {
+    inner: Arc<ManagedWorkGateInner>,
+}
+
+struct ManagedWorkGateInner {
+    control: Mutex<ManagedWorkGateState>,
+    quitting: AtomicBool,
+}
+
+#[derive(Default)]
+struct ManagedWorkGateState {
+    accepted_quit: Option<AppQuitResult>,
+}
+
+impl Default for ManagedWorkGate {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(ManagedWorkGateInner {
+                control: Mutex::new(ManagedWorkGateState::default()),
+                quitting: AtomicBool::new(false),
+            }),
+        }
+    }
+}
+
+impl ManagedWorkGate {
+    fn run<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, ApplicationError>,
+    ) -> Result<T, ApplicationError> {
+        let _control = self.inner.control.lock().map_err(|_| {
+            crate::application::RepositoryError::Other(
+                "managed work gate mutex was poisoned".into(),
+            )
+        })?;
+        if self.inner.quitting.load(Ordering::Acquire) {
+            return Err(ApplicationError::AppQuitInProgress);
+        }
+        operation()
+    }
+
+    fn evaluate_quit_locked(
+        &self,
+        control: &mut ManagedWorkGateState,
+        request: &AppQuitRequest,
+        snapshot: Option<AppActiveWorkSnapshot>,
+    ) -> (AppQuitResult, bool) {
+        if self.inner.quitting.load(Ordering::Acquire) {
+            return (
+                control.accepted_quit.clone().unwrap_or(AppQuitResult {
+                    accepted: true,
+                    reason: None,
+                    snapshot: None,
+                }),
+                false,
+            );
+        }
+        if let Some(snapshot) = snapshot.as_ref() {
+            if let Some(reason) = quit_rejection_reason(request, snapshot) {
+                return (
+                    AppQuitResult {
+                        accepted: false,
+                        reason: Some(reason),
+                        snapshot: Some(snapshot.clone()),
+                    },
+                    false,
+                );
+            }
+        } else if !request.confirm_active_work {
+            return (
+                AppQuitResult {
+                    accepted: false,
+                    reason: Some(AppQuitRejectionReason::ActiveWorkConfirmationRequired),
+                    snapshot: None,
+                },
+                false,
+            );
+        }
+
+        let accepted = AppQuitResult {
+            accepted: true,
+            reason: None,
+            snapshot,
+        };
+        control.accepted_quit = Some(accepted.clone());
+        self.inner.quitting.store(true, Ordering::Release);
+        (accepted, true)
+    }
+}
+
+fn prepare_then_commit_managed_work<P, T>(
+    managed_work: &ManagedWorkGate,
+    prepare: impl FnOnce() -> Result<P, ApplicationError>,
+    commit: impl FnOnce(P) -> Result<T, ApplicationError>,
+) -> Result<T, ApplicationError> {
+    let prepared = prepare()?;
+    managed_work.run(|| commit(prepared))
+}
+
+fn now_unix_ms() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .to_string()
+}
+
+fn active_work_fingerprint<'a>(
+    active_download_entry_ids: impl IntoIterator<Item = &'a str>,
+    auto_find_run_id: Option<&str>,
+    duplicate_run_id: Option<&str>,
+    internal_duplicate_run_id: Option<&str>,
+) -> String {
+    fn update_identity(hasher: &mut Sha256, kind: &str, identity: Option<&str>) {
+        hasher.update(u64::try_from(kind.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(kind.as_bytes());
+        match identity {
+            Some(identity) => {
+                hasher.update([1]);
+                hasher.update(
+                    u64::try_from(identity.len())
+                        .unwrap_or(u64::MAX)
+                        .to_be_bytes(),
+                );
+                hasher.update(identity.as_bytes());
+            }
+            None => hasher.update([0]),
+        }
+    }
+
+    let mut downloads = active_download_entry_ids.into_iter().collect::<Vec<_>>();
+    downloads.sort_unstable();
+    downloads.dedup();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"atsumi-active-work-v1");
+    for entry_id in downloads {
+        update_identity(&mut hasher, "download", Some(entry_id));
+    }
+    update_identity(&mut hasher, "auto_find", auto_find_run_id);
+    update_identity(&mut hasher, "duplicate_scan", duplicate_run_id);
+    update_identity(
+        &mut hasher,
+        "internal_duplicate_scan",
+        internal_duplicate_run_id,
+    );
+    let digest = hasher.finalize();
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn active_work_status_error(source_code: &str) -> ApiError {
+    ApiError {
+        code: "APP_ACTIVE_WORK_STATUS_UNAVAILABLE".into(),
+        message: "The application could not determine whether background work is active".into(),
+        retryable: true,
+        action: Some(ApiAction::Retry),
+        details: Some(std::collections::BTreeMap::from([(
+            "sourceCode".into(),
+            serde_json::json!(source_code),
+        )])),
+    }
+}
+
+fn quit_rejection_reason(
+    request: &AppQuitRequest,
+    snapshot: &AppActiveWorkSnapshot,
+) -> Option<AppQuitRejectionReason> {
+    let expected = request.expected_work_set_fingerprint.trim();
+    if (!expected.is_empty() && expected != snapshot.work_set_fingerprint)
+        || (request.confirm_active_work && expected.is_empty())
+    {
+        return Some(AppQuitRejectionReason::ActiveWorkChanged);
+    }
+    if snapshot.has_active_work() && !request.confirm_active_work {
+        return Some(AppQuitRejectionReason::ActiveWorkConfirmationRequired);
+    }
+    None
+}
 
 pub struct AppState {
     service: ApplicationService,
@@ -52,6 +246,7 @@ pub struct AppState {
     data_dir: PathBuf,
     search_pages: SearchPageRequests,
     maintenance_previews: Mutex<HashMap<String, MaintenanceAction>>,
+    managed_work: ManagedWorkGate,
 }
 
 #[derive(Default)]
@@ -152,31 +347,145 @@ impl AppState {
             data_dir,
             search_pages: SearchPageRequests::default(),
             maintenance_previews: Mutex::new(HashMap::new()),
+            managed_work: ManagedWorkGate::default(),
         }
     }
 
-    pub(crate) fn active_download_count(&self) -> Result<u64, ApplicationError> {
-        self.service.download_active_count()
+    pub(crate) fn active_work_snapshot(&self) -> Result<AppActiveWorkSnapshot, ApplicationError> {
+        let _control = self.managed_work.inner.control.lock().map_err(|_| {
+            crate::application::RepositoryError::Other(
+                "managed work gate mutex was poisoned".into(),
+            )
+        })?;
+        self.active_work_snapshot_locked()
     }
 
-    pub(crate) fn begin_graceful_quit(&self, app: AppHandle) {
+    fn active_work_snapshot_locked(&self) -> Result<AppActiveWorkSnapshot, ApplicationError> {
+        let mut active_download_ids = self.service.download_active_entry_ids()?;
+        active_download_ids.sort();
+        active_download_ids.dedup();
+        let auto_find = self.auto_find.active_run_snapshot()?;
+        let duplicate_scan = self.duplicates.active_run_snapshot()?;
+        let internal_duplicate_scan = self.internal_duplicates.active_run_snapshot()?;
+        let work_set_fingerprint = active_work_fingerprint(
+            active_download_ids.iter().map(|entry_id| entry_id.as_str()),
+            auto_find.as_ref().map(|run| run.run_id.as_str()),
+            duplicate_scan.as_ref().map(|run| run.run_id.as_str()),
+            internal_duplicate_scan
+                .as_ref()
+                .map(|run| run.run_id.as_str()),
+        );
+        Ok(AppActiveWorkSnapshot {
+            queried_at: now_unix_ms(),
+            work_set_fingerprint,
+            downloads: AppActiveDownloadsSnapshot {
+                active_count: u64::try_from(active_download_ids.len()).unwrap_or(u64::MAX),
+            },
+            auto_find: auto_find.map(|run| AppActiveAutoFindSnapshot {
+                run_id: run.run_id,
+                completed_favorites: run.completed_favorites,
+                total_favorites: run.total_favorites,
+                candidates_found: run.candidates_found,
+            }),
+            duplicate_scan: duplicate_scan.map(|run| AppActiveDuplicateScanSnapshot {
+                run_id: run.run_id,
+                hashed_artifacts: run.hashed_artifacts,
+                total_artifacts: run.total_artifacts,
+                compared_pairs: run.compared_pairs,
+                total_pairs: run.total_pairs,
+                candidates_found: run.candidates_found,
+            }),
+            internal_duplicate_scan: internal_duplicate_scan.map(|run| {
+                AppActiveInternalDuplicateScanSnapshot {
+                    run_id: run.run_id,
+                    scanned_artifacts: run.scanned_artifacts,
+                    total_artifacts: run.total_artifacts,
+                    skipped_artifacts: run.skipped_artifacts,
+                    groups_found: run.groups_found,
+                }
+            }),
+        })
+    }
+
+    pub(crate) fn request_graceful_quit(
+        &self,
+        app: AppHandle,
+        request: AppQuitRequest,
+    ) -> Result<AppQuitResult, ApiError> {
+        let (result, should_shutdown) = {
+            let (mut control, gate_status_unknown) = match self.managed_work.inner.control.lock() {
+                Ok(control) => (control, false),
+                Err(error) if request.force_when_status_unknown => {
+                    tracing::warn!(
+                        "managed work gate was unavailable; honoring explicit forced quit"
+                    );
+                    (error.into_inner(), true)
+                }
+                Err(_) => {
+                    return Err(active_work_status_error("managed_work_gate_unavailable"));
+                }
+            };
+            if self.managed_work.inner.quitting.load(Ordering::Acquire) {
+                self.managed_work
+                    .evaluate_quit_locked(&mut control, &request, None)
+            } else {
+                let snapshot = if gate_status_unknown {
+                    None
+                } else {
+                    match self.active_work_snapshot_locked() {
+                        Ok(snapshot) => Some(snapshot),
+                        Err(error) if request.force_when_status_unknown => {
+                            let api = ApiError::from(error);
+                            tracing::warn!(
+                                error_code = %api.code,
+                                "active work status unavailable; honoring explicit forced quit"
+                            );
+                            None
+                        }
+                        Err(error) => {
+                            let api = ApiError::from(error);
+                            tracing::warn!(
+                                error_code = %api.code,
+                                "active work status could not be checked before quit"
+                            );
+                            return Err(active_work_status_error(&api.code));
+                        }
+                    }
+                };
+                self.managed_work
+                    .evaluate_quit_locked(&mut control, &request, snapshot)
+            }
+        };
+        if should_shutdown {
+            self.spawn_graceful_shutdown(app);
+        }
+        Ok(result)
+    }
+
+    fn spawn_graceful_shutdown(&self, app: AppHandle) {
         let downloads = self.downloads.clone();
         let auto_find = self.auto_find.clone();
         let duplicates = self.duplicates.clone();
         let internal_duplicates = self.internal_duplicates.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
-                internal_duplicates.shutdown_and_wait();
-                duplicates.shutdown_and_wait();
-                auto_find.shutdown_and_wait();
-                downloads.shutdown_and_wait();
+                crate::shutdown_all_then_exit(
+                    || internal_duplicates.shutdown_and_wait(),
+                    || duplicates.shutdown_and_wait(),
+                    || auto_find.shutdown_and_wait(),
+                    || downloads.shutdown_and_wait(),
+                    || app.exit(0),
+                );
             })
             .await
             {
                 tracing::warn!(error = %error, "background workers did not finish shutdown cleanly");
             }
-            app.exit(0);
         });
+    }
+
+    fn managed_work(&self) -> ManagedWorkGate {
+        self.managed_work.clone()
     }
 
     fn remember_maintenance_preview(&self, action: MaintenanceAction) -> String {
@@ -198,45 +507,83 @@ impl AppState {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn detail_original_request(
+pub async fn detail_original_prepare(
     state: State<'_, AppState>,
-    request: DetailOriginalRequest,
-) -> Result<ApiResult<crate::application::DetailOriginalToken>, ApiError> {
-    match state.detail_originals.request(request) {
-        Ok(token) => Ok(ApiResult::success(token)),
-        Err(message) => Ok(ApiResult::failure(ApiError {
-            code: "VALIDATION_ERROR".into(),
-            message,
-            retryable: false,
-            action: Some(super::ApiAction::None),
-            details: None,
-        })),
-    }
+    request: DetailOriginalPrepareRequest,
+) -> Result<ApiResult<DetailOriginalPrepared>, ApiError> {
+    let originals = state.detail_originals.clone();
+    let failure_context = request.clone();
+    Ok(
+        match tauri::async_runtime::spawn_blocking(move || originals.prepare(request)).await {
+            Ok(Ok(prepared)) => ApiResult::success(prepared),
+            Ok(Err(error)) => {
+                ApiResult::failure(detail_original_api_error(error, &failure_context))
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "detail original prepare task did not complete");
+                ApiResult::failure(ApiError {
+                    code: "BACKEND_TASK_FAILED".into(),
+                    message: "The backend could not complete the request".into(),
+                    retryable: true,
+                    action: Some(super::ApiAction::Retry),
+                    details: None,
+                })
+            }
+        },
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn detail_original_cancel(
+pub fn detail_original_dispose(
     state: State<'_, AppState>,
     request_id: String,
 ) -> Result<ApiResult<bool>, ApiError> {
     Ok(ApiResult::success(
-        state.detail_originals.cancel(request_id.trim()),
-    ))
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn detail_original_release(
-    state: State<'_, AppState>,
-    request_id: String,
-) -> Result<ApiResult<bool>, ApiError> {
-    Ok(ApiResult::success(
-        state.detail_originals.release(request_id.trim()),
+        state.detail_originals.dispose(&request_id),
     ))
 }
 
 impl AppState {
-    pub(crate) fn detail_original_media(&self, request_id: &str) -> Option<(Vec<u8>, String)> {
-        self.detail_originals.read_media(request_id)
+    pub(crate) fn detail_original_media_file(
+        &self,
+        request_id: &str,
+    ) -> Option<(std::path::PathBuf, String)> {
+        self.detail_originals.media_file(request_id)
+    }
+}
+
+fn detail_original_api_error(
+    error: DetailOriginalError,
+    request: &DetailOriginalPrepareRequest,
+) -> ApiError {
+    use serde_json::json;
+    let source_code = match &error {
+        DetailOriginalError::SourceFailed { source_code } => Some(source_code.clone()),
+        _ => None,
+    };
+    let stage = match &error {
+        DetailOriginalError::InvalidRequest => "validation",
+        DetailOriginalError::Cancelled => "cancelled",
+        DetailOriginalError::SourceFailed { .. } => "source",
+        DetailOriginalError::ConversionFailed => "conversion",
+        DetailOriginalError::WriteFailed => "write",
+        DetailOriginalError::Unavailable => "finalize",
+    };
+    let mut details = std::collections::BTreeMap::from([
+        ("requestId".into(), json!(request.request_id)),
+        ("galleryId".into(), json!(request.gallery_id)),
+        ("sourcePage".into(), json!(request.source_page)),
+        ("stage".into(), json!(stage)),
+    ]);
+    if let Some(source_code) = source_code {
+        details.insert("sourceCode".into(), json!(source_code));
+    }
+    ApiError {
+        code: error.code().into(),
+        message: error.to_string(),
+        retryable: false,
+        action: Some(super::ApiAction::None),
+        details: Some(details),
     }
 }
 
@@ -318,7 +665,16 @@ pub async fn exploration_data_reset(
 pub async fn auto_find_refresh(
     state: State<'_, AppState>,
 ) -> Result<ApiResult<AutoFindRun>, ApiError> {
-    Ok(state.auto_find.refresh().into())
+    let managed_work = state.managed_work();
+    let auto_find = state.auto_find.clone();
+    Ok(run_application_blocking("auto_find_refresh", move || {
+        prepare_then_commit_managed_work(
+            &managed_work,
+            || auto_find.prepare_refresh(),
+            |prepared| auto_find.commit_refresh(prepared),
+        )
+    })
+    .await)
 }
 
 #[tauri::command]
@@ -349,8 +705,16 @@ pub async fn duplicate_snapshot(
 pub async fn duplicate_scan_start(
     state: State<'_, AppState>,
 ) -> Result<ApiResult<DuplicateScanRun>, ApiError> {
+    let managed_work = state.managed_work();
     let duplicates = state.duplicates.clone();
-    Ok(run_application_blocking("duplicate_scan_start", move || duplicates.start()).await)
+    Ok(run_application_blocking("duplicate_scan_start", move || {
+        prepare_then_commit_managed_work(
+            &managed_work,
+            || duplicates.prepare_start(),
+            |prepared| duplicates.commit_start(prepared),
+        )
+    })
+    .await)
 }
 
 #[tauri::command]
@@ -401,9 +765,20 @@ pub async fn internal_duplicate_snapshot(
 #[tauri::command]
 pub async fn internal_duplicate_scan_start(
     state: State<'_, AppState>,
+    request: InternalScanRequest,
 ) -> Result<ApiResult<InternalScanRun>, ApiError> {
+    let managed_work = state.managed_work();
     let supervisor = state.internal_duplicates.clone();
-    Ok(run_application_blocking("internal_duplicate_scan_start", move || supervisor.start()).await)
+    Ok(
+        run_application_blocking("internal_duplicate_scan_start", move || {
+            prepare_then_commit_managed_work(
+                &managed_work,
+                || supervisor.prepare_start(request),
+                |prepared| supervisor.commit_start(prepared),
+            )
+        })
+        .await,
+    )
 }
 
 #[tauri::command]
@@ -553,13 +928,16 @@ pub async fn download_queue_add(
     {
         return Ok(ApiResult::failure(error));
     }
-    match state.service.download_queue_add(galleries, request_id) {
-        Ok(launch) => {
-            if let Err(error) = state.downloads.enqueue_all(launch.jobs) {
-                return Ok(ApiResult::failure(ApplicationError::from(error).into()));
-            }
-            Ok(ApiResult::success(launch.entries))
-        }
+    let managed_work = state.managed_work();
+    match managed_work.run(|| {
+        let launch = state.service.download_queue_add(galleries, request_id)?;
+        state
+            .downloads
+            .enqueue_all(launch.jobs)
+            .map_err(ApplicationError::from)?;
+        Ok(launch.entries)
+    }) {
+        Ok(entries) => Ok(ApiResult::success(entries)),
         Err(error) => Ok(ApiResult::failure(error.into())),
     }
 }
@@ -570,11 +948,6 @@ pub async fn download_entries_list(
     request: DownloadListRequest,
 ) -> Result<ApiResult<DownloadPage>, ApiError> {
     Ok(state.service.download_entries_list(request).into())
-}
-
-#[tauri::command]
-pub async fn download_active_count(state: State<'_, AppState>) -> Result<ApiResult<u64>, ApiError> {
-    Ok(state.active_download_count().into())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -648,13 +1021,16 @@ pub async fn download_retry(
     state: State<'_, AppState>,
     entry_ids: Vec<String>,
 ) -> Result<ApiResult<Vec<JobRef>>, ApiError> {
-    match state.service.download_retry(entry_ids) {
-        Ok(job_refs) => {
-            if let Err(error) = state.downloads.enqueue_retries(&job_refs) {
-                return Ok(ApiResult::failure(error.into()));
-            }
-            Ok(ApiResult::success(job_refs))
-        }
+    let managed_work = state.managed_work();
+    match managed_work.run(|| {
+        let job_refs = state.service.download_retry(entry_ids)?;
+        state
+            .downloads
+            .enqueue_retries(&job_refs)
+            .map_err(ApplicationError::from)?;
+        Ok(job_refs)
+    }) {
+        Ok(job_refs) => Ok(ApiResult::success(job_refs)),
         Err(error) => Ok(ApiResult::failure(error.into())),
     }
 }
@@ -707,6 +1083,18 @@ pub async fn artifact_open_first(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn artifact_open_folder(
+    state: State<'_, AppState>,
+    entry_id: String,
+) -> Result<ApiResult<()>, ApiError> {
+    let downloads = state.downloads.clone();
+    Ok(run_application_blocking("artifact_open_folder", move || {
+        downloads.open_folder(entry_id)
+    })
+    .await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn download_quarantine(
     state: State<'_, AppState>,
     entry_ids: Vec<String>,
@@ -737,8 +1125,14 @@ pub async fn download_quarantine_undo(
 pub async fn app_reconcile(
     state: State<'_, AppState>,
 ) -> Result<ApiResult<ReconcileReport>, ApiError> {
+    let managed_work = state.managed_work();
     let downloads = state.downloads.clone();
-    Ok(run_application_blocking("app_reconcile", move || downloads.reconcile()).await)
+    Ok(run_application_blocking("app_reconcile", move || {
+        let mut report = downloads.reconcile_without_resume()?;
+        managed_work.run(|| downloads.resume_after_reconcile(&mut report))?;
+        Ok(report)
+    })
+    .await)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -828,6 +1222,7 @@ pub async fn maintenance_execute(
     let duplicates = state.duplicates.clone();
     let internal_duplicates = state.internal_duplicates.clone();
     let data_dir = state.data_dir.clone();
+    let managed_work = state.managed_work();
     let execute_action = action.clone();
     let result = run_application_blocking("maintenance_execute", move || {
         let mut completed_steps = Vec::new();
@@ -836,7 +1231,7 @@ pub async fn maintenance_execute(
             MaintenanceAction::QuickRepair => {
                 thumbnails.clear_cache();
                 live_source.clear_derived_caches();
-                downloads.recover_startup_state()?;
+                let mut download_recovery = downloads.recover_startup_state_without_resume()?;
                 auto_find.recover_interrupted()?;
                 duplicates.recover_interrupted()?;
                 internal_duplicates.recover_interrupted()?;
@@ -848,7 +1243,9 @@ pub async fn maintenance_execute(
                     "thumbnail and source caches cleared".into(),
                     "interrupted work recovery completed".into(),
                 ]);
-                Ok(MaintenanceResult { action: execute_action, completed_steps, warnings, restart_required: false })
+                managed_work
+                    .run(|| downloads.resume_after_reconcile(&mut download_recovery))?;
+                Ok(MaintenanceResult { action: execute_action.clone(), completed_steps, warnings, restart_required: false })
             }
             MaintenanceAction::RebuildLibrary {
                 rebuild_thumbnail_data,
@@ -856,26 +1253,39 @@ pub async fn maintenance_execute(
                 rebuild_internal_analysis,
                 rebuild_auto_find_results,
             } => {
-                let report = downloads.reconcile()?;
+                let mut report = downloads.reconcile_without_resume()?;
                 completed_steps.push(format!("{} artifacts inspected", report.inspected_artifacts));
                 if *rebuild_thumbnail_data {
                     thumbnails.clear_cache();
                     live_source.clear_derived_caches();
                     completed_steps.push("thumbnail derived caches cleared".into());
                 }
-                if *rebuild_duplicate_analysis {
-                    duplicates.start()?;
-                    completed_steps.push("gallery duplicate analysis started".into());
-                }
-                if *rebuild_internal_analysis {
-                    internal_duplicates.start()?;
-                    completed_steps.push("internal duplicate analysis started".into());
-                }
-                if *rebuild_auto_find_results {
-                    auto_find.refresh()?;
-                    completed_steps.push("Auto Find refresh started".into());
-                }
-                Ok(MaintenanceResult { action: execute_action, completed_steps, warnings, restart_required: false })
+                let duplicate_prepared = rebuild_duplicate_analysis
+                    .then(|| duplicates.prepare_start())
+                    .transpose()?;
+                let internal_prepared = rebuild_internal_analysis
+                    .then(|| internal_duplicates.prepare_start_all())
+                    .transpose()?;
+                let auto_find_prepared = rebuild_auto_find_results
+                    .then(|| auto_find.prepare_refresh())
+                    .transpose()?;
+                managed_work.run(|| {
+                    downloads.resume_after_reconcile(&mut report)?;
+                    if let Some(prepared) = duplicate_prepared {
+                        duplicates.commit_start(prepared)?;
+                        completed_steps.push("gallery duplicate analysis started".into());
+                    }
+                    if let Some(prepared) = internal_prepared {
+                        internal_duplicates.commit_start(prepared)?;
+                        completed_steps.push("internal duplicate analysis started".into());
+                    }
+                    if let Some(prepared) = auto_find_prepared {
+                        auto_find.commit_refresh(prepared)?;
+                        completed_steps.push("Auto Find refresh started".into());
+                    }
+                    Ok(())
+                })?;
+                Ok(MaintenanceResult { action: execute_action.clone(), completed_steps, warnings, restart_required: false })
             }
             MaintenanceAction::FactoryReset { .. } => {
                 internal_duplicates.shutdown_and_wait();
@@ -903,7 +1313,7 @@ pub async fn maintenance_execute(
 
 #[tauri::command]
 pub async fn app_minimize_to_tray(window: WebviewWindow) -> Result<ApiResult<()>, ApiError> {
-    match window.hide() {
+    match crate::minimize_to_tray(|| window.hide()) {
         Ok(()) => Ok(ApiResult::success(())),
         Err(error) => Ok(ApiResult::failure(ApiError {
             code: "WINDOW_HIDE_FAILED".into(),
@@ -916,12 +1326,29 @@ pub async fn app_minimize_to_tray(window: WebviewWindow) -> Result<ApiResult<()>
 }
 
 #[tauri::command]
+pub fn app_active_work_snapshot(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<AppActiveWorkSnapshot>, ApiError> {
+    Ok(match state.active_work_snapshot() {
+        Ok(snapshot) => ApiResult::success(snapshot),
+        Err(error) => {
+            let source = ApiError::from(error);
+            tracing::warn!(error_code = %source.code, "could not inspect active work");
+            ApiResult::failure(active_work_status_error(&source.code))
+        }
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn app_quit(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<ApiResult<()>, ApiError> {
-    state.begin_graceful_quit(app);
-    Ok(ApiResult::success(()))
+    request: AppQuitRequest,
+) -> Result<ApiResult<AppQuitResult>, ApiError> {
+    Ok(match state.request_graceful_quit(app, request) {
+        Ok(result) => ApiResult::success(result),
+        Err(error) => ApiResult::failure(error),
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1107,7 +1534,7 @@ fn thumbnail_coordinator_error(error: ThumbnailCoordinatorError) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+    use std::{sync::mpsc, thread};
 
     use super::*;
     use crate::domain::ValidationError;
@@ -1161,5 +1588,317 @@ mod tests {
         assert!(requests.cancel("request-active"));
         assert!(token.is_cancelled());
         requests.finish("request-active");
+    }
+
+    fn active_work_snapshot(active_downloads: u64) -> AppActiveWorkSnapshot {
+        AppActiveWorkSnapshot {
+            queried_at: "123".into(),
+            work_set_fingerprint: "current-work".into(),
+            downloads: AppActiveDownloadsSnapshot {
+                active_count: active_downloads,
+            },
+            auto_find: None,
+            duplicate_scan: None,
+            internal_duplicate_scan: None,
+        }
+    }
+
+    fn all_active_work_snapshot() -> AppActiveWorkSnapshot {
+        AppActiveWorkSnapshot {
+            queried_at: "123".into(),
+            work_set_fingerprint: "all-work".into(),
+            downloads: AppActiveDownloadsSnapshot { active_count: 2 },
+            auto_find: Some(AppActiveAutoFindSnapshot {
+                run_id: "auto-run".into(),
+                completed_favorites: 1,
+                total_favorites: 4,
+                candidates_found: 2,
+            }),
+            duplicate_scan: Some(AppActiveDuplicateScanSnapshot {
+                run_id: "duplicate-run".into(),
+                hashed_artifacts: 3,
+                total_artifacts: 8,
+                compared_pairs: 5,
+                total_pairs: 10,
+                candidates_found: 1,
+            }),
+            internal_duplicate_scan: Some(AppActiveInternalDuplicateScanSnapshot {
+                run_id: "internal-run".into(),
+                scanned_artifacts: 2,
+                total_artifacts: 7,
+                skipped_artifacts: 1,
+                groups_found: 3,
+            }),
+        }
+    }
+
+    #[test]
+    fn active_work_fingerprint_is_order_independent_and_identity_only() {
+        let first = active_work_fingerprint(
+            ["entry-b", "entry-a", "entry-a"],
+            Some("auto-run"),
+            Some("duplicate-run"),
+            None,
+        );
+        let reordered = active_work_fingerprint(
+            ["entry-a", "entry-b"],
+            Some("auto-run"),
+            Some("duplicate-run"),
+            None,
+        );
+        assert_eq!(first, reordered);
+        assert_eq!(first.len(), 64);
+
+        let changed = active_work_fingerprint(
+            ["entry-a", "entry-c"],
+            Some("auto-run"),
+            Some("duplicate-run"),
+            None,
+        );
+        assert_ne!(first, changed);
+
+        let changed_run = active_work_fingerprint(
+            ["entry-a", "entry-b"],
+            Some("new-auto-run"),
+            Some("duplicate-run"),
+            None,
+        );
+        assert_ne!(first, changed_run);
+    }
+
+    #[test]
+    fn active_work_fingerprint_does_not_include_progress() {
+        let before_progress = AppActiveAutoFindSnapshot {
+            run_id: "auto-run".into(),
+            completed_favorites: 1,
+            total_favorites: 10,
+            candidates_found: 0,
+        };
+        let after_progress = AppActiveAutoFindSnapshot {
+            completed_favorites: 9,
+            candidates_found: 42,
+            ..before_progress.clone()
+        };
+        let before =
+            active_work_fingerprint(["entry-a"], Some(&before_progress.run_id), None, None);
+        let after = active_work_fingerprint(["entry-a"], Some(&after_progress.run_id), None, None);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn quit_requires_confirmation_for_the_current_active_work_set() {
+        let snapshot = active_work_snapshot(1);
+        let request = AppQuitRequest {
+            expected_work_set_fingerprint: snapshot.work_set_fingerprint.clone(),
+            confirm_active_work: false,
+            force_when_status_unknown: false,
+        };
+        assert_eq!(
+            quit_rejection_reason(&request, &snapshot),
+            Some(AppQuitRejectionReason::ActiveWorkConfirmationRequired)
+        );
+
+        let confirmed = AppQuitRequest {
+            confirm_active_work: true,
+            ..request
+        };
+        assert_eq!(quit_rejection_reason(&confirmed, &snapshot), None);
+    }
+
+    #[test]
+    fn quit_rejects_a_changed_or_unproven_work_set() {
+        let snapshot = active_work_snapshot(1);
+        let changed = AppQuitRequest {
+            expected_work_set_fingerprint: "previous-work".into(),
+            confirm_active_work: true,
+            force_when_status_unknown: false,
+        };
+        assert_eq!(
+            quit_rejection_reason(&changed, &snapshot),
+            Some(AppQuitRejectionReason::ActiveWorkChanged)
+        );
+
+        let unproven = AppQuitRequest {
+            expected_work_set_fingerprint: String::new(),
+            confirm_active_work: true,
+            force_when_status_unknown: false,
+        };
+        assert_eq!(
+            quit_rejection_reason(&unproven, &snapshot),
+            Some(AppQuitRejectionReason::ActiveWorkChanged)
+        );
+    }
+
+    #[test]
+    fn tray_style_empty_fingerprint_is_safe_only_when_no_work_is_active() {
+        let request = AppQuitRequest {
+            expected_work_set_fingerprint: String::new(),
+            confirm_active_work: false,
+            force_when_status_unknown: false,
+        };
+        assert_eq!(
+            quit_rejection_reason(&request, &active_work_snapshot(0)),
+            None
+        );
+        assert_eq!(
+            quit_rejection_reason(&request, &active_work_snapshot(1)),
+            Some(AppQuitRejectionReason::ActiveWorkConfirmationRequired)
+        );
+    }
+
+    #[test]
+    fn managed_work_gate_rejects_new_work_after_quit_is_committed() {
+        let gate = ManagedWorkGate::default();
+        assert_eq!(gate.run(|| Ok(7)).expect("work should start"), 7);
+        gate.inner.quitting.store(true, Ordering::Release);
+        assert!(matches!(
+            gate.run(|| Ok::<_, ApplicationError>(8)),
+            Err(ApplicationError::AppQuitInProgress)
+        ));
+    }
+
+    #[test]
+    fn managed_work_preflight_does_not_hold_the_quit_gate_and_cannot_commit_after_quit() {
+        let gate = ManagedWorkGate::default();
+        let worker_gate = gate.clone();
+        let committed = Arc::new(AtomicBool::new(false));
+        let worker_committed = Arc::clone(&committed);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            prepare_then_commit_managed_work(
+                &worker_gate,
+                || {
+                    entered_tx.send(()).expect("signal preflight");
+                    release_rx.recv().expect("release preflight");
+                    Ok(())
+                },
+                |()| {
+                    worker_committed.store(true, Ordering::Release);
+                    Ok(())
+                },
+            )
+        });
+
+        entered_rx.recv().expect("preflight should begin");
+        let mut control = gate
+            .inner
+            .control
+            .try_lock()
+            .expect("artifact preflight must not hold the quit gate");
+        let snapshot = active_work_snapshot(0);
+        let request = AppQuitRequest {
+            expected_work_set_fingerprint: snapshot.work_set_fingerprint.clone(),
+            confirm_active_work: false,
+            force_when_status_unknown: false,
+        };
+        let (accepted, should_shutdown) =
+            gate.evaluate_quit_locked(&mut control, &request, Some(snapshot));
+        assert!(accepted.accepted);
+        assert!(should_shutdown);
+        drop(control);
+        release_tx.send(()).expect("finish preflight");
+
+        assert!(matches!(
+            worker.join().expect("join preflight worker"),
+            Err(ApplicationError::AppQuitInProgress)
+        ));
+        assert!(!committed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn active_work_snapshot_counts_no_work_each_kind_and_all_kinds() {
+        let empty = active_work_snapshot(0);
+        assert!(!empty.has_active_work());
+        assert_eq!(empty.active_work_count(), 0);
+
+        let downloads = active_work_snapshot(2);
+        assert!(downloads.has_active_work());
+        assert_eq!(downloads.active_work_count(), 2);
+
+        let all = all_active_work_snapshot();
+        assert!(all.has_active_work());
+        assert_eq!(all.active_work_count(), 5);
+
+        let mut auto_find_only = active_work_snapshot(0);
+        auto_find_only.auto_find = all.auto_find.clone();
+        assert_eq!(auto_find_only.active_work_count(), 1);
+        let mut duplicate_only = active_work_snapshot(0);
+        duplicate_only.duplicate_scan = all.duplicate_scan.clone();
+        assert_eq!(duplicate_only.active_work_count(), 1);
+        let mut internal_only = active_work_snapshot(0);
+        internal_only.internal_duplicate_scan = all.internal_duplicate_scan.clone();
+        assert_eq!(internal_only.active_work_count(), 1);
+    }
+
+    #[test]
+    fn rejected_quit_has_no_commit_and_accepted_quit_is_single_flight() {
+        let gate = ManagedWorkGate::default();
+        let snapshot = all_active_work_snapshot();
+        let unconfirmed = AppQuitRequest {
+            expected_work_set_fingerprint: snapshot.work_set_fingerprint.clone(),
+            confirm_active_work: false,
+            force_when_status_unknown: false,
+        };
+        let mut control = gate.inner.control.lock().expect("managed work gate");
+        let (rejected, should_shutdown) =
+            gate.evaluate_quit_locked(&mut control, &unconfirmed, Some(snapshot.clone()));
+        assert!(!rejected.accepted);
+        assert!(!should_shutdown);
+        assert!(!gate.inner.quitting.load(Ordering::Acquire));
+        assert!(control.accepted_quit.is_none());
+
+        let confirmed = AppQuitRequest {
+            confirm_active_work: true,
+            ..unconfirmed
+        };
+        let (accepted, should_shutdown) =
+            gate.evaluate_quit_locked(&mut control, &confirmed, Some(snapshot));
+        assert!(accepted.accepted);
+        assert!(should_shutdown);
+        assert!(gate.inner.quitting.load(Ordering::Acquire));
+
+        let unrelated_second_request = AppQuitRequest {
+            expected_work_set_fingerprint: "stale".into(),
+            confirm_active_work: false,
+            force_when_status_unknown: false,
+        };
+        let (same_result, should_shutdown_again) = gate.evaluate_quit_locked(
+            &mut control,
+            &unrelated_second_request,
+            Some(active_work_snapshot(0)),
+        );
+        assert_eq!(same_result, accepted);
+        assert!(!should_shutdown_again);
+    }
+
+    #[test]
+    fn unknown_status_requires_an_explicit_confirmed_force_decision() {
+        let gate = ManagedWorkGate::default();
+        let mut control = gate.inner.control.lock().expect("managed work gate");
+        let unconfirmed_force = AppQuitRequest {
+            expected_work_set_fingerprint: String::new(),
+            confirm_active_work: false,
+            force_when_status_unknown: true,
+        };
+        let (rejected, should_shutdown) =
+            gate.evaluate_quit_locked(&mut control, &unconfirmed_force, None);
+        assert!(!rejected.accepted);
+        assert_eq!(
+            rejected.reason,
+            Some(AppQuitRejectionReason::ActiveWorkConfirmationRequired)
+        );
+        assert!(!should_shutdown);
+        assert!(!gate.inner.quitting.load(Ordering::Acquire));
+
+        let confirmed_force = AppQuitRequest {
+            confirm_active_work: true,
+            ..unconfirmed_force
+        };
+        let (accepted, should_shutdown) =
+            gate.evaluate_quit_locked(&mut control, &confirmed_force, None);
+        assert!(accepted.accepted);
+        assert!(accepted.snapshot.is_none());
+        assert!(should_shutdown);
     }
 }

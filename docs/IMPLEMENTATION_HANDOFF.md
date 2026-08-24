@@ -45,7 +45,7 @@
 ### Milestone B — Hitomi read path
 
 - `source/hitomi`: galleryinfo·gg.js·Nozomi range와 WebP 후보를 명시적 type으로 parsing하며 parser/resolver contract version을 각각 1로 고정했다. 저장 fixture는 필드 누락, AVIF/WebP flag, 404/429/503/timeout과 잘못된 payload 경계를 포함한다.
-- `infrastructure/hitomi_live`: production 검색·상세·Related·썸네일·페이지 다운로드가 같은 `HitomiLiveAdapter`와 pooled HTTP scheduler를 공유한다. 전역/host별 concurrency, 최소 시작 간격, `critical > visible > prefetch > download`, cancellation, bounded backoff+jitter, Retry-After와 cooldown을 적용한다.
+- `infrastructure/hitomi_live`: production 검색·상세·Related·썸네일·페이지 다운로드가 같은 `HitomiLiveAdapter`와 pooled HTTP scheduler를 공유한다. 전역/host별 concurrency, 최소 시작 간격, `critical > visible > download > prefetch`, cancellation, bounded backoff+jitter, Retry-After와 cooldown을 적용한다. 실제 다운로드는 speculative offscreen prefetch보다 먼저 dispatch된다.
 - 원격 응답은 HTTPS allowlist와 redirect host를 다시 확인하고 size·MIME·signature·decode dimension/allocation을 제한한다. query·cookie·raw URL은 사용자 오류나 기본 로그에 노출하지 않는다.
 - `ThumbnailResolver`와 frontend adapter는 새 worker를 만들지 않고 기존 전역 coordinator를 사용한다. backend의 typed failure와 retryability를 WebView까지 보존하고 접근 가능한 한국어 fallback 상태를 표시한다.
 - production Tauri는 live adapter를 기본 주입하며 브라우저 review mode와 테스트만 fixture를 사용한다. 데이터 schema 변경은 없다.
@@ -53,11 +53,13 @@
 ### Milestone C — download·artifact·recovery
 
 - `application/download_supervisor.rs`: bounded gallery worker가 실제 queue를 자동 claim한다. source/file 작업 밖에서만 짧은 SQLite transaction을 사용하고, cancel token·attempt generation으로 오래된 worker가 새 retry를 변경하지 못하게 한다.
-- `infrastructure/artifact_store.rs`: 절대 download root의 쓰기 가능성과 canonical containment를 확인한다. page는 `.part`에 64KiB 단위로 쓰고 sync·decode·lossless WebP·SHA-256을 검증한 뒤 atomic rename한다. manifest도 temp/sync/round-trip/atomic replace를 거친다.
+- `infrastructure/artifact_store.rs`: 절대 download root의 쓰기 가능성과 canonical containment를 확인한다. 새 page는 `.part`에 64KiB 단위로 쓰고 sync·decode·lossless WebP·SHA-256을 검증한 뒤 atomic rename한다. 이미 decode 검증된 immutable checkpoint의 resume/final 검사에서는 전체 payload를 다시 decode하지 않고 길이·WebP signature·streaming SHA-256을 canonical checkpoint와 대조한다. manifest도 temp/sync/round-trip/atomic replace를 거친다.
 - `domain/artifact.rs`: manifest schema 1과 HashProfile 1, immutable source page mapping, writer/conversion policy, page digest·format·quarantine 상태를 typed model로 고정했다.
 - `sqlite_repository.rs` migration 8/9: artifact/page verification metadata, page candidate attempt, quarantine saga를 additive schema로 추가했다. 파일·manifest 검증 전에는 repository가 `completed` 전이를 거부한다.
 - `DownloadSupervisor::reconcile`: pending quarantine move를 먼저 복구하고 completed artifact의 page hash·manifest를 점검한 뒤 interrupted job을 verified checkpoint부터 재개한다. 모호한 원본/격리 경로는 삭제·덮어쓰지 않는다.
-- frontend는 실제 `artifact_open_first`, 수동 무결성 검사, Downloads 격리·undo를 typed client로 호출한다. 브라우저 review mode는 실제 파일이 없음을 안정 오류로 표시한다.
+- 강제 종료 복구에서 모호한 final/`.part`는 `.atsumi-recovery/conflicts`에 보존하고 target 없는 `review_required` 대신 non-retryable `RECOVERY_CONFLICT`/`failed`로 멈춘다. startup recovery는 과거 target 없는 review 행을 같은 실패 상태로 transaction 정규화해 단일 잘못된 행이 다운로드 목록 전체를 막지 않게 하며, 정상 review target은 보존한다.
+- 창 닫기와 tray 종료는 공용 `app_active_work_snapshot`을 사용한다. 종료 경고에는 active download entry와 running Auto Find·작품 중복 검사·내부 중복 검사만 포함하며, tray 최소화는 작업을 중단하지 않는다. backend가 active entry ID 집합과 run ID로 만든 fingerprint를 `app_quit`에서 다시 대조해 stale 확인을 거부하고, 확인된 종료만 internal duplicate → duplicate → Auto Find → download 순서로 cancel/join한 뒤 process를 닫는다. 진행률만 바뀐 경우에는 fingerprint가 유지되고 검색·thumbnail·Detail media 요청은 경고 대상이 아니다.
+- frontend는 실제 `artifact_open_first`, Floating Detail의 root-bound `artifact_open_folder`, 수동 무결성 검사, Downloads 격리·undo를 typed client로 호출한다. 저장 폴더 command는 DB에 예약된 immutable root/relative directory만 Windows Explorer로 열며 queue 직후 아직 준비되지 않은 경로를 임의 생성하지 않는다. 브라우저 review mode는 실제 파일이나 폴더가 없음을 안정 오류로 표시한다.
 - 데이터 호환성: DB schema는 9로 상승한다. v8은 artifact 검증 metadata, v9는 crash-safe quarantine 상태를 추가하며 기존 v7 column 의미를 바꾸지 않는다.
 
 ### Milestone D — favorites·search history·Auto Find
@@ -87,9 +89,9 @@
 
 - `domain/internal_duplicate.rs`, `application/internal_duplicate_analyzer.rs`, `internal_duplicate_supervisor.rs`: HashProfile/page cache를 재사용하며 500페이지 이상(500 포함)은 canonical original page count로 먼저 제외한다. algorithm v4는 visual gate/weight와 HashProfile 1을 바꾸지 않고 bounded alternate monotonic paths와 atomic N-way 구조 후보를 평가한다. 정상적인 작은 v3-compatible block은 보존하고, 비어 있거나 sparse mega-row로 붕괴한 legacy 후보만 structural 후보로 교체하며, 75% 미만으로 행을 지지하는 약한 track은 제거한다. 다중 행 block은 세트 A/B… 하나를 선택하고, 선택 세트에 없는 row는 자동 격리하지 않는다. 단일 shared panel은 bridge가 될 수 없다. 개발 gold corpus 12앨범/6 family/282페이지의 동일 hash input 비교에서 family macro track/block/scene F1이 각각 0.5574/0.4780/0.4126에서 0.9006/0.8142/0.6528로 개선됐고 preserve·hard-negative·near-distinct·non-bridge 안전 위반과 visible regression은 0이다.
 - `migrations.rs`와 `internal_duplicate_repository.rs`: migration 21은 run algorithm version·skip count와 per-artifact `page_limit` skip을 additive하게 저장한다. 기존 run은 algorithm v1/skip 0으로 읽는다.
-- `InternalDuplicateSupervisor`: gallery별 최신 verified artifact를 hash하고 진행 event를 보낸다. 사용자가 고른 keep/remove source page와 현재 파일 수·byte 합계를 15분 계획으로 고정한다. page move는 DB intent 뒤 artifact 내부 `.atsumi-page-quarantine/<plan-id>/`로 수행하고 manifest atomic replace 뒤 DB state를 확정한다.
+- `InternalDuplicateSupervisor`: 일반 UI에서는 선택한 1~200개의 verified complete entry만 직접 조회·hash하고, 빈 선택이나 일부 부적격 대상을 전체 검사로 대체하지 않는다. 완료 시 stale group 해제도 검사한 gallery로 한정해 미선택 결과를 보존한다. 설정의 명시적 라이브러리 재구축만 전체 artifact 경로를 사용한다. 사용자가 고른 keep/remove source page와 현재 파일 수·byte 합계를 15분 계획으로 고정한다. page move는 DB intent 뒤 artifact 내부 `.atsumi-page-quarantine/<plan-id>/`로 수행하고 manifest atomic replace 뒤 DB state를 확정한다.
 - startup은 pending page move/restore를 원본·격리 경로 존재 상태로 재개한다. 양쪽이 모두 있거나 모두 없으면 overwrite/delete하지 않고 Review 오류로 남긴다. source page number, SHA·byte·format metadata는 격리와 undo 동안 유지된다.
-- `App.tsx`, typed backend와 `InternalDuplicateDialog.tsx`: Downloads에서 전체 scan 시작·취소·진행·오류·재시도, 완료 앨범 하나의 synchronized row 검토, 행별 keep 선택, 파일 수·용량 계획 preview, 명시적 격리 적용과 이력 기반 undo를 연결했다. page 이미지는 live source가 아니라 전역 coordinator의 verified `artifactPage(entryId, sourcePage)`만 사용한다.
+- `App.tsx`, typed backend와 `InternalDuplicateDialog.tsx`: Downloads에서 선택한 완료 앨범만 scan 시작·취소·진행·오류·재시도하고, 검토창의 재검사도 현재 entry 하나만 대상으로 한다. 완료 앨범 하나의 synchronized row 검토, 행별 keep 선택, 파일 수·용량 계획 preview, 명시적 격리 적용과 이력 기반 undo를 연결했다. page 이미지는 live source가 아니라 전역 coordinator의 verified `artifactPage(entryId, sourcePage)`만 사용한다.
 - 브라우저 검토 adapter는 동일한 run/plan/revision/quarantine/undo 계약을 결정론적으로 재현한다. production과 browser 모두 자동 영구 삭제 command가 없다.
 - 데이터 호환성: DB schema는 13으로 상승한다. v13은 additive하고 v1~v12 의미, manifest schema 1과 HashProfile 1을 재해석하지 않는다.
 
@@ -123,7 +125,7 @@
 - Windows download root 표시 경계는 well-formed `\\?\D:\...`와 `\\?\UNC\...`만 일반 drive/UNC로 바꾼다. 폴더 선택 뒤 canonical root를 설정에 그대로 저장하던 유입 경로를 차단했으며, 기존 artifact `root_snapshot`과 파일은 그대로 둔다. 폴더 template 미리보기는 실제 Rust planner command를 사용한다.
 - schema v18 `gallery_source_revision_identity`: remote source fingerprint를 문자열 identity로 저장하고 signed SQLite 내부 revision과 분리했다. gallery 4113714/4132312에서 발생한 unsigned source revision 변환 오류를 `u64::MAX` 회귀 test로 차단한다.
 - schema v19 `related_gallery_preview_preference`: Floating Detail의 Related galleries cover 폭(180~320px, 기본 240)을 Explore·Downloads card preview와 독립적으로 저장한다. 상세와 Related의 일반 태그는 동일한 favorite → Female → Male → neutral 순서를 쓰며 Related에는 series/character chip을 표시하지 않는다.
-- schema v20 `tag_catalog`: Explore 자동완성은 Hitomi alltags-123/a-z 27페이지의 tag/female/male catalog를 SQLite에 원자적으로 저장한 뒤 조회한다. refresh 실패는 이전 catalog를 보존한다.
+- schema v20 `tag_catalog`는 기존 tag/female/male table을 그대로 보존한다. schema v24 `artist_group_autocomplete_catalog`는 별도 additive table과 status count를 추가하고 Hitomi allartists/allgroups/alltags `123`/`a`~`z` 총 81페이지를 SQLite에 원자적으로 저장한다. `artist:`/`group:` 입력도 같은 local autocomplete 경로를 사용하며 refresh 실패는 이전 전체 catalog를 보존한다.
 - card layout은 일곱 preview preset(160/190/220/250/280/320/360, 기본 220), preset별 typography·2/2/3/4/5/6/7 tag rows, grid별 시각 행 최대 intrinsic cover 높이를 공유한다. 독립 grid와 불완전 마지막 행은 서로 영향을 주지 않는다.
 - 데이터 호환성: DB schema는 19이다. v15~v19은 additive하고 기존 `relative_directory`를 다시 계산하지 않으며 manifest schema 1과 HashProfile 1을 재해석하지 않는다.
 
@@ -136,8 +138,8 @@
 
 - 앱/package/Tauri version: `0.1.0`
 - Rust MSRV: `1.88.0` (working tree)
-- DB schema version: 19
-- migration: `settings_and_window_placement`, `mock_job_event_foundation`, `gallery_and_artifact_foundation`, `gallery_primary_group`, `download_queue_contract`, `download_queue_response_revision`, `download_lifecycle_and_cancelled_state`, `verified_artifact_pipeline`, `crash_safe_quarantine_saga`, `favorites_search_history_and_auto_find`, `auto_find_visible_metadata`, `artifact_duplicate_evidence_and_decisions`, `internal_scene_review_and_page_quarantine`, `classic_read_only_import_and_rollback`(역사적 DDL만 보존), `artifact_folder_template_and_immutable_path`, `download_candidate_diagnostics_and_artifact_root_snapshot`, `auto_find_history_cutoff_evidence`, `gallery_source_revision_identity`
+- DB schema version: 24
+- latest additive migration: `artist_group_autocomplete_catalog` (v24). v23 privacy mode, v20 tag catalog, v21 internal N-way scene clustering, v22 edition tracks와 기존 v1~v19 history는 순서·이름·SQL을 그대로 보존한다.
 - manifest schema version: 1
 - HashProfile version: 1 / algorithm version 1 (artifact SHA-256 + 작품 중복 64-bit coarse dHash·pHash, 1024-bit detail dHash와 content gate)
 - Hitomi parser version: 1
@@ -206,7 +208,7 @@
 ## 8. Future change cautions
 
 - Floating Detail page previews use metadata-only orientation and a fixed two-column/8 or three-column/9 window. Do not restore Related height, viewport measurements, thumbnail terminal callbacks, or ResizeObserver feedback as window-size inputs.
-- `detail-original` is transient page-one hero media only. It uses the existing source scheduler/full candidate validation and an app-owned protocol file; never send original bytes through JSON IPC, put them in thumbnail caches, or widen the protocol to arbitrary local paths.
+- `detail-original` is transient page-one hero media only. The frontend creates a canonical UUID and calls terminal `detail_original_prepare`, then idempotent `detail_original_dispose`; no readiness event, listener race, or automatic retry exists. Windows/WebView2 receives `http://detail-original.localhost/{id}` (other targets keep the custom-scheme form). The existing source scheduler/full candidate validation and an app-owned protocol file are used; never send original bytes through JSON IPC, put them in thumbnail caches, or widen the protocol to arbitrary local paths.
 
 - 적용된 migration의 순서와 이름을 바꾸지 않는다.
 - 기존 manifest·HashProfile을 version 없이 새 의미로 재해석하지 않는다.

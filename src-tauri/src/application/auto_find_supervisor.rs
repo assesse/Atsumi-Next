@@ -7,7 +7,7 @@ use std::{
 use crate::{
     domain::{
         AutoFindCandidateRecord, AutoFindCutoffEvidence, AutoFindHistoryMode, AutoFindRun,
-        AutoFindRunState, FavoriteNamespace, Language,
+        AutoFindRunState, FavoriteNamespace, FavoriteRecord, Language,
     },
     thumbnail::CancellationToken,
 };
@@ -39,6 +39,13 @@ struct ActiveRun {
     worker: Option<JoinHandle<()>>,
 }
 
+pub(crate) struct PreparedAutoFindRefresh {
+    favorites: Vec<FavoriteRecord>,
+    total_favorites: u32,
+    history_mode: AutoFindHistoryMode,
+    cutoff_evidence: Vec<AutoFindCutoffEvidence>,
+}
+
 impl AutoFindSupervisor {
     pub fn new(
         repository: Arc<dyn AutomationRepository>,
@@ -66,12 +73,14 @@ impl AutoFindSupervisor {
     }
 
     pub fn refresh(&self) -> Result<AutoFindRun, ApplicationError> {
-        let _control = self.control_lock()?;
-        self.reap_finished_worker();
-        if let Some(active_run) = self.active_run()? {
+        if let Some(active_run) = self.active_run_snapshot()? {
             return Ok(active_run);
         }
+        let prepared = self.prepare_refresh()?;
+        self.commit_refresh(prepared)
+    }
 
+    pub(crate) fn prepare_refresh(&self) -> Result<PreparedAutoFindRefresh, ApplicationError> {
         let favorites = self
             .inner
             .repository
@@ -86,6 +95,29 @@ impl AutoFindSupervisor {
             .map(|favorite| favorite.value.clone())
             .collect::<Vec<_>>();
         let cutoff_evidence = self.inner.repository.auto_find_owned_cutoffs(&artists)?;
+        Ok(PreparedAutoFindRefresh {
+            favorites,
+            total_favorites,
+            history_mode,
+            cutoff_evidence,
+        })
+    }
+
+    pub(crate) fn commit_refresh(
+        &self,
+        prepared: PreparedAutoFindRefresh,
+    ) -> Result<AutoFindRun, ApplicationError> {
+        let _control = self.control_lock()?;
+        self.reap_finished_worker();
+        if let Some(active_run) = self.active_run()? {
+            return Ok(active_run);
+        }
+        let PreparedAutoFindRefresh {
+            favorites,
+            total_favorites,
+            history_mode,
+            cutoff_evidence,
+        } = prepared;
         let run = self.inner.repository.auto_find_start(
             total_favorites,
             history_mode,
@@ -164,6 +196,17 @@ impl AutoFindSupervisor {
             .ok_or(ApplicationError::AutoFindNotRunning)?;
         let _ = self.inner.events.send(run.clone());
         Ok(run)
+    }
+
+    /// Returns only a currently running identity/projection. Finished workers
+    /// are reaped first so stale in-memory slots never keep the app in an
+    /// artificial "active work" state.
+    pub fn active_run_snapshot(&self) -> Result<Option<AutoFindRun>, ApplicationError> {
+        let _control = self.control_lock()?;
+        self.reap_finished_worker();
+        Ok(self
+            .active_run()?
+            .filter(|run| run.state == AutoFindRunState::Running))
     }
 
     pub fn shutdown_and_wait(&self) {
@@ -756,6 +799,10 @@ mod tests {
             let started = supervisor.refresh().expect("start Auto Find refresh");
             assert_eq!(started.state, AutoFindRunState::Running);
             let snapshot = wait_for_terminal(&repository);
+            assert!(supervisor
+                .active_run_snapshot()
+                .expect("completed Auto Find projection should be readable")
+                .is_none());
             supervisor.shutdown_and_wait();
             assert_eq!(
                 event_receiver.try_iter().count(),
@@ -823,8 +870,17 @@ mod tests {
             .refresh()
             .expect("start blocked Auto Find refresh");
         gate.wait_until_entered();
+        let active = supervisor
+            .active_run_snapshot()
+            .expect("read running Auto Find projection")
+            .expect("blocked run should be active");
+        assert_eq!(active.state, AutoFindRunState::Running);
         let cancelled = supervisor.cancel().expect("cancel Auto Find refresh");
         assert_eq!(cancelled.state, AutoFindRunState::Cancelled);
+        assert!(supervisor
+            .active_run_snapshot()
+            .expect("terminal Auto Find run should be readable")
+            .is_none());
         gate.release();
         supervisor.shutdown_and_wait();
 

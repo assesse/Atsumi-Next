@@ -6,8 +6,9 @@ use std::{
 
 use crate::{
     domain::{
-        DuplicateDecisionApplyOutcome, DuplicateDecisionRequest, DuplicateReview, DuplicateScanRun,
-        DuplicateScanState, DuplicateSnapshot, ExternalRelationEvidence, HashProfile,
+        ArtifactBundle, DuplicateDecisionApplyOutcome, DuplicateDecisionRequest, DuplicateReview,
+        DuplicateScanRun, DuplicateScanState, DuplicateSnapshot, ExternalRelationEvidence,
+        HashProfile,
     },
     thumbnail::CancellationToken,
 };
@@ -58,6 +59,14 @@ struct ActiveRun {
     run_id: String,
     cancellation: CancellationToken,
     worker: Option<JoinHandle<()>>,
+}
+
+pub(crate) struct PreparedDuplicateScan {
+    root: PathBuf,
+    bundles: Vec<ArtifactBundle>,
+    total_artifacts: u32,
+    total_pairs: u64,
+    profile: HashProfile,
 }
 
 impl DuplicateSupervisor {
@@ -124,17 +133,22 @@ impl DuplicateSupervisor {
     }
 
     pub fn start(&self) -> Result<DuplicateScanRun, ApplicationError> {
-        let _control = self.control_lock()?;
-        self.reap_finished_worker();
-        if let Some(run) = self.active_run()? {
+        if let Some(run) = self.active_run_snapshot()? {
             return Ok(run);
         }
+        let prepared = self.prepare_start()?;
+        self.commit_start(prepared)
+    }
 
+    /// Load and validate the immutable scan input without holding the
+    /// supervisor control lock. The caller may also keep a broader managed
+    /// work gate free while artifact rows are read.
+    pub(crate) fn prepare_start(&self) -> Result<PreparedDuplicateScan, ApplicationError> {
         let settings = self.inner.settings.settings_get()?;
         if settings.download_root.trim().is_empty() {
             return Err(super::DownloadPipelineError::root_required().into());
         }
-        // Validate once at the scan boundary.  Individual reads use a
+        // Validate once at the scan boundary. Individual reads use a
         // canonical read-only resolver and therefore never create probes.
         let root = self
             .inner
@@ -143,7 +157,34 @@ impl DuplicateSupervisor {
         let bundles = select_scan_bundles(self.inner.repository.duplicate_artifact_bundles()?);
         let total_artifacts = u32::try_from(bundles.len()).unwrap_or(u32::MAX);
         let total_pairs = pair_count(bundles.len());
-        let profile = HashProfile::current();
+        Ok(PreparedDuplicateScan {
+            root,
+            bundles,
+            total_artifacts,
+            total_pairs,
+            profile: HashProfile::current(),
+        })
+    }
+
+    /// Recheck the active slot and atomically commit only the short run-row /
+    /// worker-start phase. Concurrent preparations therefore collapse to one
+    /// active run instead of creating overlapping workers.
+    pub(crate) fn commit_start(
+        &self,
+        prepared: PreparedDuplicateScan,
+    ) -> Result<DuplicateScanRun, ApplicationError> {
+        let _control = self.control_lock()?;
+        self.reap_finished_worker();
+        if let Some(run) = self.active_run()? {
+            return Ok(run);
+        }
+        let PreparedDuplicateScan {
+            root,
+            bundles,
+            total_artifacts,
+            total_pairs,
+            profile,
+        } = prepared;
         let run = self.inner.repository.duplicate_scan_start(
             profile.profile_version,
             total_artifacts,
@@ -218,6 +259,14 @@ impl DuplicateSupervisor {
         }
         let _ = self.inner.events.send(run.clone());
         Ok(run)
+    }
+
+    /// Read a stable active-run projection without exposing the worker handle
+    /// or treating a finished-but-not-yet-reaped slot as active work.
+    pub fn active_run_snapshot(&self) -> Result<Option<DuplicateScanRun>, ApplicationError> {
+        let _control = self.control_lock()?;
+        self.reap_finished_worker();
+        self.active_run()
     }
 
     pub fn shutdown_and_wait(&self) {
@@ -597,13 +646,22 @@ fn short_id(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{mpsc, Arc};
+
+    use crate::application::{ArtifactStore, DuplicateRepository, StateRepository};
     use crate::domain::{
         ArtifactBundle, ArtifactRelativePath, ArtifactSha256, ArtifactStorageFormat,
-        DownloadArtifact, DownloadArtifactState, DownloadEntryId, Gallery, GalleryId,
-        GalleryMetadata, PageArtifact, PageArtifactState, SourcePageNumber,
+        DownloadArtifact, DownloadArtifactState, DownloadEntryId, DuplicateScanState, Gallery,
+        GalleryId, GalleryMetadata, PageArtifact, PageArtifactState, SourcePageNumber,
     };
+    use crate::infrastructure::{FilesystemArtifactStore, SqliteRepository};
+    use crate::thumbnail::CancellationToken;
+    use tempfile::tempdir;
 
-    use super::{candidate_pairs, select_scan_bundles, HashedArtifact};
+    use super::{
+        candidate_pairs, select_scan_bundles, ActiveRun, DisabledDuplicateRelationProvider,
+        DuplicateSupervisor, HashedArtifact,
+    };
 
     fn bundle(
         gallery_id: i64,
@@ -693,5 +751,101 @@ mod tests {
         assert_eq!(pairs.len(), 3, "the exhaustive fallback keeps every pair");
         assert_eq!((pairs[0].parent_index, pairs[0].candidate_index), (0, 2));
         assert!(pairs[0].metadata_affinity > pairs[1].metadata_affinity);
+    }
+
+    #[test]
+    fn active_run_snapshot_includes_running_and_excludes_terminal_runs() {
+        let repository = Arc::new(SqliteRepository::open_in_memory().unwrap());
+        let run = DuplicateRepository::duplicate_scan_start(repository.as_ref(), 1, 0, 0)
+            .expect("seed running duplicate scan");
+        let duplicate_repository: Arc<dyn DuplicateRepository> = repository.clone();
+        let settings: Arc<dyn StateRepository> = repository.clone();
+        let store: Arc<dyn ArtifactStore> = Arc::new(FilesystemArtifactStore::new());
+        let (events, _receiver) = mpsc::channel();
+        let supervisor = DuplicateSupervisor::new(
+            duplicate_repository,
+            settings,
+            store,
+            Arc::new(DisabledDuplicateRelationProvider),
+            events,
+        );
+        *supervisor.active_lock().unwrap() = Some(ActiveRun {
+            run_id: run.run_id.clone(),
+            cancellation: CancellationToken::new(),
+            worker: None,
+        });
+
+        let active = supervisor
+            .active_run_snapshot()
+            .expect("read active duplicate run")
+            .expect("running scan should be included");
+        assert_eq!(active.run_id, run.run_id);
+        assert_eq!(active.state, DuplicateScanState::Running);
+
+        DuplicateRepository::duplicate_scan_finish(
+            repository.as_ref(),
+            &run.run_id,
+            DuplicateScanState::Completed,
+            None,
+            None,
+        )
+        .expect("finish duplicate scan");
+        assert!(supervisor
+            .active_run_snapshot()
+            .expect("read terminal duplicate run")
+            .is_none());
+        *supervisor.active_lock().unwrap() = None;
+    }
+
+    #[test]
+    fn commit_rechecks_for_a_run_started_during_unlocked_preflight() {
+        let temporary = tempdir().expect("create duplicate scan root");
+        let root = temporary.path().join("downloads");
+        std::fs::create_dir_all(&root).expect("create download root");
+        let repository = Arc::new(SqliteRepository::open_in_memory().unwrap());
+        let mut settings = StateRepository::settings_get(repository.as_ref()).unwrap();
+        let expected_revision = settings.revision;
+        settings.revision += 1;
+        settings.download_root = root.to_string_lossy().into_owned();
+        assert!(StateRepository::settings_compare_and_set(
+            repository.as_ref(),
+            &settings,
+            expected_revision,
+        )
+        .unwrap());
+        let duplicate_repository: Arc<dyn DuplicateRepository> = repository.clone();
+        let state_repository: Arc<dyn StateRepository> = repository.clone();
+        let store: Arc<dyn ArtifactStore> = Arc::new(FilesystemArtifactStore::new());
+        let (events, _receiver) = mpsc::channel();
+        let supervisor = DuplicateSupervisor::new(
+            duplicate_repository,
+            state_repository,
+            store,
+            Arc::new(DisabledDuplicateRelationProvider),
+            events,
+        );
+
+        let prepared = supervisor.prepare_start().expect("prepare scan input");
+        let existing = DuplicateRepository::duplicate_scan_start(repository.as_ref(), 1, 0, 0)
+            .expect("start competing duplicate scan");
+        *supervisor.active_lock().unwrap() = Some(ActiveRun {
+            run_id: existing.run_id.clone(),
+            cancellation: CancellationToken::new(),
+            worker: None,
+        });
+
+        let returned = supervisor
+            .commit_start(prepared)
+            .expect("reuse the run that won the commit race");
+        assert_eq!(returned.run_id, existing.run_id);
+        *supervisor.active_lock().unwrap() = None;
+        DuplicateRepository::duplicate_scan_finish(
+            repository.as_ref(),
+            &existing.run_id,
+            DuplicateScanState::Cancelled,
+            None,
+            None,
+        )
+        .expect("finish seeded duplicate run");
     }
 }

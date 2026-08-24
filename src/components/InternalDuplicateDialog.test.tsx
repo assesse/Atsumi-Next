@@ -54,6 +54,7 @@ describe("InternalDuplicateDialog", () => {
     const client = new ThumbnailClient({ resolve });
     const onPlan = vi.fn();
     const onApply = vi.fn();
+    const onRescan = vi.fn();
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -65,7 +66,7 @@ describe("InternalDuplicateDialog", () => {
         thumbnailClient={client}
         onClose={vi.fn()}
         onRetry={vi.fn()}
-        onRescan={vi.fn()}
+        onRescan={onRescan}
         onPlan={onPlan}
         onApply={onApply}
         onUndo={vi.fn()}
@@ -77,6 +78,10 @@ describe("InternalDuplicateDialog", () => {
     expect(container.textContent).toContain("원본 2p");
     expect(container.textContent).toContain("원본 8p");
     expect(container.textContent).not.toContain("영구 삭제 적용");
+    const rescan = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.includes("이 앨범 다시 검사"));
+    await act(async () => rescan?.click());
+    expect(onRescan).toHaveBeenCalledOnce();
     expect(resolve.mock.calls.map(([request]) => request.key)).toEqual([
       expect.objectContaining({ kind: "artifact-page", entryId: "verified-entry-1", page: 2 }),
       expect.objectContaining({ kind: "artifact-page", entryId: "verified-entry-1", page: 8 }),

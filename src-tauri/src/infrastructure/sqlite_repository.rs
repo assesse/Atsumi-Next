@@ -261,8 +261,9 @@ impl StateRepository for SqliteRepository {
                         cache_limit_gb = ?7,
                         concurrent_image_requests = ?8,
                         request_start_interval_ms = ?9,
-                        auto_find_history_mode = ?10
-                    WHERE singleton = 1 AND revision = ?11
+                        auto_find_history_mode = ?10,
+                        privacy_mode = ?11
+                    WHERE singleton = 1 AND revision = ?12
                 "#,
                 params![
                     to_sql_integer(next.revision, "settings revision")?,
@@ -275,6 +276,7 @@ impl StateRepository for SqliteRepository {
                     i64::from(next.concurrent_image_requests),
                     to_sql_integer(next.request_start_interval_ms, "request start interval")?,
                     next.auto_find_history_mode.as_str(),
+                    next.privacy_mode,
                     to_sql_integer(expected_revision, "expected settings revision")?,
                 ],
             )
@@ -344,23 +346,46 @@ impl TagCatalogRepository for SqliteRepository {
         transaction
             .execute("DELETE FROM tag_catalog_entries", [])
             .map_err(map_sqlite_error)?;
+        transaction
+            .execute("DELETE FROM metadata_catalog_entries", [])
+            .map_err(map_sqlite_error)?;
         let mut neutral = 0u64;
         let mut female = 0u64;
         let mut male = 0u64;
+        let mut artist = 0u64;
+        let mut group = 0u64;
         for entry in entries {
             match entry.namespace {
+                TagNamespace::Artist => artist += 1,
+                TagNamespace::Group => group += 1,
                 TagNamespace::Tag => neutral += 1,
                 TagNamespace::Female => female += 1,
                 TagNamespace::Male => male += 1,
             }
-            transaction.execute(
-                "INSERT INTO tag_catalog_entries (namespace, name, normalized_name, canonical_token, gallery_count, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
-                params![entry.namespace.as_str(), entry.name, entry.normalized_name, entry.canonical_token, to_sql_integer(entry.gallery_count, "tag gallery count")?],
-            ).map_err(map_sqlite_error)?;
+            let insert = match entry.namespace {
+                TagNamespace::Artist | TagNamespace::Group => {
+                    "INSERT INTO metadata_catalog_entries (namespace, name, normalized_name, canonical_token, gallery_count, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                }
+                TagNamespace::Tag | TagNamespace::Female | TagNamespace::Male => {
+                    "INSERT INTO tag_catalog_entries (namespace, name, normalized_name, canonical_token, gallery_count, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                }
+            };
+            transaction
+                .execute(
+                    insert,
+                    params![
+                        entry.namespace.as_str(),
+                        entry.name,
+                        entry.normalized_name,
+                        entry.canonical_token,
+                        to_sql_integer(entry.gallery_count, "tag gallery count")?
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
         }
         transaction.execute(
-            "UPDATE tag_catalog_state SET revision = revision + 1, entry_count = ?1, neutral_count = ?2, female_count = ?3, male_count = ?4, last_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_success_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_error_code = NULL, last_error_message = NULL WHERE singleton = 1",
-            params![to_sql_integer(entries.len() as u64, "tag entry count")?, to_sql_integer(neutral, "neutral count")?, to_sql_integer(female, "female count")?, to_sql_integer(male, "male count")?],
+            "UPDATE tag_catalog_state SET revision = revision + 1, entry_count = ?1, neutral_count = ?2, female_count = ?3, male_count = ?4, artist_count = ?5, group_count = ?6, last_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_success_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_error_code = NULL, last_error_message = NULL WHERE singleton = 1",
+            params![to_sql_integer(entries.len() as u64, "catalog entry count")?, to_sql_integer(neutral, "neutral count")?, to_sql_integer(female, "female count")?, to_sql_integer(male, "male count")?, to_sql_integer(artist, "artist count")?, to_sql_integer(group, "group count")?],
         ).map_err(map_sqlite_error)?;
         let status = read_tag_catalog_status(&transaction)?;
         transaction.commit().map_err(map_sqlite_error)?;
@@ -383,15 +408,39 @@ impl TagCatalogRepository for SqliteRepository {
         let connection = self.connection()?;
         let namespace = request.namespace.map(TagNamespace::as_str);
         let needle = request.query.as_str();
-        let mut statement = connection.prepare(
-            r#"SELECT e.namespace, e.name, e.canonical_token, e.gallery_count,
-                EXISTS(SELECT 1 FROM favorites f WHERE f.namespace = 'tag' AND lower(replace(f.value, '_', ' ')) = lower(CASE e.namespace WHEN 'tag' THEN e.name ELSE e.namespace || ':' || e.name END))
-              FROM tag_catalog_entries e
+        let mut statement = connection
+            .prepare(
+                r#"WITH suggestion_entries AS (
+                SELECT namespace, name, normalized_name, canonical_token, gallery_count
+                  FROM tag_catalog_entries
+                UNION ALL
+                SELECT namespace, name, normalized_name, canonical_token, gallery_count
+                  FROM metadata_catalog_entries
+              )
+              SELECT e.namespace, e.name, e.canonical_token, e.gallery_count,
+                EXISTS(
+                  SELECT 1 FROM favorites f
+                   WHERE f.namespace = CASE e.namespace
+                     WHEN 'artist' THEN 'artist'
+                     WHEN 'group' THEN 'group'
+                     ELSE 'tag'
+                   END
+                     AND lower(replace(f.value, '_', ' ')) = lower(CASE e.namespace
+                       WHEN 'female' THEN 'female:' || e.name
+                       WHEN 'male' THEN 'male:' || e.name
+                       ELSE e.name
+                     END)
+                )
+              FROM suggestion_entries e
               WHERE instr(e.normalized_name, ?1) > 0 AND (?2 IS NULL OR e.namespace = ?2)
               ORDER BY 5 DESC, e.gallery_count DESC, e.normalized_name COLLATE NOCASE ASC,
-                CASE e.namespace WHEN 'female' THEN 0 WHEN 'male' THEN 1 ELSE 2 END ASC,
+                CASE e.namespace
+                  WHEN 'artist' THEN 0 WHEN 'group' THEN 1 WHEN 'female' THEN 2
+                  WHEN 'male' THEN 3 ELSE 4
+                END ASC,
                 e.canonical_token COLLATE NOCASE ASC LIMIT ?3"#,
-        ).map_err(map_sqlite_error)?;
+            )
+            .map_err(map_sqlite_error)?;
         let rows = statement
             .query_map(
                 params![needle, namespace, i64::from(request.limit)],
@@ -1134,6 +1183,33 @@ impl DownloadRepository for SqliteRepository {
         stored_u64(count, "active download count")
     }
 
+    fn download_active_entry_ids(&self) -> Result<Vec<DownloadEntryId>, RepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                r#"
+                    SELECT entry_id
+                    FROM download_entries
+                    WHERE state IN (
+                        'queued', 'resolving_metadata', 'downloading',
+                        'hashing', 'verifying', 'retry_wait'
+                    )
+                    ORDER BY entry_id ASC
+                "#,
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(map_sqlite_error)?;
+        let mut entry_ids = Vec::new();
+        for row in rows {
+            entry_ids.push(
+                DownloadEntryId::new(row.map_err(map_sqlite_error)?).map_err(domain_corruption)?,
+            );
+        }
+        Ok(entry_ids)
+    }
+
     fn download_retry(
         &self,
         entry_ids: &[DownloadEntryId],
@@ -1190,6 +1266,7 @@ impl DownloadRepository for SqliteRepository {
                             total_units = 1,
                             last_error_code = NULL,
                             last_error_message = NULL,
+                            last_error_retryable = NULL,
                             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                             started_at = NULL,
                             finished_at = NULL
@@ -2720,12 +2797,13 @@ impl DownloadPipelineRepository for SqliteRepository {
                 r#"
                     UPDATE download_artifacts
                     SET revision = revision + 1, state = 'missing_artifacts'
-                    WHERE entry_id = ?1 AND state != 'quarantined'
+                    WHERE entry_id = ?1
+                      AND state NOT IN ('quarantined', 'missing_artifacts')
                 "#,
                 [entry_id.as_str()],
             )
             .map_err(map_sqlite_error)?;
-        if !target.state.allows_transition_to(JobState::ReviewRequired) {
+        if !target.state.allows_transition_to(JobState::Failed) {
             transaction.commit().map_err(map_sqlite_error)?;
             return Ok(None);
         }
@@ -2736,16 +2814,43 @@ impl DownloadPipelineRepository for SqliteRepository {
             worker_attempt: stored_u64(target.attempt, "download attempt")?,
         };
         let pipeline_target = read_pipeline_target(&transaction, &descriptor)?;
+        let active_attempt = pipeline_target.state.is_active();
         let projection = transition_pipeline_target(
             &transaction,
             pipeline_target,
-            JobState::ReviewRequired,
+            JobState::Failed,
             None,
             None,
             Some(code),
             Some(message),
-            "Artifact integrity needs attention",
+            "Artifact integrity requires a safe retry or manual recovery",
         )?;
+        transaction
+            .execute(
+                "UPDATE download_jobs SET last_error_retryable = 0 WHERE job_id = ?1",
+                [&descriptor.job_id],
+            )
+            .map_err(map_sqlite_error)?;
+        if active_attempt {
+            transaction
+                .execute(
+                    r#"
+                        UPDATE download_attempts
+                        SET finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                            outcome_state = 'failed', error_code = ?1,
+                            error_message = ?2, error_retryable = 0
+                        WHERE job_id = ?3 AND attempt = ?4
+                          AND outcome_state IS NULL
+                    "#,
+                    params![
+                        code,
+                        message,
+                        descriptor.job_id,
+                        to_sql_integer(descriptor.worker_attempt, "download attempt")?,
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
+        }
         transaction.commit().map_err(map_sqlite_error)?;
         Ok(Some(projection))
     }
@@ -5099,6 +5204,114 @@ fn recover_volatile_downloads(connection: &mut Connection) -> Result<usize, Repo
                         finished_at,
                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                     ),
+                    outcome_state = 'failed',
+                    error_code = COALESCE(
+                        NULLIF(trim(error_code), ''),
+                        (
+                            SELECT COALESCE(
+                                NULLIF(trim(j.last_error_code), ''),
+                                'ARTIFACT_INTEGRITY_REVIEW'
+                            )
+                            FROM download_jobs j
+                            WHERE j.job_id = download_attempts.job_id
+                        )
+                    ),
+                    error_message = COALESCE(
+                        NULLIF(trim(error_message), ''),
+                        (
+                            SELECT COALESCE(
+                                NULLIF(trim(j.last_error_message), ''),
+                                'Artifact integrity requires a safe retry or manual recovery'
+                            )
+                            FROM download_jobs j
+                            WHERE j.job_id = download_attempts.job_id
+                        )
+                    ),
+                    error_retryable = 0
+                WHERE outcome_state IS NULL
+                  AND EXISTS (
+                    SELECT 1
+                    FROM download_jobs j
+                    JOIN download_entries d ON d.entry_id = j.entry_id
+                    WHERE j.job_id = download_attempts.job_id
+                      AND j.attempt = download_attempts.attempt
+                      AND j.state = 'review_required'
+                      AND d.state = 'review_required'
+                      AND (
+                        NULLIF(trim(d.review_kind), '') IS NULL
+                        OR NULLIF(trim(d.review_id), '') IS NULL
+                      )
+                  )
+            "#,
+            [],
+        )
+        .map_err(map_sqlite_error)?;
+    transaction
+        .execute(
+            r#"
+                UPDATE download_jobs
+                SET revision = revision + 1,
+                    state = 'failed',
+                    last_error_code = COALESCE(
+                        NULLIF(trim(last_error_code), ''),
+                        'ARTIFACT_INTEGRITY_REVIEW'
+                    ),
+                    last_error_message = COALESCE(
+                        NULLIF(trim(last_error_message), ''),
+                        'Artifact integrity requires a safe retry or manual recovery'
+                    ),
+                    last_error_retryable = 0,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    finished_at = COALESCE(
+                        finished_at,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                WHERE state = 'review_required'
+                  AND entry_id IN (
+                    SELECT d.entry_id
+                    FROM download_entries d
+                    WHERE d.state = 'review_required'
+                      AND (
+                        NULLIF(trim(d.review_kind), '') IS NULL
+                        OR NULLIF(trim(d.review_id), '') IS NULL
+                      )
+                  )
+            "#,
+            [],
+        )
+        .map_err(map_sqlite_error)?;
+    let repaired_invalid_reviews = transaction
+        .execute(
+            r#"
+                UPDATE download_entries
+                SET revision = revision + 1,
+                    state = 'failed',
+                    review_kind = NULL,
+                    review_id = NULL,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE state = 'review_required'
+                  AND (
+                    NULLIF(trim(review_kind), '') IS NULL
+                    OR NULLIF(trim(review_id), '') IS NULL
+                  )
+                  AND EXISTS (
+                    SELECT 1
+                    FROM download_jobs j
+                    WHERE j.entry_id = download_entries.entry_id
+                      AND j.state = 'failed'
+                  )
+            "#,
+            [],
+        )
+        .map_err(map_sqlite_error)?;
+    transaction
+        .execute(
+            r#"
+                UPDATE download_attempts
+                SET finished_at = COALESCE(
+                        finished_at,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    ),
                     outcome_state = 'interrupted',
                     error_code = 'JOB_INTERRUPTED',
                     error_message =
@@ -5152,7 +5365,9 @@ fn recover_volatile_downloads(connection: &mut Connection) -> Result<usize, Repo
         )
         .map_err(map_sqlite_error)?;
     transaction.commit().map_err(map_sqlite_error)?;
-    Ok(recovered_entries)
+    repaired_invalid_reviews
+        .checked_add(recovered_entries)
+        .ok_or_else(|| RepositoryError::Other("download recovery count overflowed".into()))
 }
 
 fn read_request_entries(
@@ -5333,7 +5548,7 @@ fn stored_page_artifact(row: &Row<'_>) -> rusqlite::Result<StoredPageArtifact> {
 
 fn read_tag_catalog_status(connection: &Connection) -> Result<TagCatalogStatus, RepositoryError> {
     connection.query_row(
-        "SELECT revision, entry_count, neutral_count, female_count, male_count, last_attempt_at, last_success_at, last_error_code, last_error_message FROM tag_catalog_state WHERE singleton = 1",
+        "SELECT revision, entry_count, neutral_count, female_count, male_count, artist_count, group_count, last_attempt_at, last_success_at, last_error_code, last_error_message FROM tag_catalog_state WHERE singleton = 1",
         [],
         |row| Ok(TagCatalogStatus {
             revision: row.get::<_, i64>(0)? as u64,
@@ -5341,7 +5556,9 @@ fn read_tag_catalog_status(connection: &Connection) -> Result<TagCatalogStatus, 
             neutral_count: row.get::<_, i64>(2)? as u64,
             female_count: row.get::<_, i64>(3)? as u64,
             male_count: row.get::<_, i64>(4)? as u64,
-            last_attempt_at: row.get(5)?, last_success_at: row.get(6)?, last_error_code: row.get(7)?, last_error_message: row.get(8)?,
+            artist_count: row.get::<_, i64>(5)? as u64,
+            group_count: row.get::<_, i64>(6)? as u64,
+            last_attempt_at: row.get(7)?, last_success_at: row.get(8)?, last_error_code: row.get(9)?, last_error_message: row.get(10)?,
         }),
     ).map_err(map_sqlite_error)
 }
@@ -5958,7 +6175,7 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
                 SELECT revision, download_root, folder_name_template, max_columns, preview_width,
                        related_preview_width,
                        cache_limit_gb, concurrent_image_requests,
-                       request_start_interval_ms, auto_find_history_mode
+                       request_start_interval_ms, auto_find_history_mode, privacy_mode
                 FROM settings
                 WHERE singleton = 1
             "#,
@@ -5975,6 +6192,7 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, String>(9)?,
+                    row.get::<_, bool>(10)?,
                 ))
             },
         )
@@ -5999,6 +6217,7 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
                 values.8
             ))
         })?,
+        privacy_mode: values.10,
     })
 }
 
@@ -6095,6 +6314,123 @@ fn map_migration_error(error: MigrationError) -> RepositoryError {
         MigrationError::NonContiguousHistory { .. } | MigrationError::NameMismatch { .. } => {
             RepositoryError::Corrupt(error.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tag_catalog_repository_tests {
+    use super::*;
+
+    fn catalog_entry(namespace: TagNamespace, name: &str, gallery_count: u64) -> TagCatalogEntry {
+        TagCatalogEntry {
+            namespace,
+            name: name.to_owned(),
+            normalized_name: name.to_owned(),
+            canonical_token: format!("{}:{}", namespace.as_str(), name.replace(' ', "_")),
+            gallery_count,
+        }
+    }
+
+    #[test]
+    fn artist_and_group_catalog_round_trip_and_namespace_filtering() {
+        let repository = SqliteRepository::open_in_memory().expect("open repository");
+        let entries = vec![
+            catalog_entry(TagNamespace::Artist, "mizuno tooru", 142),
+            catalog_entry(TagNamespace::Artist, "mizuryu kei", 938),
+            catalog_entry(TagNamespace::Group, "mizuryu kei land", 451),
+            catalog_entry(TagNamespace::Tag, "mizugi", 2_000),
+            catalog_entry(TagNamespace::Female, "mind control", 810),
+        ];
+
+        let status = repository
+            .tag_catalog_replace(&entries)
+            .expect("replace catalog");
+        assert_eq!(status.entry_count, 5);
+        assert_eq!(status.artist_count, 2);
+        assert_eq!(status.group_count, 1);
+        assert_eq!(status.neutral_count, 1);
+        assert_eq!(status.female_count, 1);
+
+        let artists = repository
+            .tag_suggestions_search(&TagSuggestionRequest {
+                query: "miz".to_owned(),
+                namespace: Some(TagNamespace::Artist),
+                limit: 8,
+            })
+            .expect("search artists");
+        assert_eq!(
+            artists
+                .iter()
+                .map(|entry| entry.token.as_str())
+                .collect::<Vec<_>>(),
+            vec!["artist:mizuryu_kei", "artist:mizuno_tooru"]
+        );
+
+        let mixed = repository
+            .tag_suggestions_search(&TagSuggestionRequest {
+                query: "mizuryu".to_owned(),
+                namespace: None,
+                limit: 8,
+            })
+            .expect("search mixed catalog");
+        assert_eq!(
+            mixed
+                .iter()
+                .map(|entry| entry.namespace)
+                .collect::<Vec<_>>(),
+            vec![TagNamespace::Artist, TagNamespace::Group]
+        );
+    }
+
+    #[test]
+    fn artist_and_group_favorites_use_their_own_namespace_and_sort_first() {
+        let repository = SqliteRepository::open_in_memory().expect("open repository");
+        repository
+            .tag_catalog_replace(&[
+                catalog_entry(TagNamespace::Artist, "mizuno tooru", 142),
+                catalog_entry(TagNamespace::Artist, "mizuryu kei", 938),
+                catalog_entry(TagNamespace::Group, "circle energy", 76),
+            ])
+            .expect("replace catalog");
+        repository
+            .favorite_set(
+                &FavoriteKey {
+                    namespace: FavoriteNamespace::Artist,
+                    value: "mizuno tooru".to_owned(),
+                },
+                true,
+            )
+            .expect("favorite artist");
+        repository
+            .favorite_set(
+                &FavoriteKey {
+                    namespace: FavoriteNamespace::Group,
+                    value: "circle energy".to_owned(),
+                },
+                true,
+            )
+            .expect("favorite group");
+
+        let artists = repository
+            .tag_suggestions_search(&TagSuggestionRequest {
+                query: "miz".to_owned(),
+                namespace: Some(TagNamespace::Artist),
+                limit: 8,
+            })
+            .expect("search artists");
+        assert_eq!(artists[0].token, "artist:mizuno_tooru");
+        assert!(artists[0].favorite);
+        assert!(!artists[1].favorite);
+
+        let groups = repository
+            .tag_suggestions_search(&TagSuggestionRequest {
+                query: "circle".to_owned(),
+                namespace: Some(TagNamespace::Group),
+                limit: 8,
+            })
+            .expect("search groups");
+        assert_eq!(groups[0].token, "group:circle_energy");
+        assert!(groups[0].favorite);
     }
 }
 

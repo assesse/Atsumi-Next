@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { backend } from "./api/backend";
+import { hasActiveWork } from "./api/contracts";
 import type {
+  AppActiveWorkSnapshot,
   AutoFindRun,
   AutoFindSnapshot,
   DownloadChangedEvent,
@@ -23,6 +25,7 @@ import type {
   MaintenanceResult,
   ApiResult,
   TagCatalogStatus,
+  TagNamespace,
   TagSuggestion,
 } from "./api/contracts";
 import { ActivityDrawer } from "./components/ActivityDrawer";
@@ -158,6 +161,7 @@ export default function App() {
   const [searchHistory, setSearchHistory] = useState<SearchHistoryEntry[]>([]);
   const [tagCatalogStatus, setTagCatalogStatus] = useState<TagCatalogStatus | undefined>(undefined);
   const [tagCatalogRefreshing, setTagCatalogRefreshing] = useState(false);
+  const [privacyModePending, setPrivacyModePending] = useState(false);
   const [tagSuggestions, setTagSuggestions] = useState<TagSuggestion[]>([]);
   const tagSuggestionSequence = useRef(0);
   const [autoFindSnapshot, setAutoFindSnapshot] = useState<AutoFindSnapshot>({ candidates: [], cutoffEvidence: [], truncations: [] });
@@ -188,12 +192,14 @@ export default function App() {
   const [toast, setToast] = useState<Toast>(null);
   const [reconcilingArtifacts, setReconcilingArtifacts] = useState(false);
   const [settingsPreview, setSettingsPreview] = useState<{ maxColumns: number; previewWidth: number } | null>(null);
-  const [exitActiveDownloads, setExitActiveDownloads] = useState<number | null>(null);
+  const [exitWorkSnapshot, setExitWorkSnapshot] = useState<AppActiveWorkSnapshot | null>(null);
   const [exitStatusError, setExitStatusError] = useState(false);
+  const [forceQuitArmed, setForceQuitArmed] = useState(false);
   const [exitActionPending, setExitActionPending] = useState(false);
   const [pendingDownloadEntries, setPendingDownloadEntries] = useState<ReadonlySet<string>>(() => new Set());
   const exitConfirmOpenRef = useRef(false);
   const exitActionPendingRef = useRef(false);
+  const exitSnapshotSequence = useRef(0);
   const toastTimer = useRef<number | undefined>(undefined);
   const searchToken = useRef(0);
   const autoFindHydrationToken = useRef(0);
@@ -211,6 +217,7 @@ export default function App() {
   const queueRequestSequence = useRef(0);
   const pendingDownloadEntriesRef = useRef(new Set<string>());
   const pendingFavoriteTokens = useRef(new Set<string>());
+  const openingDownloadFolders = useRef(new Set<string>());
   const hydratedDetails = useRef(new Set<GalleryId>());
   const galleriesRef = useRef(galleries);
   const visibleIdsRef = useRef<GalleryId[]>([]);
@@ -239,6 +246,13 @@ export default function App() {
     });
   }
   const { settings, loading: settingsLoading, error: settingsError, save: saveSettings } = useSettings();
+
+  useEffect(() => {
+    document.documentElement.dataset.privacyMode = settings.privacyMode ? "on" : "off";
+    return () => {
+      delete document.documentElement.dataset.privacyMode;
+    };
+  }, [settings.privacyMode]);
   const maximumColumns = settingsPreview?.maxColumns ?? settings.maxColumns;
   const previewWidth = settingsPreview?.previewWidth ?? settings.previewWidth;
   const [galleryColumns, setGalleryColumns] = useState(1);
@@ -321,9 +335,9 @@ export default function App() {
     setTagCatalogRefreshing(true);
     try {
       const result = await backend.tagCatalogRefresh();
-      if (result.ok) { setTagCatalogStatus(result.data); showToast(`태그 최신화 완료 · 전체 ${result.data.entryCount.toLocaleString()} · F ${result.data.femaleCount.toLocaleString()} · M ${result.data.maleCount.toLocaleString()}`); }
-      else { showToast(result.error.details?.catalogRetained ? "태그 최신화에 실패했지만 기존 데이터를 유지했습니다." : result.error.message); }
-    } catch { showToast(tagCatalogStatus?.entryCount ? "태그 최신화에 실패했지만 기존 데이터를 유지했습니다." : "태그 데이터가 없습니다."); }
+      if (result.ok) { setTagCatalogStatus(result.data); showToast(`검색 자동완성 최신화 완료 · 작가 ${result.data.artistCount.toLocaleString()} · 그룹 ${result.data.groupCount.toLocaleString()} · 태그 ${result.data.neutralCount.toLocaleString()} · F ${result.data.femaleCount.toLocaleString()} · M ${result.data.maleCount.toLocaleString()}`); }
+      else { showToast(result.error.details?.catalogRetained ? "자동완성 최신화에 실패했지만 기존 데이터를 유지했습니다." : result.error.message); }
+    } catch { showToast(tagCatalogStatus?.entryCount ? "자동완성 최신화에 실패했지만 기존 데이터를 유지했습니다." : "자동완성 데이터가 없습니다."); }
     finally { setTagCatalogRefreshing(false); }
   }, [showToast, tagCatalogStatus?.entryCount]);
 
@@ -539,6 +553,8 @@ export default function App() {
   }, [hydrateInternalSnapshot]);
 
   useEffect(() => {
+    // Keep Explore idle until a form/suggestion/metadata search explicitly advances this generation.
+    if (searchRefresh === 0) return;
     let cancelled = false;
     const token = ++searchToken.current;
     exploreNavigationToken.current += 1;
@@ -685,50 +701,54 @@ export default function App() {
     () => allGalleries.filter((gallery) => gallery.download && activeDownloadStates.has(gallery.download.state)).length,
     [allGalleries],
   );
-  const refreshExitDownloadCount = useCallback(async () => {
-    if (backend.runtime === "browser-mock") {
-      setExitActiveDownloads(activeDownloadCount);
-      setExitStatusError(false);
-      return;
-    }
+  const refreshExitWorkSnapshot = useCallback(async (armForceOnFailure = false): Promise<AppActiveWorkSnapshot | null> => {
+    const sequence = ++exitSnapshotSequence.current;
     try {
-      const result = await backend.downloadActiveCount();
+      const result = await backend.appActiveWorkSnapshot();
+      if (sequence !== exitSnapshotSequence.current || !exitConfirmOpenRef.current) return null;
       if (result.ok) {
-        setExitActiveDownloads(result.data);
+        setExitWorkSnapshot(result.data);
         setExitStatusError(false);
+        setForceQuitArmed(false);
+        return result.data;
       } else {
-        setExitActiveDownloads(null);
+        setExitWorkSnapshot(null);
         setExitStatusError(true);
+        setForceQuitArmed(armForceOnFailure);
       }
     } catch {
-      setExitActiveDownloads(null);
+      if (sequence !== exitSnapshotSequence.current || !exitConfirmOpenRef.current) return null;
+      setExitWorkSnapshot(null);
       setExitStatusError(true);
+      setForceQuitArmed(armForceOnFailure);
     }
-  }, [activeDownloadCount]);
+    return null;
+  }, []);
   const openExitConfirm = useCallback(() => {
     if (exitConfirmOpenRef.current || exitActionPendingRef.current) return;
     exitConfirmOpenRef.current = true;
-    setExitActiveDownloads(backend.runtime === "browser-mock" ? activeDownloadCount : null);
+    setExitWorkSnapshot(null);
     setExitStatusError(false);
+    setForceQuitArmed(false);
     exitActionPendingRef.current = false;
     setExitActionPending(false);
     dispatch({ type: "overlay.exit", open: true });
-  }, [activeDownloadCount]);
+  }, []);
   const closeExitConfirm = useCallback(() => {
     if (exitActionPendingRef.current) return;
+    exitSnapshotSequence.current += 1;
     exitConfirmOpenRef.current = false;
     dispatch({ type: "overlay.exit", open: false });
   }, []);
 
   useEffect(() => {
-    if (ui.overlays.exitConfirmOpen) void refreshExitDownloadCount();
-  }, [activeDownloadCount, refreshExitDownloadCount, ui.overlays.exitConfirmOpen]);
+    if (ui.overlays.exitConfirmOpen) void refreshExitWorkSnapshot();
+  }, [refreshExitWorkSnapshot, ui.overlays.exitConfirmOpen]);
 
   useEffect(() => {
-    if (backend.runtime !== "tauri") return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void backend.on("app:exit-requested", openExitConfirm).then((cleanup) => {
+    void backend.on("app:exit-requested", () => openExitConfirm()).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
     }).catch(() => {
@@ -885,13 +905,18 @@ export default function App() {
     setInternalReviewLoading(false);
   }, []);
 
-  const startInternalScan = useCallback(async () => {
+  const startInternalScan = useCallback(async (requestedEntryIds: string[]) => {
     if (internalPendingRef.current || internalRun?.state === "running") return;
+    const entryIds = [...new Set(requestedEntryIds)];
+    if (!entryIds.length) {
+      showToast("내부 페이지를 검사할 완료 앨범을 선택해 주세요.");
+      return;
+    }
     internalPendingRef.current = true;
     setInternalPending(true);
     setInternalError(null);
     try {
-      const result = await backend.internalDuplicateScanStart();
+      const result = await backend.internalDuplicateScanStart({ entryIds });
       if (!result.ok) {
         setInternalError(result.error.message);
         showToast(result.error.message);
@@ -901,7 +926,7 @@ export default function App() {
       setInternalRun(result.data);
       setInternalSnapshot((snapshot) => ({ ...snapshot, run: result.data }));
       await hydrateInternalSnapshot();
-      showToast("검증된 앨범 파일을 기준으로 내부 중복 페이지 검사를 시작했습니다.");
+      showToast(`선택한 완료 앨범 ${entryIds.length}개의 내부 중복 페이지 검사를 시작했습니다.`);
     } catch {
       const message = "내부 중복 검사를 시작하지 못했습니다.";
       setInternalError(message);
@@ -1043,6 +1068,23 @@ export default function App() {
     },
     [showToast],
   );
+
+  const openDownloadFolder = useCallback(async (entryId: string) => {
+    if (openingDownloadFolders.current.has(entryId)) return;
+    openingDownloadFolders.current.add(entryId);
+    try {
+      const result = await backend.artifactOpenFolder(entryId);
+      if (!result.ok) {
+        showToast(result.error.code === "FILESYSTEM_MISSING"
+          ? "앨범 저장 폴더가 아직 준비되지 않았거나 이동되었습니다. 잠시 후 다시 시도해 주세요."
+          : result.error.message);
+      }
+    } catch {
+      showToast("앨범 저장 폴더를 열지 못했습니다.");
+    } finally {
+      openingDownloadFolders.current.delete(entryId);
+    }
+  }, [showToast]);
 
   const startFreshMetadataSearch = useCallback((value: string) => {
     const target = metadataSearchToken(value);
@@ -1411,11 +1453,16 @@ export default function App() {
   }, [query.page, query.queryId]);
 
   const selectedIds = useMemo(() => [...ui.selection.ids], [ui.selection.ids]);
+  const selectedCompletedEntryIds = useMemo(() => [...new Set(selectedIds.flatMap((id) => {
+    const download = displayGalleries.get(id)?.download;
+    return download?.state === "completed" ? [download.entryId] : [];
+  }))], [displayGalleries, selectedIds]);
+  const selectedCanInternalScan = selectedIds.length > 0
+    && selectedCompletedEntryIds.length === selectedIds.length;
   const selectedCompletedEntryId = useMemo(() => {
-    if (selectedIds.length !== 1) return null;
-    const download = displayGalleries.get(selectedIds[0]!)?.download;
-    return download?.state === "completed" ? download.entryId : null;
-  }, [displayGalleries, selectedIds]);
+    if (!selectedCanInternalScan || selectedCompletedEntryIds.length !== 1) return null;
+    return selectedCompletedEntryIds[0] ?? null;
+  }, [selectedCanInternalScan, selectedCompletedEntryIds]);
   const selectedHasInternalResult = useMemo(() => (
     selectedCompletedEntryId !== null
     && internalSnapshot.groups.some((group) => group.entryId === selectedCompletedEntryId)
@@ -1472,7 +1519,19 @@ export default function App() {
     [saveSettings, showToast],
   );
 
-  const requestTagSuggestions = useCallback((query: string, namespace?: "tag" | "female" | "male") => {
+  const togglePrivacyMode = useCallback(async () => {
+    if (privacyModePending) return;
+    setPrivacyModePending(true);
+    const result = await saveSettings({ privacyMode: !settings.privacyMode });
+    setPrivacyModePending(false);
+    if (result.ok) {
+      showToast(result.data.privacyMode ? "프라이버시 모드를 켰습니다." : "프라이버시 모드를 껐습니다.");
+    } else {
+      showToast(result.error.message);
+    }
+  }, [privacyModePending, saveSettings, settings.privacyMode, showToast]);
+
+  const requestTagSuggestions = useCallback((query: string, namespace?: TagNamespace) => {
     const sequence = ++tagSuggestionSequence.current;
     if (!query) { setTagSuggestions([]); return; }
     void backend.tagSuggestionsSearch({ query, namespace, limit: 8 }).then((result) => {
@@ -1551,7 +1610,10 @@ export default function App() {
             onDraft={(value) => dispatch({ type: "search.draft", view: ui.view, value })}
             onSuggestions={(open, active) => dispatch({ type: "search.suggestions", view: ui.view, open, active })}
             onCommit={(value) => {
-              if (ui.view === "explore") setExploreSearchOverride(null);
+              if (ui.view === "explore") {
+                setExploreSearchOverride(null);
+                setSearchRefresh((current) => current + 1);
+              }
               dispatch({ type: "search.commit", view: ui.view, value });
               if (ui.view !== "explore") showToast("현재 결과를 필터했습니다.");
             }}
@@ -1563,6 +1625,7 @@ export default function App() {
               } else if (ui.view === "explore") {
                 setExploreSearchOverride(null);
               }
+              if (ui.view === "explore") setSearchRefresh((current) => current + 1);
               dispatch({ type: "search.commit", view: ui.view, value });
             }}
             onCompleteSuggestion={(value) => {
@@ -1578,6 +1641,9 @@ export default function App() {
             tagCatalogStatus={tagCatalogStatus}
             tagCatalogRefreshing={tagCatalogRefreshing}
             tagCatalogRevision={tagCatalogStatus?.revision}
+            privacyMode={settings.privacyMode}
+            privacyModePending={privacyModePending || settingsLoading}
+            onPrivacyModeToggle={() => void togglePrivacyMode()}
             onActivity={() => ui.overlays.activityOpen ? closeActivity() : openActivity()}
             onSettings={() => dispatch({ type: "overlay.settings", open: true })}
           />
@@ -1598,12 +1664,23 @@ export default function App() {
                   <button type="button" className="text-button" disabled={reconcilingArtifacts} onClick={() => void reconcileArtifacts()}><FluentIcon glyph="\uE9D9" /> {reconcilingArtifacts ? "무결성 검사 중" : "무결성 검사"}</button>
                   <button type="button" className="text-button" aria-describedby="duplicate-scan-explanation" title="완료된 모든 앨범을 서로 비교해 작품 단위 중복 후보를 찾습니다." disabled={duplicateLoading || duplicatePending || duplicateRun?.state === "running"} onClick={() => void startDuplicateScan()}><FluentIcon glyph="\uE9D9" /> 전체 작품 간 중복 검사</button>
                   {duplicateRun?.state === "running" ? <button type="button" className="text-button danger-button" disabled={duplicatePending} onClick={() => void cancelDuplicateScan()}><FluentIcon glyph="\uE711" /> 중복 검사 취소</button> : null}
-                  <button type="button" className="text-button" aria-describedby="duplicate-scan-explanation" title="완료된 모든 앨범 각각의 내부 페이지를 비교해 반복·유사 페이지를 찾습니다." disabled={internalLoading || internalPending || internalRun?.state === "running"} onClick={() => void startInternalScan()}><FluentIcon glyph="\uE9D9" /> 전체 앨범 내부 페이지 검사</button>
+                  <button
+                    type="button"
+                    className="text-button"
+                    aria-describedby="duplicate-scan-explanation"
+                    title={selectedIds.length === 0
+                      ? "완료된 앨범을 하나 이상 선택하세요."
+                      : !selectedCanInternalScan
+                        ? "선택한 항목이 모두 다운로드 완료 상태여야 합니다."
+                        : `선택한 완료 앨범 ${selectedCompletedEntryIds.length}개만 내부 검사합니다.`}
+                    disabled={internalLoading || internalPending || internalRun?.state === "running" || !selectedCanInternalScan}
+                    onClick={() => void startInternalScan(selectedCompletedEntryIds)}
+                  ><FluentIcon glyph="\uE9D9" /> 선택 앨범 내부 페이지 검사{selectedCanInternalScan ? ` (${selectedCompletedEntryIds.length})` : ""}</button>
                   {internalRun?.state === "running" ? <button type="button" className="text-button danger-button" disabled={internalPending} onClick={() => void cancelInternalScan()}><FluentIcon glyph="\uE711" /> 내부 검사 취소</button> : null}
-                  <button type="button" className="text-button" disabled={!selectedCompletedEntryId || internalPending} title={!selectedCompletedEntryId ? "완료된 앨범 하나를 선택하세요." : selectedHasInternalResult ? "저장된 내부 페이지 검사 결과를 엽니다." : "저장된 내부 결과가 없습니다. 먼저 전체 앨범 내부 페이지 검사를 실행하세요."} onClick={() => {
+                  <button type="button" className="text-button" disabled={!selectedCompletedEntryId || internalPending} title={!selectedCompletedEntryId ? "완료된 앨범 하나를 선택하세요." : selectedHasInternalResult ? "저장된 내부 페이지 검사 결과를 엽니다." : "저장된 내부 결과가 없습니다. 먼저 선택 앨범 내부 페이지 검사를 실행하세요."} onClick={() => {
                     if (!selectedCompletedEntryId) return;
                     if (!selectedHasInternalResult) {
-                      showToast("저장된 내부 결과가 없습니다. 먼저 ‘전체 앨범 내부 페이지 검사’를 실행하세요.");
+                      showToast("저장된 내부 결과가 없습니다. 먼저 ‘선택 앨범 내부 페이지 검사’를 실행하세요.");
                       return;
                     }
                     openInternalReview(selectedCompletedEntryId);
@@ -1686,6 +1763,8 @@ export default function App() {
               || (ui.view === "downloads" && downloadsLoading && !visible.length)
               || (ui.view === "auto-find" && autoFindLoading && !visible.length)) ? (
               <GalleryGridSkeleton columns={galleryColumns} previewWidth={previewWidth} />
+            ) : ui.view === "explore" && query.phase === "idle" ? (
+              <div className="empty-state"><FluentIcon glyph="\uE721" /><h2>검색을 시작해 주세요</h2><p>검색어와 언어·정렬 필터를 정한 뒤 검색 버튼을 눌러 주세요.</p></div>
             ) : ui.view === "explore" && query.error && !query.page ? (
               <div className="empty-state" role="alert"><FluentIcon glyph="\uE7BA" /><h2>검색 결과를 불러오지 못했습니다</h2><p>{query.error.message}</p><button type="button" className="text-button" onClick={() => setSearchRefresh((value) => value + 1)}>다시 시도</button></div>
             ) : ui.view === "downloads" && downloadsError ? (
@@ -1736,6 +1815,7 @@ export default function App() {
         onRestore={() => dispatch({ type: "detail.minimize", minimized: false })}
         onOpenRelated={openRelatedDetail}
         onQueue={(id) => void queueGalleries([id])}
+        onOpenDownloadFolder={(entryId) => void openDownloadFolder(entryId)}
         onMetadataSearch={searchMetadata}
         onMetadataFavorite={toggleMetadataFavorite}
       />
@@ -1775,7 +1855,7 @@ export default function App() {
         error={internalReviewError}
         onClose={closeInternalReview}
         onRetry={() => internalReviewEntryId && void hydrateInternalReview(internalReviewEntryId)}
-        onRescan={() => void startInternalScan()}
+        onRescan={() => internalReviewEntryId && void startInternalScan([internalReviewEntryId])}
         onPlan={(request) => void previewInternalRemoval(request)}
         onApply={(plan) => void applyInternalRemoval(plan)}
         onUndo={(recordIds) => void undoInternalRemoval(recordIds)}
@@ -1783,9 +1863,10 @@ export default function App() {
 
       <ExitConfirmDialog
         open={ui.overlays.exitConfirmOpen}
-        activeDownloads={exitActiveDownloads}
+        snapshot={exitWorkSnapshot}
         statusError={exitStatusError}
         actionPending={exitActionPending}
+        forceQuitArmed={forceQuitArmed}
         onClose={closeExitConfirm}
         onMinimizeToTray={() => {
           if (exitActionPendingRef.current) return;
@@ -1793,12 +1874,18 @@ export default function App() {
           setExitActionPending(true);
           void backend.appMinimizeToTray().then((result) => {
             if (!result.ok) {
+              if (result.error.code === "APP_ACTIVE_WORK_STATUS_UNAVAILABLE") {
+                setExitWorkSnapshot(null);
+                setExitStatusError(true);
+                setForceQuitArmed(false);
+              }
               exitActionPendingRef.current = false;
               setExitActionPending(false);
               showToast(result.error.message);
             } else {
               exitActionPendingRef.current = false;
               setExitActionPending(false);
+              exitSnapshotSequence.current += 1;
               exitConfirmOpenRef.current = false;
               dispatch({ type: "overlay.exit", open: false });
             }
@@ -1810,42 +1897,52 @@ export default function App() {
         }}
         onQuit={() => {
           if (exitActionPendingRef.current) return;
+          if (exitWorkSnapshot === null && !exitStatusError) return;
           exitActionPendingRef.current = true;
           setExitActionPending(true);
           void (async () => {
-            if (backend.runtime === "tauri") {
-              const latest = await backend.downloadActiveCount();
-              if (!latest.ok) {
-                if (exitStatusError) {
-                  const quitResult = await backend.appQuit();
-                  if (!quitResult.ok) {
-                    exitActionPendingRef.current = false;
-                    setExitActionPending(false);
-                    showToast(quitResult.error.message);
-                  }
-                  return;
-                }
-                setExitActiveDownloads(null);
-                setExitStatusError(true);
+            if (exitWorkSnapshot === null) {
+              if (!forceQuitArmed) {
+                const refreshed = await refreshExitWorkSnapshot(true);
                 exitActionPendingRef.current = false;
                 setExitActionPending(false);
-                showToast("다운로드 상태를 확인하지 못했습니다. 트레이 최소화를 권장합니다.");
-                return;
-              }
-              if (exitActiveDownloads === null || latest.data !== exitActiveDownloads) {
-                setExitActiveDownloads(latest.data);
-                setExitStatusError(false);
-                exitActionPendingRef.current = false;
-                setExitActionPending(false);
-                showToast("진행 작업 정보를 갱신했습니다. 내용을 확인하고 다시 선택해 주세요.");
+                if (!refreshed) showToast("작업 상태를 다시 확인하지 못했습니다. 트레이로 보내거나 상태 확인 없이 종료할 수 있습니다.");
                 return;
               }
             }
-            const result = await backend.appQuit();
+
+            const result = await backend.appQuit(exitWorkSnapshot
+              ? {
+                expectedWorkSetFingerprint: exitWorkSnapshot.workSetFingerprint,
+                confirmActiveWork: hasActiveWork(exitWorkSnapshot),
+              }
+              : {
+                expectedWorkSetFingerprint: "",
+                confirmActiveWork: true,
+                forceWhenStatusUnknown: true,
+              });
             if (!result.ok) {
+              if (result.error.code === "APP_ACTIVE_WORK_STATUS_UNAVAILABLE") {
+                setExitWorkSnapshot(null);
+                setExitStatusError(true);
+                setForceQuitArmed(false);
+              }
               exitActionPendingRef.current = false;
               setExitActionPending(false);
               showToast(result.error.message);
+              return;
+            }
+            if (!result.data.accepted) {
+              if (result.data.snapshot) {
+                setExitWorkSnapshot(result.data.snapshot);
+                setExitStatusError(false);
+                setForceQuitArmed(false);
+              }
+              exitActionPendingRef.current = false;
+              setExitActionPending(false);
+              showToast(result.data.reason === "active_work_changed"
+                ? "진행 작업이 변경되었습니다. 내용을 확인하고 다시 선택해 주세요."
+                : "진행 중인 작업을 확인한 뒤 종료를 다시 선택해 주세요.");
             }
           })().catch(() => {
             exitActionPendingRef.current = false;

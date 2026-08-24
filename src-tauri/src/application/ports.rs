@@ -328,6 +328,7 @@ pub trait InternalDuplicateRepository: Send + Sync {
         state: InternalScanState,
         error_code: Option<&str>,
         error_message: Option<&str>,
+        completed_gallery_ids: &[GalleryId],
     ) -> Result<Option<InternalScanRun>, RepositoryError>;
 
     fn internal_scan_is_running(&self, run_id: &str) -> Result<bool, RepositoryError>;
@@ -381,6 +382,11 @@ pub trait DownloadRepository: Send + Sync {
     ) -> Result<DownloadPage, RepositoryError>;
 
     fn download_active_count(&self) -> Result<u64, RepositoryError>;
+
+    /// Canonical identities for work that would be interrupted by app exit.
+    /// The ordering must be stable so callers can derive a progress-insensitive
+    /// work-set fingerprint.
+    fn download_active_entry_ids(&self) -> Result<Vec<DownloadEntryId>, RepositoryError>;
 
     fn download_retry(
         &self,

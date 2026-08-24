@@ -24,7 +24,10 @@ pub use routing::{
     download_full_candidates, parse_gg_routing, webp_full_candidates, webp_thumbnail_candidates,
     GgRoutingTable, HitomiImageCandidate, HitomiImageFormat, HitomiImageKind, ThumbnailSize,
 };
-pub use tag_catalog::{all_tags_urls, merge_catalog, parse_all_tags_page, ALL_TAGS_PAGE_COUNT};
+pub use tag_catalog::{
+    all_catalog_pages, all_tags_urls, merge_catalog, parse_all_tags_page, parse_catalog_page,
+    ALL_CATALOG_PAGE_COUNT, ALL_TAGS_PAGE_COUNT,
+};
 
 #[cfg(test)]
 mod tests;

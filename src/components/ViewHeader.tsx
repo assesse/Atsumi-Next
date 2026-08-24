@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { Language, SearchUi, ViewId } from "../core/types";
 import { languageOrder, languagePresentation } from "../data/languages";
-import type { TagCatalogStatus } from "../api/contracts";
+import type { TagCatalogStatus, TagNamespace } from "../api/contracts";
 import type { SearchSuggestion } from "../search/searchSuggestions";
 import { activeSearchToken, replaceActiveSearchToken, searchTokenKind } from "../search/searchTokens";
 import { FluentIcon } from "./FluentIcon";
@@ -9,9 +9,13 @@ import { FluentIcon } from "./FluentIcon";
 export type { SearchSuggestion } from "../search/searchSuggestions";
 
 const languageOptions = languageOrder.map((value) => ({ value, ...languagePresentation[value] }));
+const suggestionNamespaces = new Set<TagNamespace>(["artist", "group", "tag", "female", "male"]);
+
+const isSuggestionNamespace = (value: string | null): value is TagNamespace =>
+  value !== null && suggestionNamespaces.has(value as TagNamespace);
 
 const placeholders: Record<ViewId, string> = {
-  explore: "앨범, 작가, 태그 검색",
+  explore: "앨범, 작가, 그룹, 태그 검색",
   "auto-find": "현재 후보에서 검색",
   downloads: "다운로드 목록에서 검색",
 };
@@ -32,8 +36,11 @@ type ViewHeaderProps = {
   tagCatalogStatus?: TagCatalogStatus;
   tagCatalogRefreshing: boolean;
   tagCatalogRevision?: number;
-  onTagSuggestionQuery: (query: string, namespace?: "tag" | "female" | "male") => void;
+  onTagSuggestionQuery: (query: string, namespace?: TagNamespace) => void;
   onActivity: () => void;
+  privacyMode: boolean;
+  privacyModePending?: boolean;
+  onPrivacyModeToggle: () => void;
   onSettings: () => void;
 };
 
@@ -55,6 +62,9 @@ export function ViewHeader({
   tagCatalogRevision,
   onTagSuggestionQuery,
   onActivity,
+  privacyMode,
+  privacyModePending = false,
+  onPrivacyModeToggle,
   onSettings,
 }: ViewHeaderProps) {
   const host = useRef<HTMLElement>(null);
@@ -64,6 +74,9 @@ export function ViewHeader({
   const [languageOpen, setLanguageOpen] = useState(false);
   const [selection, setSelection] = useState({ start: 0, end: 0 });
   const visibleSuggestions = suggestions;
+  const catalogIncomplete = !tagCatalogStatus?.entryCount
+    || tagCatalogStatus.artistCount === 0
+    || tagCatalogStatus.groupCount === 0;
 
   useEffect(() => {
     if (search.activeSuggestion !== null && search.activeSuggestion >= visibleSuggestions.length) {
@@ -99,10 +112,10 @@ export function ViewHeader({
     if (view !== "explore" || composing.current || !search.suggestionsOpen) return;
     const raw = activeSearchToken(search.draft, selection.start, selection.end).value.replace(/^-/, "");
     const kind = searchTokenKind(raw);
-    if (kind && !["tag", "female", "male"].includes(kind)) { onTagSuggestionQuery("", undefined); return; }
+    if (kind && !isSuggestionNamespace(kind)) { onTagSuggestionQuery("", undefined); return; }
     const value = (kind ? raw.slice(raw.indexOf(":") + 1) : raw).trim();
     if (value.replace(/[\s_]/g, "").length < 2) { onTagSuggestionQuery("", undefined); return; }
-    const namespace = kind === "tag" || kind === "female" || kind === "male" ? kind : undefined;
+    const namespace = isSuggestionNamespace(kind) ? kind : undefined;
     const timer = window.setTimeout(() => onTagSuggestionQuery(value, namespace), 100);
     return () => window.clearTimeout(timer);
   }, [onTagSuggestionQuery, search.draft, search.suggestionsOpen, selection.end, selection.start, tagCatalogRevision, view]);
@@ -265,18 +278,20 @@ export function ViewHeader({
         type="button"
         className={`icon-button tag-catalog-refresh${tagCatalogRefreshing ? " is-refreshing" : ""}`}
         title={tagCatalogRefreshing
-          ? "모든 태그 최신화 중 · Hitomi 태그 목록을 가져오는 중"
-          : tagCatalogStatus?.entryCount
-            ? `모든 태그 최신화 · ${tagCatalogStatus.entryCount.toLocaleString()}개`
-            : "모든 태그 최신화 · 태그 데이터 없음"}
-        aria-label={tagCatalogRefreshing ? "모든 태그 최신화 중" : "모든 태그 최신화"}
+          ? "검색 자동완성 최신화 중 · Hitomi 태그·작가·그룹 목록을 가져오는 중"
+          : tagCatalogStatus?.entryCount && !catalogIncomplete
+            ? `검색 자동완성 최신화 · ${tagCatalogStatus.entryCount.toLocaleString()}개`
+            : tagCatalogStatus?.entryCount
+              ? "검색 자동완성 최신화 · 작가·그룹 데이터 없음"
+              : "검색 자동완성 최신화 · 데이터 없음"}
+        aria-label={tagCatalogRefreshing ? "검색 자동완성 최신화 중" : "검색 자동완성 최신화"}
         aria-busy={tagCatalogRefreshing || undefined}
         disabled={tagCatalogRefreshing}
         onClick={onTagCatalogRefresh}
       >
         {tagCatalogRefreshing ? <span className="spinner catalog-refresh-spinner" aria-hidden="true" /> : <FluentIcon glyph="\uE72C" />}
-        {tagCatalogRefreshing ? <span className="sr-only">Hitomi 태그 목록을 최신화하는 중</span> : null}
-        {!tagCatalogStatus?.entryCount ? <span className="catalog-warning" aria-hidden="true">!</span> : null}
+        {tagCatalogRefreshing ? <span className="sr-only">Hitomi 태그·작가·그룹 목록을 최신화하는 중</span> : null}
+        {catalogIncomplete ? <span className="catalog-warning" aria-hidden="true">!</span> : null}
       </button>
       <button
         type="button"
@@ -289,6 +304,18 @@ export function ViewHeader({
       >
         <FluentIcon glyph="\uE9D9" />
         {activityCount > 0 ? <span className="activity-count">{activityCount}</span> : null}
+      </button>
+      <button
+        type="button"
+        className={`icon-button${privacyMode ? " is-active" : ""}`}
+        title={privacyMode ? "개인정보 보호 모드 끄기" : "개인정보 보호 모드 켜기"}
+        aria-label="개인정보 보호 모드"
+        aria-pressed={privacyMode}
+        aria-busy={privacyModePending || undefined}
+        disabled={privacyModePending}
+        onClick={onPrivacyModeToggle}
+      >
+        <FluentIcon glyph="\uE890" />
       </button>
       <button type="button" className="icon-button" title="설정" aria-label="설정" onClick={onSettings}>
         <FluentIcon glyph="\uE713" />

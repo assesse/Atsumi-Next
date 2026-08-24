@@ -144,6 +144,12 @@ pub trait ArtifactStore: Send + Sync {
         bundle: &ArtifactBundle,
     ) -> Result<PathBuf, DownloadPipelineError>;
 
+    fn artifact_directory_path(
+        &self,
+        root: &Path,
+        relative_directory: &ArtifactRelativePath,
+    ) -> Result<PathBuf, DownloadPipelineError>;
+
     fn open_with_default_viewer(&self, path: &Path) -> Result<(), DownloadPipelineError>;
 
     fn move_managed_directory(

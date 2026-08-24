@@ -1,10 +1,10 @@
 # API Contract V2
 
-현재 실제 runtime과 schema v15~v20 안정화까지 구현된 command와 event 형식을 이 문서의 기준 revision으로 사용한다. DB schema는 20, manifest schema와 HashProfile은 1이다.
+현재 실제 runtime과 additive schema v24까지 구현된 command와 event 형식을 이 문서의 기준 revision으로 사용한다. DB schema는 24, manifest schema와 HashProfile은 1이다.
 
 ## Tag catalog
 
-`tag_catalog_status`, `tag_catalog_refresh`, `tag_suggestions_search`는 SQLite에 저장된 tag/female/male catalog를 사용한다. 최신화는 고정 allowlist의 Hitomi alltags-123/a-z 27페이지를 순차 처리하며, 입력 중 source network 요청은 만들지 않는다.
+`tag_catalog_status`, `tag_catalog_refresh`, `tag_suggestions_search`는 SQLite에 저장된 artist/group/tag/female/male 자동완성 catalog를 사용한다. 최신화는 고정 allowlist의 Hitomi allartists/allgroups/alltags `123`/`a`~`z` 총 81페이지를 기존 공용 HTTP scheduler로 처리하고 하나의 transaction에서 교체한다. 일부 source가 실패하면 이전 catalog 전체를 보존하며, 입력 중에는 source network 요청을 만들지 않는다. `artist:`와 `group:` prefix는 해당 namespace만 조회하고 prefix 없는 입력은 다섯 namespace를 함께 조회한다.
 
 ## 공통 규칙
 
@@ -56,17 +56,16 @@ type ApiError = {
 | `duplicate_review_get` | `{ candidateId }` | `DuplicateReview` | 예 |
 | `duplicate_decision_apply` | `{ request: DuplicateDecisionRequest }` | `DuplicateReview` | candidate revision CAS |
 | `internal_duplicate_snapshot` | 없음 | `InternalDuplicateSnapshot` | 예 |
-| `internal_duplicate_scan_start` | 없음 | `InternalScanRun` | 실행 중인 run 재사용 |
+| `internal_duplicate_scan_start` | `{ request: { entryIds: string[] } }` | `InternalScanRun` | 선택한 verified entry만 검사; 빈 배열 금지, 다른 선택 run은 `OPERATION_ACTIVE` |
 | `internal_duplicate_scan_cancel` | 없음 | `InternalScanRun` | 실행 중 run에 한 번 적용 |
 | `internal_duplicate_review_get` | `{ entryId }` | `InternalDuplicateReview` | 예 |
 | `internal_removal_plan` | `{ request: InternalRemovalPlanRequest }` | `InternalRemovalPlan` | group revision·현재 page snapshot 고정 |
 | `internal_removal_apply` | `{ request: InternalRemovalApplyRequest }` | `InternalRemovalResult` | prepared plan 한 번 적용 |
 | `internal_removal_undo` | `{ request: InternalRemovalUndoRequest }` | `InternalRemovalResult` | quarantined record 한 번 복원 |
 
-`InternalScanRun`은 `algorithmVersion`, `skippedArtifacts`, `skippedPages`를 포함한다. `InternalDuplicateSnapshot.skips`에는 page-limit으로 제외된 artifact의 entryId, galleryId, title, pageCount, reason(`page_limit`)이 들어간다. algorithm v3는 N-way monotonic scene rows와 optional `editionTrackId`/`editionTrackOrdinal`을 함께 반환한다. 다중 행 block은 track 전체를 선택해 기존 `InternalRemovalSelection[]`으로 변환하며, track page가 없는 row는 selection에서 제외한다. legacy/standalone exact row는 track field가 null/생략된 기존 개별 선택 계약을 유지한다. 500페이지 이상 artifact는 내부 검사에만 포함하지 않는다.
+`InternalDuplicateScanRequest.entryIds`는 Downloads에서 선택한 canonical download entry ID이며 1~200개 unique 값만 허용한다. 요청 대상 하나라도 verified complete artifact가 아니면 run을 만들기 전에 전체 요청을 실패시키며, 빈 배열을 전체 검사로 해석하지 않는다. 완료 시 과거 group 해제 범위도 실제 검사한 gallery로 한정해 선택하지 않은 앨범의 검토 결과를 보존한다. `InternalScanRun`은 `algorithmVersion`, `skippedArtifacts`, `skippedPages`를 포함한다. `InternalDuplicateSnapshot.skips`에는 page-limit으로 제외된 artifact의 entryId, galleryId, title, pageCount, reason(`page_limit`)이 들어간다. algorithm v3는 N-way monotonic scene rows와 optional `editionTrackId`/`editionTrackOrdinal`을 함께 반환한다. 다중 행 block은 track 전체를 선택해 기존 `InternalRemovalSelection[]`으로 변환하며, track page가 없는 row는 selection에서 제외한다. legacy/standalone exact row는 track field가 null/생략된 기존 개별 선택 계약을 유지한다. 500페이지 이상 artifact는 내부 검사에만 포함하지 않는다.
 | `download_queue_add` | `{ galleries: GalleryId[], requestId }` | `DownloadEntry[]` | requestId + active gallery 기반 |
 | `download_entries_list` | `DownloadListRequest` | `DownloadPage` | 예 |
-| `download_active_count` | 없음 | `number` | 예 |
 | `download_retry` | `{ entryIds }` | `JobRef[]` | 현재 active job 재사용 |
 | `download_cancel` | `{ entryIds }` | `DownloadEntry[]` | 예 |
 | `download_quarantine` | `{ entryIds, reason }` | `DownloadEntry[]` | active quarantine record로 중복 방지 |
@@ -78,11 +77,17 @@ type ApiError = {
 | `thumbnail_stats` | 없음 | `ThumbnailWorkerStats` | 예 |
 | `thumbnail_cache_clear` | 없음 | `ThumbnailCacheClearResult` | 예; 완료 cache만 제거 |
 | `artifact_open_first` | `{ entryId }` | `null` | 검증 snapshot 기반 |
+| `artifact_open_folder` | `{ entryId }` | `null` | DB에 예약된 immutable artifact directory를 root-bound 검증한 뒤 Windows Explorer로 열기 |
 | `app_reconcile` | 없음 | `ReconcileReport` | pending saga와 interrupted job 재사용 |
 | `exploration_data_reset` | `{ request: { confirmation: "RESET_EXPLORATION_DATA" } }` | `ExplorationDataResetResult` | 확인 literal + 단일 transaction |
 | `folder_name_template_preview` | `{ template }` | `string` | 실제 artifact planner의 sample 결과 |
 | `app_minimize_to_tray` | 없음 | `null` | 예 |
-| `app_quit` | 없음 | `null` | shutdown gate 기반 |
+| `app_active_work_snapshot` | 없음 | `AppActiveWorkSnapshot` | 읽기 전용; 종료 경고 대상 네 종류를 backend에서 집계 |
+| `app_quit` | `{ request: AppQuitRequest }` | `AppQuitResult` | 최신 work set 재검증 + 단일 graceful shutdown |
+
+`AppActiveWorkSnapshot`은 active download entry의 개수와 running 상태인 Auto Find, 작품 중복 검사, 내부 중복 검사 run의 ID·진행 요약을 반환한다. `workSetFingerprint`는 정렬한 active download entry ID 집합과 세 run ID만으로 backend가 만든다. 진행률, 후보 수, 조회 시각은 fingerprint에 포함하지 않으므로 같은 작업의 진행률 변화는 재확인 사유가 아니지만 작업의 시작·완료·취소와 active download 집합 변화는 fingerprint를 바꾼다.
+
+`AppQuitRequest`는 `expectedWorkSetFingerprint`, `confirmActiveWork`, 선택적 `forceWhenStatusUnknown`을 포함한다. backend는 command 진입 직후 최신 snapshot을 다시 만든다. work set이 달라졌거나 active work 확인이 빠졌으면 `accepted: false`와 `active_work_changed` 또는 `active_work_confirmation_required`, 최신 snapshot을 반환하며 shutdown을 시작하지 않는다. 상태 조회를 연속으로 확인하지 못한 뒤 사용자가 별도의 `상태 확인 없이 종료`를 선택한 경우에만 `forceWhenStatusUnknown`을 허용하며, 이 경로도 process kill이 아니라 기존 supervisor cancel+join을 사용한다. 검색·hydrate·thumbnail·Detail media처럼 짧고 재생성 가능한 요청은 이 종료 경고 범위 밖이다.
 
 ## Event
 
@@ -95,6 +100,7 @@ type ApiError = {
 | `auto-find:changed` | Auto Find run state, progress, candidate count와 revision |
 | `duplicate:changed` | 작품 중복 scan state, hash/pair progress, candidate count와 revision |
 | `internal-duplicate:changed` | 내부 페이지 scan state, artifact/page progress, group count와 revision |
+| `app:exit-requested` | `{ source: "window_close" \| "tray_menu" }`; 동일 종료 확인 dialog를 연다 |
 
 이벤트가 유실돼도 `list/get` command로 현재 상태를 다시 구성할 수 있어야 한다.
 
@@ -112,12 +118,15 @@ type SettingsSnapshot = {
   cacheLimitGb: number;
   concurrentImageRequests: number;
   requestStartIntervalMs: number;
+  privacyMode: boolean;
 };
 ```
 
 `settings_update`는 `expectedRevision` CAS를 사용한다. Windows의 `downloadRoot`는 사람이 읽고 편집하는 drive/UNC 형식이며 well-formed `\\?\D:\...`와 `\\?\UNC\...`만 표시 경계에서 일반 형식으로 바꾼다. device path나 malformed prefix는 변환하지 않는다. filesystem containment는 별도로 canonical path를 사용하고 기존 artifact `root_snapshot`은 표시 정규화의 대상이 아니다. `folderNameTemplate`과 `autoFindHistoryMode`의 변경은 새 artifact/새 Auto Find run부터 적용하고 이미 예약된 artifact path나 실행 중 run을 재해석하지 않는다.
 
 `relatedPreviewWidth`는 Floating Detail의 Related galleries cover만 조절하며 Explore·Downloads의 `previewWidth`와 독립적이다. `cacheLimitGb`는 기존 settings row 호환을 위해 transport에 남아 있지만 현재 memory-only thumbnail coordinator의 64MiB bound를 바꾸지 않는다. 설정 화면은 효력이 없는 용량 slider를 노출하지 않고, 실제 동작하는 `thumbnail_cache_clear`만 제공한다.
+
+`privacyMode`는 SQLite에 저장되는 시각적 보호 설정이다. 활성화하면 Explore·Downloads·Auto Find·Floating Detail·Related·중복 Review의 preview media 위에 pointer interaction을 가로채지 않는 불투명/blur layer를 적용한다. 이미지 요청·cache와 language/icon UI는 변경하지 않는다.
 
 ## Maintenance
 
@@ -312,6 +321,7 @@ type DownloadState =
 - 같은 `requestId`를 다른 ID 집합에 재사용하면 `IDEMPOTENCY_CONFLICT`를 반환한다.
 - 새 `requestId`라도 같은 gallery가 `queued`, `resolving_metadata`, `downloading`, `hashing`, `verifying`, `retry_wait` 중 하나이면 기존 active entry를 재사용한다.
 - single-instance를 획득한 앱 시작 시 위 active 상태로 남은 job과 entry는 한 transaction에서 `interrupted`로 전환한다. download root가 유효하면 DB·manifest·파일 reconcile 뒤 같은 entry/job의 새 attempt로 자동 resume하며, verified page checkpoint는 다시 받지 않는다.
+- 재개 중 final/`.part` 또는 checkpoint가 모호하면 파일을 `.atsumi-recovery/conflicts`에 보존하고 entry/job을 `failed` + `RECOVERY_CONFLICT`로 종료한다. 이 상태는 startup에서 자동 재개하지 않지만 `download_retry`로 명시적 새 attempt를 만들 수 있다. 과거 build의 target 없는 `review_required` 행은 startup transaction에서 같은 실패 상태로 정규화하며 유효한 `reviewKind`/`reviewId` 판정은 보존한다.
 - `download_entries_list`의 `query`는 UTF-8 기준 최대 500 bytes이며 현재 `entryId`와 `galleryId`에만 적용한다. 결과는 `galleryId`, `entryId` 오름차순으로 고정한다.
 
 ### Retry와 cancel
@@ -341,7 +351,7 @@ type ThumbnailRequest = {
 - 완료는 `thumbnail:ready` event로 전달한다. 메모리 cache hit에서는 event가 command 응답보다 먼저 올 수 있으므로 frontend transport는 requestId별 미매칭 event를 잠시 보관한다.
 - WebView decode 실패는 `thumbnail_invalidate`로 해당 key의 success/negative cache를 비운 뒤 다시 해석할 수 있다.
 - frontend는 원본 URL, retry, cache eviction을 직접 결정하지 않는다. Tauri는 실제 HTTP resolver를, 브라우저 검토 모드는 결정론적 fixture resolver를 같은 port 뒤에서 사용한다. thumbnail cache는 재생성 가능한 bounded memory cache이며 영속 파일은 download artifact 경계가 소유한다.
-- production resolver는 검색·download와 같은 pooled transport를 공유한다. HTTP dispatch는 `critical > visible > prefetch > download`, 전역·host별 동시성, 최소 시작 간격, cancellation, bounded retry, `Retry-After`, 429/503 cooldown을 적용한다.
+- production resolver는 검색·download와 같은 pooled transport를 공유한다. HTTP dispatch는 `critical > visible > download > prefetch`이며 실제 저장 작업이 화면 밖 speculative prefetch에 밀리지 않는다. 전역·host별 동시성, 최소 시작 간격, cancellation, bounded retry, `Retry-After`, 429/503 cooldown을 적용한다.
 - thumbnail failure code는 `cancelled`, `notFound`, `candidatesExhausted`, `responseInvalid`, `decodeFailed`, `temporarilyUnavailable`, `unauthorized`, `invalidData`, `resolver`, `coordinatorClosed` 중 하나다. frontend는 backend가 전달한 `retryable`을 보존하고 문자열 prefix로 retry를 추측하지 않는다.
 
 `thumbnail_cache_clear`는 완료된 backend success/negative cache와 구독자가 없는 frontend retention만 비운다. 진행 중인 work와 현재 화면에서 사용 중인 asset은 취소·회수하지 않는다. 결과는 제거된 success entry/byte와 negative entry 수를 반환한다.
@@ -403,7 +413,9 @@ type ExplorationDataResetResult = {
 
 ## Floating Detail media contract
 
+- 다운로드 entry가 있는 gallery에는 다운로드 action 옆에 저장 폴더 action을 표시한다. `artifact_open_folder`는 frontend에 경로를 반환하지 않으며, persisted `root_snapshot`과 `relative_directory`를 canonicalize한 결과가 download root 내부의 실제 directory일 때만 OS shell에 전달한다. queue 직후 metadata 준비 전에는 임의 directory를 만들지 않고 typed missing 오류를 반환한다.
 - `GalleryDetail.pageDimensions[]` carries one-based `sourcePage` metadata dimensions. Invalid or duplicate source pages are omitted before the UI projection; preview direction is chosen from at most the first eight valid metadata records, never decoded thumbnail results.
 - Detail page windows are fixed: two columns render at most 8 pages, three columns at most 9. Related-card height, viewport size, DPI, decoded image size and ResizeObserver output cannot increase the request window.
-- `detail_original_request({ galleryId, sourcePage: 1 })` starts the one active detail-original request. `detail_original_cancel` and `detail_original_release` cancel/remove it by request ID. `detail-original:ready` returns an opaque `mediaUrl`, MIME type and dimensions; it never contains original image bytes, base64, a source URL, or a filesystem path.
-- The backend reuses the live source HTTP scheduler and full-page candidate validation, writes the accepted page atomically in the app-owned transient `detail-original` directory, and exposes it only through its request-ID custom protocol. Release, cancellation and next startup remove those transient files. This data is not part of the thumbnail success cache.
+- `detail_original_prepare({ requestId, galleryId, sourcePage: 1 })` is terminal: it returns either one opaque prepared media record or a typed failure. The frontend creates the canonical UUID `requestId`; only source page 1 is accepted. `detail_original_dispose({ requestId })` is idempotent and both cancels an in-flight prepare and deletes a prepared transient file. There is no success event, readiness listener, or separate cancel/release command.
+- On Windows and Android the prepared URL is `http://detail-original.localhost/{requestId}`; other platforms retain `detail-original://localhost/{requestId}`. The async protocol accepts only GET and one canonical UUID path segment, rejects query/traversal/unknown IDs, and serves `no-store`/`nosniff` typed bytes from the app-owned directory only. Neither the response nor any event contains original bytes, base64, a source URL, or a filesystem path.
+- The backend reuses the live source HTTP scheduler and full-page candidate validation, writes the accepted page atomically in the app-owned transient `detail-original` directory, and removes it after dispose, cancellation, failure, or next startup. Original bytes never enter the thumbnail success cache.

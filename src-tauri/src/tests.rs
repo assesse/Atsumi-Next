@@ -94,7 +94,7 @@ fn primary_group_migration_preserves_existing_gallery_rows() {
     let report = MigrationRunner::run(&mut connection).expect("apply v4 migration");
     assert_eq!(
         report.applied_versions,
-        vec![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+        vec![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     );
     let stored: (String, Option<String>) = connection
         .query_row(
@@ -176,7 +176,7 @@ fn lifecycle_migration_preserves_v6_download_graph_and_enables_cancelled() {
     let report = MigrationRunner::run(&mut connection).expect("apply lifecycle migration");
     assert_eq!(
         report.applied_versions,
-        vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+        vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     );
     let lifecycle: (i64, String, Option<String>, i64) = connection
         .query_row(
@@ -284,7 +284,7 @@ fn visible_metadata_migration_defaults_existing_auto_find_candidates() {
     let report = MigrationRunner::run(&mut connection).expect("apply visible metadata migration");
     assert_eq!(
         report.applied_versions,
-        vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+        vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     );
     let metadata: (String, String) = connection
         .query_row(
@@ -345,13 +345,13 @@ fn settings_constraint_migration_clamps_legacy_values() {
     let report = MigrationRunner::run(&mut connection).expect("upgrade legacy schema");
     assert_eq!(
         report.applied_versions,
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     );
-    let tightened: (i64, i64, i64, i64, i64, i64) = connection
+    let tightened: (i64, i64, i64, i64, i64, i64, i64) = connection
         .query_row(
             r#"
                 SELECT revision, max_columns, preview_width, cache_limit_gb,
-                       concurrent_image_requests, request_start_interval_ms
+                       concurrent_image_requests, request_start_interval_ms, privacy_mode
                 FROM settings
             "#,
             [],
@@ -363,11 +363,12 @@ fn settings_constraint_migration_clamps_legacy_values() {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .expect("read tightened settings");
-    assert_eq!(tightened, (7, 4, 360, 30, 30, 5_000));
+    assert_eq!(tightened, (7, 4, 360, 30, 30, 5_000, 0));
     assert!(connection
         .execute("UPDATE settings SET max_columns = 5", [])
         .is_err());
@@ -388,6 +389,7 @@ fn default_settings_match_the_approved_foundation_values() {
             "maxColumns": 3,
             "previewWidth": 220,
             "relatedPreviewWidth": 240,
+            "privacyMode": false,
             "cacheLimitGb": 10,
             "concurrentImageRequests": 5,
             "requestStartIntervalMs": 25,
@@ -531,6 +533,7 @@ fn settings_validation_matches_the_approved_ui_ranges() {
         max_columns: 4,
         preview_width: 360,
         related_preview_width: 320,
+        privacy_mode: false,
         cache_limit_gb: 30,
         concurrent_image_requests: 30,
         request_start_interval_ms: 5_000,
@@ -599,6 +602,7 @@ fn settings_update_rejects_a_stale_revision() {
         .settings_update(
             SettingsPatch {
                 max_columns: Some(4),
+                privacy_mode: Some(true),
                 ..SettingsPatch::default()
             },
             0,
@@ -606,6 +610,7 @@ fn settings_update_rejects_a_stale_revision() {
         .expect("update current settings");
     assert_eq!(updated.revision, 1);
     assert_eq!(updated.max_columns, 4);
+    assert!(updated.privacy_mode);
 
     let error = service
         .settings_update(
@@ -625,13 +630,9 @@ fn settings_update_rejects_a_stale_revision() {
             actual: 1,
         }
     ));
-    assert_eq!(
-        service
-            .settings_get()
-            .expect("reload settings")
-            .preview_width,
-        220
-    );
+    let persisted = service.settings_get().expect("reload settings");
+    assert_eq!(persisted.preview_width, 220);
+    assert!(persisted.privacy_mode);
 }
 
 #[test]
@@ -786,6 +787,7 @@ fn download_state_transitions_are_centralized_and_do_not_fake_cancellation() {
     assert!(JobState::Queued.allows_transition_to(JobState::ResolvingMetadata));
     assert!(JobState::Downloading.allows_transition_to(JobState::Cancelled));
     assert!(JobState::Interrupted.allows_transition_to(JobState::Queued));
+    assert!(JobState::Interrupted.allows_transition_to(JobState::Failed));
     assert!(JobState::Cancelled.allows_transition_to(JobState::Queued));
     assert!(!JobState::Completed.allows_transition_to(JobState::Cancelled));
     assert!(!JobState::Cancelled.allows_transition_to(JobState::Interrupted));
@@ -1241,6 +1243,15 @@ fn download_queue_is_batch_idempotent_and_reuses_active_gallery_entries() {
             .expect("count active downloads"),
         2
     );
+    let active_entry_ids = service
+        .download_active_entry_ids()
+        .expect("list active download identities");
+    let mut expected_active_entry_ids = first
+        .iter()
+        .map(|entry| entry.entry_id.clone())
+        .collect::<Vec<_>>();
+    expected_active_entry_ids.sort();
+    assert_eq!(active_entry_ids, expected_active_entry_ids);
 
     let replay = service
         .download_queue_add(vec![42, 7], " queue-batch-1 ".into())
@@ -1348,6 +1359,60 @@ fn download_queue_is_batch_idempotent_and_reuses_active_gallery_entries() {
         ApplicationError::Validation(ref error)
             if error.field == "query" && error.message == "must be at most 500 bytes"
     ));
+}
+
+#[test]
+fn active_download_identities_use_the_exact_interruptible_state_set() {
+    let repository = Arc::new(SqliteRepository::open_in_memory().expect("create repository"));
+    let service =
+        ApplicationService::new(repository.clone()).with_download_repository(repository.clone());
+    let entries = service
+        .download_queue_add((1..=11).collect(), "active-state-coverage".into())
+        .expect("queue state coverage fixtures")
+        .entries;
+    let states = [
+        "queued",
+        "resolving_metadata",
+        "downloading",
+        "hashing",
+        "verifying",
+        "retry_wait",
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted",
+        "review_required",
+    ];
+    {
+        let connection = repository.connection().expect("open fixture connection");
+        for (entry, state) in entries.iter().zip(states) {
+            connection
+                .execute(
+                    "UPDATE download_entries SET state = ?1 WHERE entry_id = ?2",
+                    params![state, entry.entry_id.as_str()],
+                )
+                .expect("seed canonical download state");
+        }
+    }
+
+    let mut expected = entries
+        .iter()
+        .take(6)
+        .map(|entry| entry.entry_id.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(
+        service
+            .download_active_entry_ids()
+            .expect("read active download identities"),
+        expected
+    );
+    assert_eq!(
+        service
+            .download_active_count()
+            .expect("count active downloads"),
+        6
+    );
 }
 
 #[test]
@@ -1526,6 +1591,152 @@ fn volatile_download_state_recovers_as_interrupted_after_reopen() {
         )
         .expect("count interrupted jobs");
     assert_eq!(interrupted_jobs, 1);
+}
+
+#[test]
+fn targetless_legacy_artifact_review_recovers_as_a_listable_failure() {
+    let temporary = tempfile::tempdir().expect("create temporary directory");
+    let database_path = temporary.path().join("artifact-review-recovery.sqlite3");
+    let (original_entry_id, valid_review_entry_id) = {
+        let repository =
+            Arc::new(SqliteRepository::open(&database_path).expect("create persistent repository"));
+        let service =
+            ApplicationService::new(repository.clone()).with_download_repository(repository);
+        let entries = service
+            .download_queue_add(
+                vec![4_136_275, 4_113_714],
+                "artifact-review-recovery".into(),
+            )
+            .expect("queue persistent gallery")
+            .entries;
+        (entries[0].entry_id.clone(), entries[1].entry_id.clone())
+    };
+
+    let connection = Connection::open(&database_path).expect("open persisted database directly");
+    connection
+        .execute(
+            r#"
+                UPDATE download_entries
+                SET state = 'review_required', review_kind = NULL, review_id = NULL
+                WHERE entry_id = ?1
+            "#,
+            [original_entry_id.as_str()],
+        )
+        .expect("simulate legacy targetless artifact review entry");
+    connection
+        .execute(
+            r#"
+                UPDATE download_jobs
+                SET state = 'review_required',
+                    last_error_code = 'RECOVERY_CONFLICT',
+                    last_error_message = 'Ambiguous page files were moved aside for review',
+                    last_error_retryable = NULL
+                WHERE entry_id = ?1
+            "#,
+            [original_entry_id.as_str()],
+        )
+        .expect("simulate legacy targetless artifact review job");
+    connection
+        .execute(
+            r#"
+                UPDATE download_entries
+                SET state = 'review_required',
+                    review_kind = 'gallery_duplicate',
+                    review_id = 'candidate-preserved'
+                WHERE entry_id = ?1
+            "#,
+            [valid_review_entry_id.as_str()],
+        )
+        .expect("seed a valid user review entry");
+    connection
+        .execute(
+            "UPDATE download_jobs SET state = 'review_required' WHERE entry_id = ?1",
+            [valid_review_entry_id.as_str()],
+        )
+        .expect("seed a valid user review job");
+    drop(connection);
+
+    let repository = Arc::new(SqliteRepository::open(&database_path).expect("reopen repository"));
+    let service =
+        ApplicationService::new(repository.clone()).with_download_repository(repository.clone());
+    assert!(matches!(
+        service.download_entries_list(DownloadListRequest {
+            state: None,
+            query: None,
+            page: 1,
+            page_size: 20,
+        }),
+        Err(ApplicationError::Repository(RepositoryError::Corrupt(_)))
+    ));
+
+    assert_eq!(
+        service
+            .download_recover_interrupted()
+            .expect("repair targetless artifact review during startup recovery"),
+        1
+    );
+    let page = service
+        .download_entries_list(DownloadListRequest {
+            state: None,
+            query: None,
+            page: 1,
+            page_size: 20,
+        })
+        .expect("the repaired entry remains visible");
+    assert_eq!(page.total_items, 2);
+    let repaired = page
+        .entries
+        .iter()
+        .find(|entry| entry.entry_id == original_entry_id)
+        .expect("repaired entry remains visible");
+    assert_eq!(repaired.entry_id, original_entry_id);
+    assert_eq!(repaired.state, JobState::Failed);
+    assert_eq!(repaired.error_code.as_deref(), Some("RECOVERY_CONFLICT"));
+    assert_eq!(repaired.error_retryable, Some(false));
+    assert_eq!(repaired.review_kind, None);
+    assert_eq!(repaired.review_id, None);
+    let preserved = page
+        .entries
+        .iter()
+        .find(|entry| entry.entry_id == valid_review_entry_id)
+        .expect("valid user review remains visible");
+    assert_eq!(preserved.state, JobState::ReviewRequired);
+    assert_eq!(
+        preserved.review_kind,
+        Some(crate::domain::DownloadReviewKind::GalleryDuplicate)
+    );
+    assert_eq!(preserved.review_id.as_deref(), Some("candidate-preserved"));
+    assert_eq!(
+        service
+            .download_recover_interrupted()
+            .expect("repeated recovery is idempotent"),
+        0
+    );
+
+    drop(service);
+    drop(repository);
+    let connection = Connection::open(&database_path).expect("inspect repaired database");
+    let attempt: (String, Option<String>, Option<i64>) = connection
+        .query_row(
+            r#"
+                SELECT outcome_state, error_code, error_retryable
+                FROM download_attempts
+                WHERE job_id = (
+                    SELECT job_id FROM download_jobs WHERE entry_id = ?1
+                )
+            "#,
+            [original_entry_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("inspect repaired attempt");
+    assert_eq!(
+        attempt,
+        ("failed".into(), Some("RECOVERY_CONFLICT".into()), Some(0))
+    );
+    let quick_check: String = connection
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .expect("quick check repaired database");
+    assert_eq!(quick_check, "ok");
 }
 
 #[test]

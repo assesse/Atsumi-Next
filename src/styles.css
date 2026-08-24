@@ -288,7 +288,7 @@ select:focus-visible {
   position: relative;
   z-index: 15;
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) repeat(5, 48px);
+  grid-template-columns: minmax(280px, 1fr) repeat(6, 48px);
   align-items: center;
   gap: 10px;
 }
@@ -1662,14 +1662,17 @@ h2 {
   overflow: visible;
 }
 
-.preview-grid-placeholder {
+.detail-preview-loading {
+  flex: 1 1 220px;
   display: grid;
   min-height: 220px;
   place-items: center;
-  color: var(--muted);
-  background: var(--surface-soft);
-  border: 1px solid var(--line);
-  border-radius: 5px;
+}
+
+.detail-preview-loading .spinner {
+  width: 28px;
+  height: 28px;
+  border-width: 3px;
 }
 
 .preview-thumb {
@@ -1720,9 +1723,15 @@ h2 {
 
 .detail-title-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 44px;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: start;
+}
+
+.detail-title-actions {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
 }
 
 .detail-title-row h2 {
@@ -1946,10 +1955,9 @@ dialog::backdrop {
   border-color: var(--primary-strong);
 }
 
-.exit-download-status {
-  display: flex;
-  align-items: center;
-  gap: 9px;
+.exit-work-status {
+  display: grid;
+  gap: 8px;
   margin: 0;
   padding: 10px 12px;
   color: var(--muted);
@@ -1959,24 +1967,39 @@ dialog::backdrop {
   font-size: 13px;
 }
 
-.exit-download-status.is-working {
+.exit-work-status p {
+  margin: 0;
+}
+
+.exit-work-status.is-working {
   color: #effaff;
   background: #123747;
   border-color: #75cfe9;
-  font-weight: 650;
 }
 
-.exit-download-status.is-working::before,
-.exit-download-status.is-error::before {
-  width: 8px;
-  height: 8px;
-  content: "";
-  background: currentColor;
-  border-radius: 50%;
-  box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 16%, transparent);
+.exit-work-heading {
+  font-weight: 700;
 }
 
-.exit-download-status.is-error {
+.exit-work-list {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.exit-work-list li {
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.exit-work-notice {
+  color: color-mix(in srgb, currentColor 82%, transparent);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.exit-work-status.is-error {
   color: #ffe8e8;
   background: #482428;
   border-color: #e89090;
@@ -2099,6 +2122,22 @@ dialog::backdrop {
   padding: 0 10px;
   border: 1px solid var(--line-strong);
   border-radius: 4px;
+}
+
+.setting-row .setting-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-self: end;
+  gap: 9px;
+  min-height: 38px;
+  cursor: pointer;
+}
+
+.setting-row .setting-checkbox input {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  accent-color: var(--primary);
 }
 
 .range-wrap {
@@ -3329,6 +3368,41 @@ dialog::backdrop {
   .skeleton-media,
   .skeleton-line,
   .skeleton-tags i { animation: none; }
+}
+
+/*
+ * Visual privacy is deliberately a paint-only layer: thumbnails continue to
+ * use the global coordinator, while flags, state icons, progress, page badges,
+ * and review controls stay above the overlay and remain interactive.
+ */
+[data-privacy-mode="on"] .gallery-thumbnail,
+[data-privacy-mode="on"] .detail-hero {
+  isolation: isolate;
+}
+
+[data-privacy-mode="on"] .gallery-thumbnail::after,
+[data-privacy-mode="on"] .detail-hero::after {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  content: "";
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(231, 238, 241, 0.035) 0 9px,
+      rgba(5, 10, 13, 0.08) 9px 18px
+    ),
+    rgba(5, 11, 15, 0.72);
+  -webkit-backdrop-filter: blur(28px) saturate(0.25);
+  backdrop-filter: blur(28px) saturate(0.25);
+}
+
+[data-privacy-mode="on"] .preview-thumb > span,
+[data-privacy-mode="on"] .pair-image > span,
+[data-privacy-mode="on"] .internal-page-image > span,
+[data-privacy-mode="on"] .internal-page-option > input {
+  z-index: 4;
 }
 
 @media (max-width: 1240px) {

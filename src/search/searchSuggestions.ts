@@ -2,7 +2,7 @@ import type { SearchHistoryEntry, SearchRequest, TagSuggestion } from "../api/co
 import { canonicalSearchToken, searchTokenKind } from "./searchTokens";
 
 export type SearchSuggestion = Readonly<{
-  type: "HISTORY" | "TAG" | "FEMALE" | "MALE";
+  type: "HISTORY" | "ARTIST" | "GROUP" | "TAG" | "FEMALE" | "MALE";
   token: string;
   label: string;
   extra: string;
@@ -37,5 +37,14 @@ export function buildSearchSuggestionCatalog(history: readonly SearchHistoryEntr
 }
 
 export function catalogSuggestion(entry: TagSuggestion): SearchSuggestion {
-  return { type: entry.namespace === "female" ? "FEMALE" : entry.namespace === "male" ? "MALE" : "TAG", token: entry.token, label: readable(entry.name), extra: entry.galleryCount.toLocaleString(), favorite: entry.favorite, galleryCount: entry.galleryCount };
+  const type = entry.namespace === "artist"
+    ? "ARTIST"
+    : entry.namespace === "group"
+      ? "GROUP"
+      : entry.namespace === "female"
+        ? "FEMALE"
+        : entry.namespace === "male"
+          ? "MALE"
+          : "TAG";
+  return { type, token: entry.token, label: readable(entry.name), extra: entry.galleryCount.toLocaleString(), favorite: entry.favorite, galleryCount: entry.galleryCount };
 }

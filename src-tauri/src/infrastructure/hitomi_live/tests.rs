@@ -17,8 +17,8 @@ use crate::{
     source::{
         hitomi::{
             download_full_candidates, galleryinfo_script_url, gg_script_url,
-            parse_galleryinfo_script, parse_gg_routing, webp_thumbnail_candidates, ThumbnailSize,
-            HITOMI_METADATA_ORIGIN,
+            parse_galleryinfo_script, parse_gg_routing, webp_full_candidates,
+            webp_thumbnail_candidates, ThumbnailSize, HITOMI_METADATA_ORIGIN,
         },
         SourceContractError, SourceErrorCode,
     },
@@ -369,6 +369,124 @@ fn thumbnail_falls_back_to_avif_when_webp_derivatives_are_missing() {
 }
 
 #[test]
+fn gallery_page_thumbnail_uses_alternate_full_webp_after_derivatives_miss() {
+    let transport = Arc::new(FakeTransport::default());
+    let metadata = parse_galleryinfo_script(GALLERY_SCRIPT).unwrap();
+    let routing = parse_gg_routing(GG_SCRIPT).unwrap();
+    let page = metadata.pages.first().unwrap();
+    let derivatives = webp_thumbnail_candidates(page, &routing, ThumbnailSize::Large).unwrap();
+    let full_webp = webp_full_candidates(page, &routing).unwrap();
+    let alternate = full_webp
+        .iter()
+        .rev()
+        .find(|candidate| {
+            derivatives
+                .iter()
+                .all(|derivative| derivative.url != candidate.url)
+        })
+        .expect("fixture has an alternate w1/w2 WebP route");
+
+    transport.respond(
+        galleryinfo_script_url(424_242).unwrap(),
+        "text/javascript",
+        GALLERY_SCRIPT.as_bytes().to_vec(),
+    );
+    transport.respond(
+        gg_script_url(),
+        "text/javascript",
+        GG_SCRIPT.as_bytes().to_vec(),
+    );
+    // Every preceding derivative/full route is an implicit deterministic 404
+    // in FakeTransport. Only the final alternate endpoint succeeds.
+    transport.respond(
+        alternate.url.clone(),
+        "image/png",
+        fallback_source_page_png(),
+    );
+    let adapter = HitomiLiveAdapter::with_transport(
+        HitomiLiveConfig {
+            request_start_interval: Duration::ZERO,
+            ..HitomiLiveConfig::default()
+        },
+        transport.clone(),
+    );
+
+    let resolved = adapter
+        .resolve(
+            &ThumbnailKey::gallery_page(424_242, 1).unwrap(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(resolved.content_type, "image/webp");
+    assert_eq!((resolved.width, resolved.height), (768, 384));
+    assert_eq!(
+        image::guess_format(&resolved.bytes).unwrap(),
+        image::ImageFormat::WebP
+    );
+    assert!(transport.was_called(&alternate.url));
+    assert!(derivatives
+        .iter()
+        .all(|candidate| transport.was_called(&candidate.url)));
+    for candidate in full_webp
+        .iter()
+        .filter(|candidate| derivatives.iter().any(|item| item.url == candidate.url))
+    {
+        assert_eq!(
+            transport.call_count(&candidate.url),
+            1,
+            "overlapping primary WebP routes must be deduplicated"
+        );
+    }
+}
+
+#[test]
+fn gallery_cover_does_not_use_alternate_full_webp_routes() {
+    let transport = Arc::new(FakeTransport::default());
+    let metadata = parse_galleryinfo_script(GALLERY_SCRIPT).unwrap();
+    let routing = parse_gg_routing(GG_SCRIPT).unwrap();
+    let page = metadata.pages.first().unwrap();
+    let derivatives = webp_thumbnail_candidates(page, &routing, ThumbnailSize::Large).unwrap();
+    let alternate = webp_full_candidates(page, &routing)
+        .unwrap()
+        .into_iter()
+        .find(|candidate| {
+            derivatives
+                .iter()
+                .all(|derivative| derivative.url != candidate.url)
+        })
+        .expect("fixture has an alternate w1/w2 WebP route");
+
+    transport.respond(
+        galleryinfo_script_url(424_242).unwrap(),
+        "text/javascript",
+        GALLERY_SCRIPT.as_bytes().to_vec(),
+    );
+    transport.respond(
+        gg_script_url(),
+        "text/javascript",
+        GG_SCRIPT.as_bytes().to_vec(),
+    );
+    transport.respond(alternate.url.clone(), "image/png", one_pixel_png());
+    let adapter = HitomiLiveAdapter::with_transport(
+        HitomiLiveConfig {
+            request_start_interval: Duration::ZERO,
+            ..HitomiLiveConfig::default()
+        },
+        transport.clone(),
+    );
+
+    adapter
+        .resolve(
+            &ThumbnailKey::gallery_cover(424_242).unwrap(),
+            &CancellationToken::new(),
+        )
+        .expect_err("cover must not widen into full WebP endpoints");
+
+    assert!(!transport.was_called(&alternate.url));
+}
+
+#[test]
 fn live_search_contract_covers_paging_filters_popular_and_related_without_network() {
     let transport = Arc::new(FakeTransport::default());
     let origin = HITOMI_METADATA_ORIGIN;
@@ -660,7 +778,7 @@ fn live_gallery_4113714_download_pipeline() {
 }
 
 #[test]
-#[ignore = "opt-in live Hitomi all-tags catalog smoke"]
+#[ignore = "opt-in live Hitomi tag, artist, and group catalog smoke"]
 fn live_tag_catalog_refresh_parses_all_allowlisted_pages() {
     assert_eq!(
         std::env::var("ATSUMI_ALLOW_LIVE_SMOKE").as_deref(),
@@ -671,7 +789,7 @@ fn live_tag_catalog_refresh_parses_all_allowlisted_pages() {
         HitomiLiveAdapter::new(HitomiLiveConfig::default()).expect("construct live adapter");
     let entries = adapter
         .tag_catalog_fetch_all()
-        .expect("fetch and parse all allowlisted tag pages");
+        .expect("fetch and parse all allowlisted catalog pages");
     assert!(entries.len() >= 1_000);
     assert!(entries
         .iter()
@@ -679,11 +797,25 @@ fn live_tag_catalog_refresh_parses_all_allowlisted_pages() {
     assert!(entries
         .iter()
         .any(|entry| entry.canonical_token == "female:ball_sucking"));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.canonical_token.starts_with("artist:")));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.canonical_token.starts_with("group:")));
 }
 
 fn one_pixel_png() -> Vec<u8> {
     let mut bytes = Cursor::new(Vec::new());
     image::DynamicImage::new_rgba8(1, 1)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    bytes.into_inner()
+}
+
+fn fallback_source_page_png() -> Vec<u8> {
+    let mut bytes = Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(1_536, 768)
         .write_to(&mut bytes, image::ImageFormat::Png)
         .unwrap();
     bytes.into_inner()

@@ -233,6 +233,12 @@ impl ApplicationService {
             .map_err(Into::into)
     }
 
+    pub fn download_active_entry_ids(&self) -> Result<Vec<DownloadEntryId>, ApplicationError> {
+        self.download_repository()?
+            .download_active_entry_ids()
+            .map_err(Into::into)
+    }
+
     pub fn download_retry(&self, entry_ids: Vec<String>) -> Result<Vec<JobRef>, ApplicationError> {
         let entry_ids = normalize_entry_ids(entry_ids)?;
         match self.download_repository()?.download_retry(&entry_ids)? {

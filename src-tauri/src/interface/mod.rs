@@ -1,11 +1,15 @@
 mod api;
 pub(crate) mod commands;
 
-pub use api::{ApiAction, ApiError, ApiResult};
+pub use api::{
+    ApiAction, ApiError, ApiResult, AppActiveAutoFindSnapshot, AppActiveDownloadsSnapshot,
+    AppActiveDuplicateScanSnapshot, AppActiveInternalDuplicateScanSnapshot, AppActiveWorkSnapshot,
+    AppQuitRejectionReason, AppQuitRequest, AppQuitResult,
+};
 pub use commands::{
-    app_minimize_to_tray, app_quit, app_reconcile, artifact_open_first, auto_find_cancel,
-    auto_find_exclude, auto_find_refresh, auto_find_snapshot, detail_original_cancel,
-    detail_original_release, detail_original_request, download_active_count, download_cancel,
+    app_active_work_snapshot, app_minimize_to_tray, app_quit, app_reconcile, artifact_open_first,
+    artifact_open_folder, auto_find_cancel, auto_find_exclude, auto_find_refresh,
+    auto_find_snapshot, detail_original_dispose, detail_original_prepare, download_cancel,
     download_entries_list, download_quarantine, download_quarantine_undo, download_queue_add,
     download_retry, duplicate_decision_apply, duplicate_review_get, duplicate_scan_cancel,
     duplicate_scan_start, duplicate_snapshot, exploration_data_reset, favorite_set, favorites_list,

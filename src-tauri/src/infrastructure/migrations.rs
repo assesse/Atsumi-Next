@@ -1332,6 +1332,40 @@ pub const MIGRATIONS: &[Migration] = &[
                 );
         "#,
     },
+    Migration {
+        version: 23,
+        name: "preview_privacy_mode",
+        sql: r#"
+            ALTER TABLE settings
+            ADD COLUMN privacy_mode INTEGER NOT NULL DEFAULT 0
+                CHECK (privacy_mode IN (0, 1));
+        "#,
+    },
+    Migration {
+        version: 24,
+        name: "artist_group_autocomplete_catalog",
+        sql: r#"
+            ALTER TABLE tag_catalog_state
+            ADD COLUMN artist_count INTEGER NOT NULL DEFAULT 0
+                CHECK (artist_count >= 0);
+            ALTER TABLE tag_catalog_state
+            ADD COLUMN group_count INTEGER NOT NULL DEFAULT 0
+                CHECK (group_count >= 0);
+
+            CREATE TABLE metadata_catalog_entries (
+                namespace TEXT NOT NULL CHECK (namespace IN ('artist', 'group')),
+                name TEXT NOT NULL COLLATE NOCASE CHECK (length(trim(name)) BETWEEN 1 AND 200),
+                normalized_name TEXT NOT NULL COLLATE NOCASE CHECK (length(normalized_name) > 0),
+                canonical_token TEXT NOT NULL COLLATE NOCASE CHECK (length(canonical_token) > 0),
+                gallery_count INTEGER NOT NULL CHECK (gallery_count >= 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                PRIMARY KEY (namespace, name),
+                UNIQUE (canonical_token)
+            ) STRICT;
+            CREATE INDEX metadata_catalog_entries_normalized_name
+                ON metadata_catalog_entries(normalized_name);
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1619,7 +1653,7 @@ mod tests {
         let report = MigrationRunner::run(&mut connection).expect("migrate v14 to v15");
         assert_eq!(
             report.applied_versions,
-            vec![15, 16, 17, 18, 19, 20, 21, 22]
+            vec![15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
         );
         let historical_import_tables: i64 = connection
             .query_row(
@@ -1716,9 +1750,9 @@ mod tests {
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
         assert_eq!(
             report.applied_versions,
-            vec![12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+            vec![12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
         );
-        assert_eq!(report.current_version, 22);
+        assert_eq!(report.current_version, 24);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",
@@ -1771,7 +1805,7 @@ mod tests {
         }
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v21 to v22");
-        assert_eq!(report.applied_versions, vec![22]);
+        assert_eq!(report.applied_versions, vec![22, 23, 24]);
         let columns = connection
             .prepare(
                 "SELECT name FROM pragma_table_info('internal_duplicate_group_pages') ORDER BY cid",
@@ -1783,5 +1817,152 @@ mod tests {
             .unwrap();
         assert!(columns.contains(&"edition_track_id".to_string()));
         assert!(columns.contains(&"edition_track_ordinal".to_string()));
+    }
+
+    #[test]
+    fn privacy_mode_migration_is_additive_from_v22() {
+        let mut connection = Connection::open_in_memory().expect("open v22 migration database");
+        connection
+            .execute_batch(
+                r#"
+                    PRAGMA foreign_keys = ON;
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT (
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    ) STRICT;
+                "#,
+            )
+            .unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 22)
+        {
+            connection.execute_batch(migration.sql).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                    params![migration.version, migration.name],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE settings SET max_columns = 4 WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+
+        let report = MigrationRunner::run(&mut connection).expect("migrate v22 to v23");
+        assert_eq!(report.applied_versions, vec![23, 24]);
+        assert_eq!(report.current_version, 24);
+        let settings: (i64, i64) = connection
+            .query_row(
+                "SELECT max_columns, privacy_mode FROM settings WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(settings, (4, 0));
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE settings SET privacy_mode = 1 WHERE singleton = 1",
+                    [],
+                )
+                .unwrap(),
+            1
+        );
+        assert!(connection
+            .execute(
+                "UPDATE settings SET privacy_mode = 2 WHERE singleton = 1",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn artist_group_catalog_migration_is_additive_from_v23() {
+        let mut connection = Connection::open_in_memory().expect("open v23 migration database");
+        connection
+            .execute_batch(
+                r#"
+                    PRAGMA foreign_keys = ON;
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT (
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    ) STRICT;
+                "#,
+            )
+            .unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 23)
+        {
+            connection.execute_batch(migration.sql).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                    params![migration.version, migration.name],
+                )
+                .unwrap();
+        }
+        connection
+            .execute_batch(
+                r#"
+                    INSERT INTO tag_catalog_entries (
+                        namespace, name, normalized_name, canonical_token,
+                        gallery_count, updated_at
+                    ) VALUES (
+                        'tag', 'webtoon', 'webtoon', 'tag:webtoon', 42,
+                        '2026-08-24T00:00:00Z'
+                    );
+                    UPDATE tag_catalog_state
+                       SET revision = 7, entry_count = 1, neutral_count = 1;
+                "#,
+            )
+            .unwrap();
+
+        let report = MigrationRunner::run(&mut connection).expect("migrate v23 to v24");
+        assert_eq!(report.applied_versions, vec![24]);
+        assert_eq!(report.current_version, 24);
+        let preserved: (String, i64, i64, i64) = connection
+            .query_row(
+                r#"SELECT e.canonical_token, s.revision, s.artist_count, s.group_count
+                     FROM tag_catalog_entries e CROSS JOIN tag_catalog_state s
+                    WHERE e.canonical_token = 'tag:webtoon'"#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, ("tag:webtoon".to_owned(), 7, 0, 0));
+        assert_eq!(
+            connection
+                .execute(
+                    r#"INSERT INTO metadata_catalog_entries (
+                         namespace, name, normalized_name, canonical_token,
+                         gallery_count, updated_at
+                       ) VALUES ('artist', 'mizuno tooru', 'mizuno tooru',
+                         'artist:mizuno_tooru', 142, '2026-08-24T00:00:00Z')"#,
+                    [],
+                )
+                .unwrap(),
+            1
+        );
+        assert!(connection
+            .execute(
+                r#"INSERT INTO metadata_catalog_entries (
+                     namespace, name, normalized_name, canonical_token,
+                     gallery_count, updated_at
+                   ) VALUES ('tag', 'invalid', 'invalid', 'tag:invalid', 1,
+                     '2026-08-24T00:00:00Z')"#,
+                [],
+            )
+            .is_err());
     }
 }

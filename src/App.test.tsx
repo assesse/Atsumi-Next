@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { backend } from "./api/backend";
-import type { GalleryPage } from "./api/contracts";
+import type { AppActiveWorkSnapshot, DownloadPage, GalleryPage, InternalDuplicateReview, InternalScanRun } from "./api/contracts";
 import { galleryId } from "./core/types";
 import { browserFixtureThumbnailAdapter, ThumbnailClient, ThumbnailProvider } from "./thumbnail";
 
@@ -39,6 +39,15 @@ const clickButtonContaining = (container: HTMLElement, label: string): HTMLButto
   return button;
 };
 
+const submitExploreSearch = async (container: HTMLElement, delay = 20): Promise<void> => {
+  const button = container.querySelector<HTMLButtonElement>('button[type="submit"][aria-label="검색"]');
+  if (!button) throw new Error("Explore search button was not found");
+  await act(async () => {
+    button.click();
+    await settle(delay);
+  });
+};
+
 describe("App Phase 3A backend flow", () => {
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -58,8 +67,49 @@ describe("App Phase 3A backend flow", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses the gallery skeleton only for initial blank Explore, Downloads, and Auto Find loading", async () => {
-    vi.spyOn(backend, "searchSubmit").mockImplementation(() => new Promise(() => undefined));
+  it("persists the global privacy toggle and scopes the preview mask to the app document", async () => {
+    const current = await backend.settingsGet();
+    if (!current.ok) throw new Error(current.error.message);
+    if (current.data.privacyMode) {
+      const reset = await backend.settingsUpdate({ privacyMode: false }, current.data.revision);
+      if (!reset.ok) throw new Error(reset.error.message);
+    }
+    const settingsUpdate = vi.spyOn(backend, "settingsUpdate");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<TestApp />);
+      await settle();
+    });
+    expect(document.documentElement.dataset.privacyMode).toBe("off");
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="개인정보 보호 모드"]');
+    if (!toggle) throw new Error("Privacy mode toggle was not rendered");
+
+    await act(async () => {
+      toggle.click();
+      await settle();
+    });
+    await vi.waitFor(() => expect(document.documentElement.dataset.privacyMode).toBe("on"));
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(settingsUpdate).toHaveBeenCalledWith({ privacyMode: true }, expect.any(Number));
+
+    await act(async () => {
+      toggle.click();
+      await settle();
+    });
+    await vi.waitFor(() => expect(document.documentElement.dataset.privacyMode).toBe("off"));
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    await act(async () => root.unmount());
+    expect(document.documentElement).not.toHaveAttribute("data-privacy-mode");
+    container.remove();
+  });
+
+  it("keeps Explore idle through sort, language, and draft edits until an explicit search", async () => {
+    const searchSubmit = vi.spyOn(backend, "searchSubmit").mockImplementation(() => new Promise(() => undefined));
+    const searchPageGet = vi.spyOn(backend, "searchPageGet");
     vi.spyOn(backend, "downloadEntriesList").mockImplementation(() => new Promise(() => undefined));
     vi.spyOn(backend, "autoFindSnapshot").mockImplementation(() => new Promise(() => undefined));
     const container = document.createElement("div");
@@ -70,6 +120,45 @@ describe("App Phase 3A backend flow", () => {
         root.render(<TestApp />);
         await settle();
       });
+      expect(searchSubmit).not.toHaveBeenCalled();
+      expect(searchPageGet).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("검색을 시작해 주세요");
+      expect(container.querySelector(".gallery-grid-skeleton")).toBeNull();
+
+      const sort = container.querySelector<HTMLSelectElement>("#sort-select");
+      const input = container.querySelector<HTMLInputElement>('input[aria-label="검색"]');
+      if (!sort || !input) throw new Error("Explore search controls were not rendered");
+      const selectValueSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+      const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        selectValueSetter?.call(sort, "popular_week");
+        sort.dispatchEvent(new Event("change", { bubbles: true }));
+        container.querySelector<HTMLButtonElement>('button[aria-label="언어 필터"]')?.click();
+        await settle();
+      });
+      const english = [...container.querySelectorAll<HTMLLabelElement>(".language-popover label")]
+        .find((label) => label.textContent?.includes("영어"))
+        ?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+      await act(async () => {
+        english?.click();
+        inputValueSetter?.call(input, "typing stays local");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        await settle(150);
+      });
+      expect(searchSubmit).not.toHaveBeenCalled();
+      expect(searchPageGet).not.toHaveBeenCalled();
+
+      await submitExploreSearch(container);
+      expect(searchSubmit).toHaveBeenCalledOnce();
+      expect(searchSubmit).toHaveBeenCalledWith({
+        text: "typing stays local",
+        includeTags: [],
+        excludeTags: [],
+        languages: ["korean", "english"],
+        sort: "popular_week",
+        pageSize: 50,
+      });
+      expect(searchPageGet).not.toHaveBeenCalled();
       expect(container.querySelector(".gallery-grid-skeleton")).toHaveAttribute("aria-busy", "true");
       expect(container.querySelector(".loading-state")).toBeNull();
 
@@ -90,7 +179,7 @@ describe("App Phase 3A backend flow", () => {
     }
   });
 
-  it("hydrates Recent and Downloads and queues through the formal backend client", async () => {
+  it("hydrates Explore after an explicit search and queues through the formal backend client", async () => {
     const seeded = await backend.downloadQueueAdd([galleryId(4051038)], "app-test-seed-download");
     if (!seeded.ok) throw new Error(seeded.error.message);
 
@@ -107,6 +196,8 @@ describe("App Phase 3A backend flow", () => {
       await settle();
     });
 
+    expect(search).not.toHaveBeenCalled();
+    await submitExploreSearch(container);
     expect(search).toHaveBeenCalledWith(expect.objectContaining({ text: "", sort: "recent" }));
     expect(downloadList).toHaveBeenCalledWith({ page: 1, pageSize: 200 });
     expect(detail).toHaveBeenCalledWith(galleryId(4051038));
@@ -133,6 +224,60 @@ describe("App Phase 3A backend flow", () => {
     container.remove();
   });
 
+  it("opens the active download entry folder from Floating Detail", async () => {
+    const entryId = "floating-detail-folder-entry";
+    vi.spyOn(backend, "downloadEntriesList").mockResolvedValue({
+      ok: true,
+      data: {
+        page: 1,
+        totalItems: 1,
+        entries: [{
+          entryId,
+          galleryId: galleryId(4051038),
+          revision: 3,
+          state: "downloading",
+          progress: 35,
+          attempt: 1,
+        }],
+      },
+    });
+    const openFolder = vi.spyOn(backend, "artifactOpenFolder").mockResolvedValue({
+      ok: true,
+      data: null,
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      await submitExploreSearch(container);
+      const archive = container.querySelector<HTMLElement>('[data-gallery-id="4051038"]');
+      if (!archive) throw new Error("Archive fixture card was not rendered");
+      await act(async () => {
+        archive.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+        await settle();
+      });
+
+      const folderButton = container.querySelector<HTMLButtonElement>(
+        '.detail-workspace [aria-label="저장 폴더 열기"]',
+      );
+      expect(folderButton).not.toBeNull();
+      await act(async () => {
+        folderButton?.click();
+        await settle();
+      });
+      expect(openFolder).toHaveBeenCalledOnce();
+      expect(openFolder).toHaveBeenCalledWith(entryId);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   it("projects cached Explore pages, warms adjacent pages once, and restores each page scroll position", async () => {
     const searchSubmit = vi.spyOn(backend, "searchSubmit").mockResolvedValue({
       ok: true,
@@ -150,7 +295,12 @@ describe("App Phase 3A backend flow", () => {
       root.render(<TestApp />);
       await settle();
     });
+    expect(searchSubmit).not.toHaveBeenCalled();
+    expect(searchPageGet).not.toHaveBeenCalled();
+    await submitExploreSearch(container);
     expect(searchSubmit).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain("Explore page 1");
+    expect(container.querySelector(".pager")).toHaveTextContent("1 / 20");
     expect(searchPageGet.mock.calls.filter(([, page]) => page === 2)).toHaveLength(1);
 
     const viewport = container.querySelector<HTMLElement>(".gallery-viewport");
@@ -184,6 +334,12 @@ describe("App Phase 3A backend flow", () => {
     expect(searchPageGet.mock.calls.filter(([, page]) => page === 3)).toHaveLength(thirdCallsBeforeReturn);
     await vi.waitFor(() => expect(viewport.scrollTop).toBe(417));
 
+    await submitExploreSearch(container);
+    expect(searchSubmit).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("Explore page 1");
+    expect(container.querySelector(".pager")).toHaveTextContent("1 / 20");
+    expect(searchPageGet.mock.calls.filter(([, page]) => page === 2)).toHaveLength(2);
+
     await act(async () => root.unmount());
     container.remove();
   });
@@ -207,6 +363,7 @@ describe("App Phase 3A backend flow", () => {
       root.render(<TestApp />);
       await settle();
     });
+    expect(search).not.toHaveBeenCalled();
 
     const input = container.querySelector<HTMLInputElement>('input[aria-label="검색"]');
     if (!input) throw new Error("Search input was not found");
@@ -280,6 +437,7 @@ describe("App Phase 3A backend flow", () => {
         root.render(<TestApp />);
         await settle();
       });
+      await submitExploreSearch(container);
       const archive = container.querySelector<HTMLElement>('[data-gallery-id="4051038"]');
       if (!archive) throw new Error("Archive fixture card was not rendered");
       await act(async () => {
@@ -351,6 +509,7 @@ describe("App Phase 3A backend flow", () => {
       root.render(<TestApp />);
       await settle();
     });
+    await submitExploreSearch(container);
     const archiveCard = container.querySelector<HTMLElement>('[data-gallery-id="4051038"]');
     if (!archiveCard) throw new Error("Archive fixture card was not rendered");
     expect(archiveCard.querySelector('[title^="시리즈 · rain archives"]')).toBeNull();
@@ -388,6 +547,7 @@ describe("App Phase 3A backend flow", () => {
       root.render(<TestApp />);
       await settle();
     });
+    await submitExploreSearch(container);
     expect(container.querySelector('[data-gallery-id="4051038"] [title^="시리즈 · rain archives"]')).toBeNull();
     expect(container.querySelector('[data-gallery-id="4051038"] [title^="캐릭터 · mira lane"]')).toBeNull();
 
@@ -488,6 +648,146 @@ describe("App Phase 3A backend flow", () => {
     container.remove();
     await backend.favoriteSet({ namespace: "artist", value: "serein" }, false);
     await backend.favoriteSet({ namespace: "artist", value: "mizuno" }, false);
+  });
+
+  it("runs internal duplicate analysis only for the selected completed albums", async () => {
+    const downloads: DownloadPage = {
+      page: 1,
+      totalItems: 3,
+      entries: [
+        { entryId: "selected-entry-a", galleryId: galleryId(4051038), revision: 1, state: "completed", progress: 100 },
+        { entryId: "selected-entry-b", galleryId: galleryId(4050754), revision: 1, state: "completed", progress: 100 },
+        { entryId: "unfinished-entry", galleryId: galleryId(4051027), revision: 1, state: "failed", progress: 40 },
+      ],
+    };
+    const finishedRun: InternalScanRun = {
+      runId: "selected-internal-run",
+      revision: 1,
+      state: "completed",
+      totalArtifacts: 1,
+      scannedArtifacts: 1,
+      totalPages: 24,
+      comparedPairs: 276,
+      groupsFound: 0,
+      algorithmVersion: 3,
+      skippedArtifacts: 0,
+      skippedPages: 0,
+      startedAt: "2026-08-23T00:00:00.000Z",
+      updatedAt: "2026-08-23T00:00:01.000Z",
+      finishedAt: "2026-08-23T00:00:01.000Z",
+    };
+    const review: InternalDuplicateReview = {
+      entryId: "selected-entry-a",
+      galleryId: galleryId(4051038),
+      title: "Archive of Rain",
+      groups: [{
+        groupId: "selected-entry-a-group",
+        blockId: "selected-entry-a-block",
+        sequenceIndex: 0,
+        revision: 0,
+        entryId: "selected-entry-a",
+        galleryId: galleryId(4051038),
+        relation: "exact",
+        confidence: 1,
+        recommendedKeepSourcePage: 1,
+        pages: [1, 2].map((sourcePage) => ({
+          sourcePage,
+          exactSha256: true,
+          visualSimilarity: 1,
+          detailHashDistance: 0,
+          lowInformation: false,
+        })),
+        resolved: false,
+        createdAt: "2026-08-23T00:00:00.000Z",
+        updatedAt: "2026-08-23T00:00:00.000Z",
+      }],
+      quarantineRecords: [],
+    };
+    vi.spyOn(backend, "downloadEntriesList").mockResolvedValue({ ok: true, data: downloads });
+    vi.spyOn(backend, "internalDuplicateSnapshot").mockResolvedValue({
+      ok: true,
+      data: { groups: review.groups, quarantineRecords: [], skips: [] },
+    });
+    vi.spyOn(backend, "internalDuplicateReviewGet").mockResolvedValue({ ok: true, data: review });
+    const scanStart = vi.spyOn(backend, "internalDuplicateScanStart").mockResolvedValue({
+      ok: true,
+      data: finishedRun,
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      await act(async () => {
+        clickButtonContaining(container, "Downloads");
+        await settle();
+      });
+
+      const scanButton = clickButtonContaining(container, "선택 앨범 내부 페이지 검사");
+      expect(scanButton).toBeDisabled();
+      expect(scanStart).not.toHaveBeenCalled();
+
+      const first = container.querySelector<HTMLElement>('[data-gallery-id="4051038"]');
+      const second = container.querySelector<HTMLElement>('[data-gallery-id="4050754"]');
+      const unfinished = container.querySelector<HTMLElement>('[data-gallery-id="4051027"]');
+      if (!first || !second || !unfinished) throw new Error("Download selection fixtures were not rendered");
+
+      await act(async () => {
+        first.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+        await settle();
+      });
+      expect(scanButton).toBeEnabled();
+      expect(scanButton).toHaveTextContent("선택 앨범 내부 페이지 검사 (1)");
+      await act(async () => {
+        scanButton.click();
+        await settle();
+      });
+      expect(scanStart).toHaveBeenLastCalledWith({ entryIds: ["selected-entry-a"] });
+
+      await act(async () => {
+        second.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true }));
+        await settle();
+      });
+      expect(scanButton).toHaveTextContent("선택 앨범 내부 페이지 검사 (2)");
+      await act(async () => {
+        scanButton.click();
+        await settle();
+      });
+      expect(scanStart).toHaveBeenLastCalledWith({
+        entryIds: ["selected-entry-a", "selected-entry-b"],
+      });
+
+      await act(async () => {
+        unfinished.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true }));
+        await settle();
+      });
+      expect(scanButton).toBeDisabled();
+      expect(scanButton).toHaveAttribute("title", "선택한 항목이 모두 다운로드 완료 상태여야 합니다.");
+      expect(scanStart).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        clickButtonContaining(container, "선택 해제");
+        first.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+        await settle();
+      });
+      await act(async () => {
+        clickButtonContaining(container, "선택 앨범 내부 결과 열기");
+        await settle();
+      });
+      expect(container.querySelector(".internal-review-dialog")).toHaveAttribute("open");
+      await act(async () => {
+        clickButtonContaining(container, "이 앨범 다시 검사");
+        await settle();
+      });
+      expect(scanStart).toHaveBeenLastCalledWith({ entryIds: ["selected-entry-a"] });
+      expect(scanStart).toHaveBeenCalledTimes(3);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   it("recovers a failed snapshot, scans and cancels explicitly, then reviews real evidence with CAS reload", async () => {
@@ -595,5 +895,176 @@ describe("App Phase 3A backend flow", () => {
 
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  it("uses the same aggregate snapshot dialog for tray exit and rejects a stale work set", async () => {
+    const current: AppActiveWorkSnapshot = {
+      queriedAt: "2026-08-23T00:00:00.000Z",
+      workSetFingerprint: "downloads-one",
+      downloads: { activeCount: 1 },
+    };
+    const changed: AppActiveWorkSnapshot = {
+      queriedAt: "2026-08-23T00:00:01.000Z",
+      workSetFingerprint: "downloads-and-auto-find",
+      downloads: { activeCount: 1 },
+      autoFind: {
+        runId: "auto-new",
+        completedFavorites: 1,
+        totalFavorites: 3,
+        candidatesFound: 4,
+      },
+    };
+    const snapshot = vi.spyOn(backend, "appActiveWorkSnapshot").mockResolvedValue({ ok: true, data: current });
+    const quit = vi.spyOn(backend, "appQuit").mockResolvedValue({
+      ok: true,
+      data: { accepted: false, reason: "active_work_changed", snapshot: changed },
+    });
+    const mockBackend = backend as unknown as {
+      emit(event: "app:exit-requested", payload: { source: "window_close" | "tray_menu" }): void;
+    };
+    const previousShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+    const previousClose = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "close");
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value() { this.setAttribute("open", ""); } });
+    Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value() { this.removeAttribute("open"); } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      await act(async () => {
+        mockBackend.emit("app:exit-requested", { source: "tray_menu" });
+        await settle();
+      });
+      expect(snapshot).toHaveBeenCalledOnce();
+      expect(container.querySelector(".exit-dialog")).toHaveAttribute("open");
+      expect(container).toHaveTextContent("다운로드 1개");
+
+      const quitButton = container.querySelector<HTMLButtonElement>(".exit-dialog .quit-choice");
+      await act(async () => {
+        quitButton?.click();
+        quitButton?.click();
+        await settle();
+      });
+      expect(quit).toHaveBeenCalledOnce();
+      expect(quit).toHaveBeenCalledWith({
+        expectedWorkSetFingerprint: current.workSetFingerprint,
+        confirmActiveWork: true,
+      });
+      expect(container).toHaveTextContent("Auto Find · 작가 1/3 · 후보 4개");
+      expect(container).toHaveTextContent("진행 작업이 변경되었습니다. 내용을 확인하고 다시 선택해 주세요.");
+      expect(container.querySelector(".exit-dialog")).toHaveAttribute("open");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      if (previousShowModal) Object.defineProperty(HTMLDialogElement.prototype, "showModal", previousShowModal);
+      else delete (HTMLDialogElement.prototype as unknown as { showModal?: unknown }).showModal;
+      if (previousClose) Object.defineProperty(HTMLDialogElement.prototype, "close", previousClose);
+      else delete (HTMLDialogElement.prototype as unknown as { close?: unknown }).close;
+    }
+  });
+
+  it("never quits automatically when status checks fail and arms force only after an explicit retry", async () => {
+    const snapshot = vi.spyOn(backend, "appActiveWorkSnapshot").mockRejectedValue(new Error("status unavailable"));
+    const quit = vi.spyOn(backend, "appQuit").mockResolvedValue({ ok: true, data: { accepted: true } });
+    const mockBackend = backend as unknown as {
+      emit(event: "app:exit-requested", payload: { source: "window_close" | "tray_menu" }): void;
+    };
+    const previousShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value() { this.setAttribute("open", ""); } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      await act(async () => {
+        mockBackend.emit("app:exit-requested", { source: "window_close" });
+        await settle();
+      });
+      expect(container.querySelector<HTMLButtonElement>(".exit-dialog .quit-choice")).toHaveTextContent("다시 확인");
+      expect(quit).not.toHaveBeenCalled();
+
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>(".exit-dialog .quit-choice")?.click();
+        await settle();
+      });
+      expect(snapshot).toHaveBeenCalledTimes(2);
+      expect(quit).not.toHaveBeenCalled();
+      expect(container.querySelector<HTMLButtonElement>(".exit-dialog .quit-choice")).toHaveTextContent("상태 확인 없이 종료");
+
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>(".exit-dialog .quit-choice")?.click();
+        await settle();
+      });
+      expect(quit).toHaveBeenCalledOnce();
+      expect(quit).toHaveBeenCalledWith({
+        expectedWorkSetFingerprint: "",
+        confirmActiveWork: true,
+        forceWhenStatusUnknown: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      if (previousShowModal) Object.defineProperty(HTMLDialogElement.prototype, "showModal", previousShowModal);
+      else delete (HTMLDialogElement.prototype as unknown as { showModal?: unknown }).showModal;
+    }
+  });
+
+  it("drops a stale snapshot when appQuit cannot recheck active work and returns to explicit retry", async () => {
+    const current: AppActiveWorkSnapshot = {
+      queriedAt: "2026-08-23T00:00:00.000Z",
+      workSetFingerprint: "known-before-quit",
+      downloads: { activeCount: 1 },
+    };
+    const snapshot = vi.spyOn(backend, "appActiveWorkSnapshot").mockResolvedValue({ ok: true, data: current });
+    const quit = vi.spyOn(backend, "appQuit").mockResolvedValue({
+      ok: false,
+      error: {
+        code: "APP_ACTIVE_WORK_STATUS_UNAVAILABLE",
+        message: "작업 상태를 다시 확인할 수 없습니다.",
+        retryable: true,
+        action: "retry",
+      },
+    });
+    const mockBackend = backend as unknown as {
+      emit(event: "app:exit-requested", payload: { source: "window_close" | "tray_menu" }): void;
+    };
+    const previousShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value() { this.setAttribute("open", ""); } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      await act(async () => {
+        mockBackend.emit("app:exit-requested", { source: "window_close" });
+        await settle();
+      });
+      expect(container).toHaveTextContent("다운로드 1개");
+
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>(".exit-dialog .quit-choice")?.click();
+        await settle();
+      });
+      expect(snapshot).toHaveBeenCalledOnce();
+      expect(quit).toHaveBeenCalledOnce();
+      expect(container).toHaveTextContent("작업 상태를 확인할 수 없습니다.");
+      expect(container).not.toHaveTextContent("다운로드 1개");
+      expect(container.querySelector<HTMLButtonElement>(".exit-dialog .quit-choice")).toHaveTextContent("다시 확인");
+      expect(container.querySelector<HTMLButtonElement>(".exit-dialog .quit-choice")).not.toHaveTextContent("상태 확인 없이 종료");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      if (previousShowModal) Object.defineProperty(HTMLDialogElement.prototype, "showModal", previousShowModal);
+      else delete (HTMLDialogElement.prototype as unknown as { showModal?: unknown }).showModal;
+    }
   });
 });

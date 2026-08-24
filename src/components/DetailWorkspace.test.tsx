@@ -15,6 +15,120 @@ describe("DetailWorkspace page previews", () => {
   it("uses the fixed window regardless of Related height", () => {
     expect(detailPreviewWindowSize(18, 3)).toBe(9);
   });
+
+  it("shows the storage-folder action only after a download entry exists", async () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
+    const source: Gallery = { ...mockGalleries[0]!, pageDimensions: [] };
+    delete source.download;
+    const started: Gallery = {
+      ...source,
+      download: {
+        entryId: "detail-folder-entry",
+        state: "downloading",
+        progress: 25,
+      },
+    };
+    const onQueue = vi.fn();
+    const onOpenDownloadFolder = vi.fn();
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing", reason: "test fixture" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const render = (gallery: Gallery) => root.render(
+      <DetailWorkspace
+        tabs={[gallery.id]}
+        activeId={gallery.id}
+        minimized={false}
+        galleries={new Map([[gallery.id, gallery]])}
+        favoriteMetadata={new Set()}
+        thumbnailClient={client}
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onCloseAll={vi.fn()}
+        onMinimize={vi.fn()}
+        onRestore={vi.fn()}
+        onOpenRelated={vi.fn()}
+        onQueue={onQueue}
+        onOpenDownloadFolder={onOpenDownloadFolder}
+        onMetadataSearch={vi.fn()}
+        onMetadataFavorite={vi.fn()}
+      />
+    );
+
+    try {
+      await act(async () => render(source));
+      expect(container.querySelector('[aria-label="저장 폴더 열기"]')).toBeNull();
+      expect(container.querySelector('[aria-label="다운로드"]')).not.toBeNull();
+
+      await act(async () => render(started));
+      const folderButton = container.querySelector<HTMLButtonElement>('[aria-label="저장 폴더 열기"]');
+      expect(folderButton).not.toBeNull();
+      expect(folderButton?.closest(".detail-title-actions")).not.toBeNull();
+      await act(async () => {
+        folderButton?.click();
+        container.querySelector<HTMLButtonElement>('[aria-label="다운로드"]')?.click();
+      });
+      expect(onOpenDownloadFolder).toHaveBeenCalledWith("detail-folder-entry");
+      expect(onQueue).toHaveBeenCalledWith(started.id);
+
+      await act(async () => render({
+        ...started,
+        download: { ...started.download!, state: "quarantined" },
+      }));
+      expect(container.querySelector('[aria-label="저장 폴더 열기"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      client.dispose();
+      container.remove();
+    }
+  });
+
+  it("shows only an accessible centered spinner until preview columns are known", async () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
+    const source = mockGalleries[0]!;
+    const pendingGallery: Gallery = { ...source, pages: 18, pageDimensions: undefined };
+    const readyGallery: Gallery = {
+      ...pendingGallery,
+      pageDimensions: Array.from({ length: 8 }, (_, index) => ({
+        sourcePage: index + 1,
+        width: 720,
+        height: 1080,
+      })),
+    };
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing", reason: "test fixture" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const render = (gallery: Gallery) => root.render(
+      <DetailWorkspace tabs={[gallery.id]} activeId={gallery.id} minimized={false} galleries={new Map([[gallery.id, gallery]])} favoriteMetadata={new Set()} thumbnailClient={client} onActivate={vi.fn()} onClose={vi.fn()} onCloseAll={vi.fn()} onMinimize={vi.fn()} onRestore={vi.fn()} onOpenRelated={vi.fn()} onQueue={vi.fn()} onMetadataSearch={vi.fn()} onMetadataFavorite={vi.fn()} />,
+    );
+
+    try {
+      await act(async () => render(pendingGallery));
+
+      const loading = container.querySelector(".detail-preview-loading");
+      expect(loading).toHaveAttribute("role", "status");
+      expect(loading).toHaveAttribute("aria-label", "추가 페이지 미리보기 준비 중");
+      expect(loading?.querySelector(".spinner")).not.toBeNull();
+      expect(container.querySelector(".preview-grid")).toBeNull();
+      expect(container.querySelector(".preview-window-nav")).toBeNull();
+      expect(container.querySelectorAll(".preview-thumb")).toHaveLength(0);
+      expect(container.querySelectorAll('[data-thumbnail-kind="source-page"]')).toHaveLength(0);
+      expect(container).not.toHaveTextContent("페이지 정보를 불러오는 중");
+
+      await act(async () => render(readyGallery));
+
+      expect(container.querySelector(".detail-preview-loading")).toBeNull();
+      expect(container.querySelector(".preview-grid")).toHaveAttribute("data-preview-columns", "3");
+      expect(container.querySelectorAll(".preview-thumb")).toHaveLength(9);
+      expect(container.querySelectorAll('[data-thumbnail-kind="source-page"]')).toHaveLength(9);
+    } finally {
+      await act(async () => root.unmount());
+      client.dispose();
+      container.remove();
+    }
+  });
+
   it("renders only the current page window and keeps a zero-page gallery safe", async () => {
     vi.stubGlobal("requestAnimationFrame", vi.fn(() => 0));
     const previousShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");

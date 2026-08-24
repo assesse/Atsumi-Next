@@ -6,15 +6,18 @@ import {
   normalizeGalleryPreviewWidth,
 } from "../layout/galleryPreviewPresets";
 import type {
+  AppActiveWorkSnapshot,
+  AppExitRequestedEvent,
+  AppQuitRequest,
+  AppQuitResult,
   ApiResult,
   AutoFindHistoryMode,
   AutoFindExclusionResult,
   AutoFindRun,
   AutoFindSnapshot,
   DownloadChangedEvent,
-  DetailOriginalReady,
-  DetailOriginalRequest,
-  DetailOriginalToken,
+  DetailOriginalPrepareRequest,
+  DetailOriginalPrepared,
   DownloadEntry,
   DownloadListRequest,
   DownloadPage,
@@ -40,6 +43,7 @@ import type {
   InternalRemovalPlanRequest,
   InternalRemovalResult,
   InternalRemovalUndoRequest,
+  InternalScanRequest,
   InternalScanRun,
   MaintenanceAction,
   MaintenancePreview,
@@ -57,11 +61,13 @@ import type {
   ThumbnailRequestToken,
   ThumbnailWorkerStats,
   TagCatalogStatus,
+  TagNamespace,
   TagSuggestion,
   TagSuggestionRequest,
   WindowPlacement,
   WindowPlacementSnapshot,
 } from "./contracts";
+import { hasActiveWork } from "./contracts";
 import {
   galleryDetailFixture,
   normalizeSearchRequest,
@@ -79,9 +85,8 @@ export type BackendEventMap = {
   "job:changed": JobEvent;
   "download:changed": DownloadChangedEvent;
   "thumbnail:ready": ThumbnailCompletionEvent;
-  "detail-original:ready": DetailOriginalReady;
   "settings:changed": SettingsSnapshot;
-  "app:exit-requested": null;
+  "app:exit-requested": AppExitRequestedEvent;
 };
 
 export type Unsubscribe = () => void;
@@ -116,7 +121,7 @@ export interface BackendClient {
   duplicateReviewGet(candidateId: string): Promise<ApiResult<DuplicateReview>>;
   duplicateDecisionApply(request: DuplicateDecisionRequest): Promise<ApiResult<DuplicateReview>>;
   internalDuplicateSnapshot(): Promise<ApiResult<InternalDuplicateSnapshot>>;
-  internalDuplicateScanStart(): Promise<ApiResult<InternalScanRun>>;
+  internalDuplicateScanStart(request: InternalScanRequest): Promise<ApiResult<InternalScanRun>>;
   internalDuplicateScanCancel(): Promise<ApiResult<InternalScanRun>>;
   internalDuplicateReviewGet(entryId: string): Promise<ApiResult<InternalDuplicateReview>>;
   internalRemovalPlan(request: InternalRemovalPlanRequest): Promise<ApiResult<InternalRemovalPlan>>;
@@ -128,8 +133,9 @@ export interface BackendClient {
   downloadCancel(entryIds: string[]): Promise<ApiResult<DownloadEntry[]>>;
   downloadQuarantine(entryIds: string[], reason: string): Promise<ApiResult<DownloadEntry[]>>;
   downloadQuarantineUndo(entryIds: string[]): Promise<ApiResult<DownloadEntry[]>>;
-  downloadActiveCount(): Promise<ApiResult<number>>;
+  appActiveWorkSnapshot(): Promise<ApiResult<AppActiveWorkSnapshot>>;
   artifactOpenFirst(entryId: string): Promise<ApiResult<null>>;
+  artifactOpenFolder(entryId: string): Promise<ApiResult<null>>;
   appReconcile(): Promise<ApiResult<ReconcileReport>>;
   maintenancePreview(action: MaintenanceAction): Promise<ApiResult<MaintenancePreview>>;
   maintenanceExecute(previewId: string, action: MaintenanceAction): Promise<ApiResult<MaintenanceResult>>;
@@ -139,12 +145,11 @@ export interface BackendClient {
   thumbnailInvalidate(key: ThumbnailRequestDto["key"]): Promise<ApiResult<ThumbnailInvalidation>>;
   thumbnailStats(): Promise<ApiResult<ThumbnailWorkerStats>>;
   thumbnailCacheClear(): Promise<ApiResult<ThumbnailCacheClearResult>>;
-  detailOriginalRequest(request: DetailOriginalRequest): Promise<ApiResult<DetailOriginalToken>>;
-  detailOriginalCancel(requestId: string): Promise<ApiResult<boolean>>;
-  detailOriginalRelease(requestId: string): Promise<ApiResult<boolean>>;
+  detailOriginalPrepare(request: DetailOriginalPrepareRequest): Promise<ApiResult<DetailOriginalPrepared>>;
+  detailOriginalDispose(requestId: string): Promise<ApiResult<boolean>>;
   explorationDataReset(request: ExplorationDataResetRequest): Promise<ApiResult<ExplorationDataResetResult>>;
   appMinimizeToTray(): Promise<ApiResult<null>>;
-  appQuit(): Promise<ApiResult<null>>;
+  appQuit(request: AppQuitRequest): Promise<ApiResult<AppQuitResult>>;
   on<K extends keyof BackendEventMap>(event: K, handler: (payload: BackendEventMap[K]) => void): Promise<Unsubscribe>;
 }
 
@@ -156,6 +161,7 @@ const defaultSettings: SettingsSnapshot = {
   maxColumns: 3,
   previewWidth: 220,
   relatedPreviewWidth: 240,
+  privacyMode: false,
   cacheLimitGb: 10,
   concurrentImageRequests: 5,
   requestStartIntervalMs: 25,
@@ -195,6 +201,7 @@ const readPersistedBrowserSettings = (): SettingsSnapshot => {
       relatedPreviewWidth: [180, 200, 220, 240, 260, 280, 300, 320].includes(parsed.relatedPreviewWidth ?? defaultSettings.relatedPreviewWidth)
         ? parsed.relatedPreviewWidth ?? defaultSettings.relatedPreviewWidth
         : defaultSettings.relatedPreviewWidth,
+      privacyMode: parsed.privacyMode === true,
       autoFindHistoryMode: parsed.autoFindHistoryMode === "newer_than_oldest_downloaded"
         ? "newer_than_oldest_downloaded"
         : "include_all_history",
@@ -310,6 +317,18 @@ const activeDownloadStates: ReadonlySet<DownloadEntry["state"]> = new Set([
   "verifying",
   "retry_wait",
 ]);
+
+const browserWorkSetFingerprint = (
+  activeDownloadEntryIds: string[],
+  autoFindRunId?: string,
+  duplicateRunId?: string,
+  internalDuplicateRunId?: string,
+): string => JSON.stringify({
+  downloads: [...activeDownloadEntryIds].sort((left, right) => left.localeCompare(right)),
+  autoFind: autoFindRunId ?? null,
+  duplicateScan: duplicateRunId ?? null,
+  internalDuplicateScan: internalDuplicateRunId ?? null,
+});
 
 const cancellableDownloadStates: ReadonlySet<DownloadEntry["state"]> = new Set([
   ...activeDownloadStates,
@@ -504,7 +523,24 @@ const cloneInternalSnapshot = (snapshot: InternalDuplicateSnapshot): InternalDup
 });
 
 type Handler<K extends keyof BackendEventMap> = (payload: BackendEventMap[K]) => void;
-const namespaceRank = (namespace: "tag" | "female" | "male") => namespace === "female" ? 0 : namespace === "male" ? 1 : 2;
+const namespaceRank = (namespace: TagNamespace) => {
+  switch (namespace) {
+    case "artist": return 0;
+    case "group": return 1;
+    case "female": return 2;
+    case "male": return 3;
+    case "tag": return 4;
+  }
+};
+
+const normalizeSuggestionValue = (value: string) =>
+  value.trim().toLowerCase().replaceAll("_", " ").replace(/\s+/g, " ");
+
+const suggestionFavoriteKey = (namespace: TagNamespace, name: string) => {
+  const favoriteNamespace = namespace === "artist" || namespace === "group" ? namespace : "tag";
+  const value = namespace === "female" || namespace === "male" ? `${namespace}:${name}` : name;
+  return `${favoriteNamespace}\u0000${normalizeSuggestionValue(value)}`;
+};
 
 class BrowserMockBackend implements BackendClient {
   readonly runtime = "browser-mock" as const;
@@ -517,7 +553,6 @@ class BrowserMockBackend implements BackendClient {
     "job:changed": new Set(),
     "download:changed": new Set(),
     "thumbnail:ready": new Set(),
-    "detail-original:ready": new Set(),
     "settings:changed": new Set(),
     "app:exit-requested": new Set(),
   };
@@ -549,11 +584,16 @@ class BrowserMockBackend implements BackendClient {
   private internalSnapshotState: InternalDuplicateSnapshot = { groups: [], quarantineRecords: [], skips: [] };
   private internalGeneration = 0;
   private nextInternalRunId = 1;
+  private internalActiveEntrySetKey: string | null = null;
   private internalPlans = new Map<string, InternalRemovalPlan>();
   private nextInternalPlanId = 1;
   private maintenancePreviews = new Map<string, MaintenanceAction>();
-  private tagCatalogStatusValue: TagCatalogStatus = { revision: 1, entryCount: 7, neutralCount: 1, femaleCount: 5, maleCount: 1, lastSuccessAt: "2026-08-21T00:00:00.000Z" };
+  private tagCatalogStatusValue: TagCatalogStatus = { revision: 1, entryCount: 11, neutralCount: 1, femaleCount: 5, maleCount: 1, artistCount: 2, groupCount: 2, lastSuccessAt: "2026-08-21T00:00:00.000Z" };
   private readonly tagCatalog: TagSuggestion[] = [
+    { namespace: "artist", name: "mizuno tooru", token: "artist:mizuno_tooru", galleryCount: 142, favorite: false },
+    { namespace: "artist", name: "mizuryu kei", token: "artist:mizuryu_kei", galleryCount: 938, favorite: false },
+    { namespace: "group", name: "circle energy", token: "group:circle_energy", galleryCount: 76, favorite: false },
+    { namespace: "group", name: "mizuryu kei land", token: "group:mizuryu_kei_land", galleryCount: 451, favorite: false },
     { namespace: "female", name: "big balls", token: "female:big_balls", galleryCount: 4822, favorite: false },
     { namespace: "female", name: "ball sucking", token: "female:ball_sucking", galleryCount: 4367, favorite: false },
     { namespace: "female", name: "balls expansion", token: "female:balls_expansion", galleryCount: 651, favorite: false },
@@ -583,6 +623,9 @@ class BrowserMockBackend implements BackendClient {
       (![180, 200, 220, 240, 260, 280, 300, 320].includes(next.relatedPreviewWidth)
         ? validationError("relatedPreviewWidth", "must be one of the supported related preview presets")
         : null) ??
+      (typeof next.privacyMode !== "boolean"
+        ? validationError("privacyMode", "must be a boolean")
+        : null) ??
       validateIntegerRange(next.cacheLimitGb, "cacheLimitGb", 1, 30) ??
       validateIntegerRange(next.concurrentImageRequests, "concurrentImageRequests", 1, 30) ??
       validateIntegerRange(next.requestStartIntervalMs, "requestStartIntervalMs", 0, 5_000);
@@ -599,10 +642,11 @@ class BrowserMockBackend implements BackendClient {
     return ok({ ...this.tagCatalogStatusValue });
   }
   async tagSuggestionsSearch(request: TagSuggestionRequest): Promise<ApiResult<TagSuggestion[]>> {
-    const query = request.query.trim().toLowerCase().replaceAll("_", " ").replace(/\s+/g, " ");
+    const query = normalizeSuggestionValue(request.query);
     if (query.length < 2) return ok([]);
-    const favorites = new Set([...this.favorites.values()].filter((value) => value.namespace === "tag").map((value) => value.value.toLowerCase().replaceAll("_", " ")));
-    return ok(this.tagCatalog.filter((entry) => (!request.namespace || entry.namespace === request.namespace) && entry.name.includes(query)).map((entry) => ({ ...entry, favorite: favorites.has(entry.namespace === "tag" ? entry.name : `${entry.namespace}:${entry.name}`) })).sort((a, b) => Number(b.favorite) - Number(a.favorite) || b.galleryCount - a.galleryCount || a.name.localeCompare(b.name) || namespaceRank(a.namespace) - namespaceRank(b.namespace) || a.token.localeCompare(b.token)).slice(0, Math.min(8, request.limit)));
+    const favorites = new Set([...this.favorites.values()].map((value) =>
+      `${value.namespace}\u0000${normalizeSuggestionValue(value.value)}`));
+    return ok(this.tagCatalog.filter((entry) => (!request.namespace || entry.namespace === request.namespace) && entry.name.includes(query)).map((entry) => ({ ...entry, favorite: favorites.has(suggestionFavoriteKey(entry.namespace, entry.name)) })).sort((a, b) => Number(b.favorite) - Number(a.favorite) || b.galleryCount - a.galleryCount || a.name.localeCompare(b.name) || namespaceRank(a.namespace) - namespaceRank(b.namespace) || a.token.localeCompare(b.token)).slice(0, Math.min(8, request.limit)));
   }
 
   async folderNameTemplatePreview(template: string): Promise<ApiResult<string>> {
@@ -1042,24 +1086,41 @@ class BrowserMockBackend implements BackendClient {
     return ok(cloneInternalSnapshot(this.internalSnapshotState));
   }
 
-  async internalDuplicateScanStart(): Promise<ApiResult<InternalScanRun>> {
+  async internalDuplicateScanStart(request: InternalScanRequest): Promise<ApiResult<InternalScanRun>> {
+    if (!request.entryIds.length) return validationError("entryIds", "must not be empty");
+    if (request.entryIds.length > 200) return validationError("entryIds", "must contain at most 200 entries");
+    const entryIds = [...new Set(request.entryIds.map((entryId) => entryId.trim()))];
+    if (entryIds.some((entryId) => !entryId || new TextEncoder().encode(entryId).length > 200)) {
+      return validationError("entryIds", "must contain non-empty IDs of at most 200 bytes");
+    }
+    entryIds.sort((left, right) => left.localeCompare(right));
+    const entrySetKey = JSON.stringify(entryIds);
     const current = this.internalSnapshotState.run;
-    if (current?.state === "running") return ok(cloneInternalScanRun(current));
+    if (current?.state === "running") {
+      if (this.internalActiveEntrySetKey === entrySetKey) return ok(cloneInternalScanRun(current));
+      return {
+        ok: false,
+        error: {
+          code: "OPERATION_ACTIVE",
+          message: "다른 선택 항목의 내부 중복 검사가 이미 실행 중입니다.",
+          retryable: false,
+          action: "none",
+        },
+      };
+    }
     const generation = ++this.internalGeneration;
-    const completed = [...this.downloadEntries.values()].find((entry) => entry.state === "completed");
-    const entryId = completed?.entryId ?? "browser-artifact-4051038";
-    const targetGalleryId = completed?.galleryId ?? galleryId(4_051_038);
+    this.internalActiveEntrySetKey = entrySetKey;
     const now = new Date().toISOString();
     const run: InternalScanRun = {
       runId: `browser-internal-run-${this.nextInternalRunId++}`,
       revision: 0,
       state: "running",
-      totalArtifacts: 1,
+      totalArtifacts: entryIds.length,
       scannedArtifacts: 0,
-      totalPages: 24,
+      totalPages: 24 * entryIds.length,
       comparedPairs: 0,
       groupsFound: 0,
-      algorithmVersion: 2,
+      algorithmVersion: 3,
       skippedArtifacts: 0,
       skippedPages: 0,
       startedAt: now,
@@ -1070,40 +1131,46 @@ class BrowserMockBackend implements BackendClient {
     window.setTimeout(() => {
       if (generation !== this.internalGeneration || this.internalSnapshotState.run?.state !== "running") return;
       const finishedAt = new Date().toISOString();
-      const groups: InternalDuplicateSnapshot["groups"] = [
-        {
-          groupId: `${entryId}-exact-1`, blockId: `${entryId}-block-1`, sequenceIndex: 0,
-          revision: 0, entryId, galleryId: targetGalleryId, relation: "exact", confidence: 1,
-          recommendedKeepSourcePage: 2,
-          pages: [2, 8].map((sourcePage) => ({ sourcePage, exactSha256: true, visualSimilarity: 1, detailHashDistance: 0, lowInformation: false })),
-          resolved: false, createdAt: finishedAt, updatedAt: finishedAt,
-        },
-        {
-          groupId: `${entryId}-visual-1`, blockId: `${entryId}-block-2`, sequenceIndex: 0,
-          revision: 0, entryId, galleryId: targetGalleryId, relation: "translation_visual", confidence: 0.94,
-          recommendedKeepSourcePage: 14,
-          pages: [14, 20].map((sourcePage) => ({ sourcePage, exactSha256: false, visualSimilarity: 0.94, detailHashDistance: 17, lowInformation: false })),
-          resolved: false, createdAt: finishedAt, updatedAt: finishedAt,
-        },
-        {
-          groupId: `${entryId}-visual-2`, blockId: `${entryId}-block-2`, sequenceIndex: 1,
-          revision: 0, entryId, galleryId: targetGalleryId, relation: "translation_visual", confidence: 0.91,
-          recommendedKeepSourcePage: 15,
-          pages: [15, 21].map((sourcePage) => ({ sourcePage, exactSha256: false, visualSimilarity: 0.91, detailHashDistance: 22, lowInformation: false })),
-          resolved: false, createdAt: finishedAt, updatedAt: finishedAt,
-        },
-      ];
+      const groups: InternalDuplicateSnapshot["groups"] = entryIds.flatMap((entryId, targetIndex) => {
+        const targetGalleryId = this.downloadEntries.get(entryId)?.galleryId ?? galleryId(4_051_038 + targetIndex);
+        return [
+          {
+            groupId: `${entryId}-exact-1`, blockId: `${entryId}-block-1`, sequenceIndex: 0,
+            revision: 0, entryId, galleryId: targetGalleryId, relation: "exact" as const, confidence: 1,
+            recommendedKeepSourcePage: 2,
+            pages: [2, 8].map((sourcePage) => ({ sourcePage, exactSha256: true, visualSimilarity: 1, detailHashDistance: 0, lowInformation: false })),
+            resolved: false, createdAt: finishedAt, updatedAt: finishedAt,
+          },
+          {
+            groupId: `${entryId}-visual-1`, blockId: `${entryId}-block-2`, sequenceIndex: 0,
+            revision: 0, entryId, galleryId: targetGalleryId, relation: "translation_visual" as const, confidence: 0.94,
+            recommendedKeepSourcePage: 14,
+            pages: [14, 20].map((sourcePage) => ({ sourcePage, exactSha256: false, visualSimilarity: 0.94, detailHashDistance: 17, lowInformation: false })),
+            resolved: false, createdAt: finishedAt, updatedAt: finishedAt,
+          },
+          {
+            groupId: `${entryId}-visual-2`, blockId: `${entryId}-block-2`, sequenceIndex: 1,
+            revision: 0, entryId, galleryId: targetGalleryId, relation: "translation_visual" as const, confidence: 0.91,
+            recommendedKeepSourcePage: 15,
+            pages: [15, 21].map((sourcePage) => ({ sourcePage, exactSha256: false, visualSimilarity: 0.91, detailHashDistance: 22, lowInformation: false })),
+            resolved: false, createdAt: finishedAt, updatedAt: finishedAt,
+          },
+        ];
+      });
+      const selected = new Set(entryIds);
+      const preservedGroups = this.internalSnapshotState.groups.filter((group) => !selected.has(group.entryId));
       const finished: InternalScanRun = {
         ...run,
         revision: 2,
         state: "completed",
-        scannedArtifacts: 1,
-        comparedPairs: 276,
+        scannedArtifacts: entryIds.length,
+        comparedPairs: 276 * entryIds.length,
         groupsFound: groups.length,
         updatedAt: finishedAt,
         finishedAt,
       };
-      this.internalSnapshotState = { ...this.internalSnapshotState, run: finished, groups };
+      this.internalActiveEntrySetKey = null;
+      this.internalSnapshotState = { ...this.internalSnapshotState, run: finished, groups: [...preservedGroups, ...groups] };
       this.emit("internal-duplicate:changed", cloneInternalScanRun(finished));
     }, 80);
     return ok(cloneInternalScanRun(run));
@@ -1115,6 +1182,7 @@ class BrowserMockBackend implements BackendClient {
       return notFoundError("INTERNAL_DUPLICATE_SCAN_NOT_RUNNING", "실행 중인 내부 중복 검사가 없습니다.");
     }
     this.internalGeneration += 1;
+    this.internalActiveEntrySetKey = null;
     const now = new Date().toISOString();
     const cancelled = { ...current, revision: current.revision + 1, state: "cancelled" as const, updatedAt: now, finishedAt: now };
     this.internalSnapshotState = { ...this.internalSnapshotState, run: cancelled };
@@ -1524,27 +1592,23 @@ class BrowserMockBackend implements BackendClient {
     });
   }
 
-  async detailOriginalRequest(request: DetailOriginalRequest): Promise<ApiResult<DetailOriginalToken>> {
-    if (!Number.isInteger(request.galleryId) || request.galleryId <= 0 || request.sourcePage !== 1) {
-      return validationError("detailOriginal", "galleryId must be positive and sourcePage must be 1");
+  async detailOriginalPrepare(request: DetailOriginalPrepareRequest): Promise<ApiResult<DetailOriginalPrepared>> {
+    const canonicalUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    if (!canonicalUuid.test(request.requestId) || !Number.isInteger(request.galleryId) || request.galleryId <= 0 || request.sourcePage !== 1) {
+      return validationError("detailOriginal", "requestId must be a UUID, galleryId must be positive, and sourcePage must be 1");
     }
-    const token: DetailOriginalToken = {
-      requestId: `browser-detail-original-${this.nextThumbnailRequestId++}`,
+    return ok({
+      requestId: request.requestId,
       galleryId: request.galleryId,
       sourcePage: 1,
-    };
-    queueMicrotask(() => this.emit("detail-original:ready", {
-      ...token,
       mediaUrl: "/mock-gallery-sheet.png",
-      contentType: "image/png",
+      contentType: "image/png" as const,
       width: 512,
       height: 512,
-    }));
-    return ok(token);
+    });
   }
 
-  async detailOriginalCancel(): Promise<ApiResult<boolean>> { return ok(true); }
-  async detailOriginalRelease(): Promise<ApiResult<boolean>> { return ok(true); }
+  async detailOriginalDispose(): Promise<ApiResult<boolean>> { return ok(true); }
 
   async explorationDataReset(
     request: ExplorationDataResetRequest,
@@ -1582,8 +1646,57 @@ class BrowserMockBackend implements BackendClient {
     return ok(null);
   }
 
-  async downloadActiveCount(): Promise<ApiResult<number>> {
-    return ok([...this.downloadEntries.values()].filter((entry) => activeDownloadStates.has(entry.state)).length);
+  async appActiveWorkSnapshot(): Promise<ApiResult<AppActiveWorkSnapshot>> {
+    const activeDownloadEntryIds = [...this.downloadEntries.values()]
+      .filter((entry) => activeDownloadStates.has(entry.state))
+      .map((entry) => entry.entryId)
+      .sort((left, right) => left.localeCompare(right));
+    const autoFind = this.autoFind.run?.state === "running" ? this.autoFind.run : undefined;
+    const duplicateScan = this.duplicateSnapshotState.run?.state === "running"
+      ? this.duplicateSnapshotState.run
+      : undefined;
+    const internalDuplicateScan = this.internalSnapshotState.run?.state === "running"
+      ? this.internalSnapshotState.run
+      : undefined;
+    return ok({
+      // Runtime snapshots use an epoch-millisecond string; keep the browser
+      // fixture wire-compatible even though the UI does not render this value.
+      queriedAt: Date.now().toString(),
+      workSetFingerprint: browserWorkSetFingerprint(
+        activeDownloadEntryIds,
+        autoFind?.runId,
+        duplicateScan?.runId,
+        internalDuplicateScan?.runId,
+      ),
+      downloads: { activeCount: activeDownloadEntryIds.length },
+      ...(autoFind ? {
+        autoFind: {
+          runId: autoFind.runId,
+          completedFavorites: autoFind.completedFavorites,
+          totalFavorites: autoFind.totalFavorites,
+          candidatesFound: autoFind.candidatesFound,
+        },
+      } : {}),
+      ...(duplicateScan ? {
+        duplicateScan: {
+          runId: duplicateScan.runId,
+          hashedArtifacts: duplicateScan.hashedArtifacts,
+          totalArtifacts: duplicateScan.totalArtifacts,
+          comparedPairs: duplicateScan.comparedPairs,
+          totalPairs: duplicateScan.totalPairs,
+          candidatesFound: duplicateScan.candidatesFound,
+        },
+      } : {}),
+      ...(internalDuplicateScan ? {
+        internalDuplicateScan: {
+          runId: internalDuplicateScan.runId,
+          scannedArtifacts: internalDuplicateScan.scannedArtifacts,
+          totalArtifacts: internalDuplicateScan.totalArtifacts,
+          skippedArtifacts: internalDuplicateScan.skippedArtifacts,
+          groupsFound: internalDuplicateScan.groupsFound,
+        },
+      } : {}),
+    });
   }
 
   async artifactOpenFirst(): Promise<ApiResult<null>> {
@@ -1592,6 +1705,18 @@ class BrowserMockBackend implements BackendClient {
       error: {
         code: "ARTIFACT_UNAVAILABLE_IN_BROWSER",
         message: "브라우저 fixture에는 실제 다운로드 파일이 없습니다.",
+        retryable: false,
+        action: "none",
+      },
+    };
+  }
+
+  async artifactOpenFolder(): Promise<ApiResult<null>> {
+    return {
+      ok: false,
+      error: {
+        code: "ARTIFACT_FOLDER_UNAVAILABLE_IN_BROWSER",
+        message: "브라우저 fixture에는 실제 다운로드 저장 폴더가 없습니다.",
         retryable: false,
         action: "none",
       },
@@ -1645,8 +1770,16 @@ class BrowserMockBackend implements BackendClient {
     return ok({ action, completedSteps: ["factory reset completed in browser fixture"], warnings: [], restartRequired: true });
   }
 
-  async appQuit(): Promise<ApiResult<null>> {
-    return ok(null);
+  async appQuit(request: AppQuitRequest): Promise<ApiResult<AppQuitResult>> {
+    const current = await this.appActiveWorkSnapshot();
+    if (!current.ok) return current;
+    if (request.expectedWorkSetFingerprint !== current.data.workSetFingerprint) {
+      return ok({ accepted: false, reason: "active_work_changed", snapshot: current.data });
+    }
+    if (hasActiveWork(current.data) && !request.confirmActiveWork) {
+      return ok({ accepted: false, reason: "active_work_confirmation_required", snapshot: current.data });
+    }
+    return ok({ accepted: true, snapshot: current.data });
   }
 
   async on<K extends keyof BackendEventMap>(
@@ -1933,8 +2066,8 @@ class TauriBackend implements BackendClient {
     return invoke("internal_duplicate_snapshot");
   }
 
-  internalDuplicateScanStart(): Promise<ApiResult<InternalScanRun>> {
-    return invoke("internal_duplicate_scan_start");
+  internalDuplicateScanStart(request: InternalScanRequest): Promise<ApiResult<InternalScanRun>> {
+    return invoke("internal_duplicate_scan_start", { request });
   }
 
   internalDuplicateScanCancel(): Promise<ApiResult<InternalScanRun>> {
@@ -1984,12 +2117,16 @@ class TauriBackend implements BackendClient {
     return invoke("download_quarantine_undo", { entryIds });
   }
 
-  downloadActiveCount(): Promise<ApiResult<number>> {
-    return invoke("download_active_count");
+  appActiveWorkSnapshot(): Promise<ApiResult<AppActiveWorkSnapshot>> {
+    return invoke("app_active_work_snapshot");
   }
 
   artifactOpenFirst(entryId: string): Promise<ApiResult<null>> {
     return invoke("artifact_open_first", { entryId });
+  }
+
+  artifactOpenFolder(entryId: string): Promise<ApiResult<null>> {
+    return invoke("artifact_open_folder", { entryId });
   }
 
   appReconcile(): Promise<ApiResult<ReconcileReport>> {
@@ -2031,14 +2168,11 @@ class TauriBackend implements BackendClient {
     return invoke("thumbnail_cache_clear");
   }
 
-  detailOriginalRequest(request: DetailOriginalRequest): Promise<ApiResult<DetailOriginalToken>> {
-    return invoke("detail_original_request", { request });
+  detailOriginalPrepare(request: DetailOriginalPrepareRequest): Promise<ApiResult<DetailOriginalPrepared>> {
+    return invoke("detail_original_prepare", { request });
   }
-  detailOriginalCancel(requestId: string): Promise<ApiResult<boolean>> {
-    return invoke("detail_original_cancel", { requestId });
-  }
-  detailOriginalRelease(requestId: string): Promise<ApiResult<boolean>> {
-    return invoke("detail_original_release", { requestId });
+  detailOriginalDispose(requestId: string): Promise<ApiResult<boolean>> {
+    return invoke("detail_original_dispose", { requestId });
   }
 
   explorationDataReset(
@@ -2051,8 +2185,8 @@ class TauriBackend implements BackendClient {
     return invoke("app_minimize_to_tray");
   }
 
-  appQuit(): Promise<ApiResult<null>> {
-    return invoke("app_quit");
+  appQuit(request: AppQuitRequest): Promise<ApiResult<AppQuitResult>> {
+    return invoke("app_quit", { request });
   }
 
   async on<K extends keyof BackendEventMap>(

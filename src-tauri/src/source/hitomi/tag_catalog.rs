@@ -6,20 +6,48 @@ use crate::{
 };
 
 pub const ALL_TAGS_PAGE_COUNT: usize = 27;
+pub const ALL_CATALOG_PAGE_COUNT: usize = ALL_TAGS_PAGE_COUNT * 3;
+
 pub fn all_tags_urls() -> Vec<String> {
-    std::iter::once("https://hitomi.la/alltags-123.html".to_owned())
-        .chain(('a'..='z').map(|letter| format!("https://hitomi.la/alltags-{letter}.html")))
+    catalog_index_urls("alltags")
+}
+
+pub fn all_catalog_pages() -> Vec<(TagNamespace, String)> {
+    [
+        (TagNamespace::Tag, "alltags"),
+        (TagNamespace::Artist, "allartists"),
+        (TagNamespace::Group, "allgroups"),
+    ]
+    .into_iter()
+    .flat_map(|(namespace, prefix)| {
+        catalog_index_urls(prefix)
+            .into_iter()
+            .map(move |url| (namespace, url))
+    })
+    .collect()
+}
+
+fn catalog_index_urls(prefix: &str) -> Vec<String> {
+    std::iter::once(format!("https://hitomi.la/{prefix}-123.html"))
+        .chain(('a'..='z').map(|letter| format!("https://hitomi.la/{prefix}-{letter}.html")))
         .collect()
 }
 
 pub fn parse_all_tags_page(html: &str) -> Result<Vec<TagCatalogEntry>, SourceContractError> {
+    parse_catalog_page(html, TagNamespace::Tag)
+}
+
+pub fn parse_catalog_page(
+    html: &str,
+    page_namespace: TagNamespace,
+) -> Result<Vec<TagCatalogEntry>, SourceContractError> {
     let mut entries = Vec::new();
     let mut cursor = html;
     while let Some(start) = cursor.find("<a") {
         cursor = &cursor[start + 2..];
         let Some(end) = cursor.find('>') else {
             return Err(SourceContractError::invalid_data(
-                "all tags",
+                "metadata catalog",
                 "unterminated anchor",
             ));
         };
@@ -27,7 +55,7 @@ pub fn parse_all_tags_page(html: &str) -> Result<Vec<TagCatalogEntry>, SourceCon
         let rest = &cursor[end + 1..];
         let Some(close) = rest.find("</a>") else {
             return Err(SourceContractError::invalid_data(
-                "all tags",
+                "metadata catalog",
                 "anchor is missing closing tag",
             ));
         };
@@ -37,14 +65,15 @@ pub fn parse_all_tags_page(html: &str) -> Result<Vec<TagCatalogEntry>, SourceCon
         let Some(href) = attribute(attrs, "href") else {
             continue;
         };
-        let Some((namespace, encoded_name)) = tag_href(&href)? else {
+        let Some((namespace, encoded_name)) = catalog_href(&href, page_namespace)? else {
             continue;
         };
         let name = percent_decode(&encoded_name)?;
         let name = normalize_tag_name(&name);
         let count = anchor_count(&text, after_anchor)?;
-        let canonical_token = canonical_tag_token(namespace, &name)
-            .map_err(|error| SourceContractError::invalid_data("all tags", error.to_string()))?;
+        let canonical_token = canonical_tag_token(namespace, &name).map_err(|error| {
+            SourceContractError::invalid_data("metadata catalog", error.to_string())
+        })?;
         entries.push(TagCatalogEntry {
             namespace,
             normalized_name: name.clone(),
@@ -55,8 +84,8 @@ pub fn parse_all_tags_page(html: &str) -> Result<Vec<TagCatalogEntry>, SourceCon
     }
     if entries.is_empty() {
         return Err(SourceContractError::invalid_data(
-            "all tags",
-            "page contains no valid tag anchors",
+            "metadata catalog",
+            "page contains no valid catalog anchors",
         ));
     }
     Ok(entries)
@@ -72,7 +101,7 @@ pub fn merge_catalog(
         if let Some(existing) = tokens.insert(entry.canonical_token.clone(), key.clone()) {
             if existing != key {
                 return Err(SourceContractError::invalid_data(
-                    "all tags",
+                    "metadata catalog",
                     "canonical token collision",
                 ));
             }
@@ -86,7 +115,7 @@ pub fn merge_catalog(
     }
     if result.len() < 1_000 {
         return Err(SourceContractError::invalid_data(
-            "all tags",
+            "metadata catalog",
             "catalog contains fewer than 1000 entries",
         ));
     }
@@ -114,6 +143,41 @@ fn attribute(attrs: &str, wanted: &str) -> Option<String> {
     }
     None
 }
+fn catalog_href(
+    href: &str,
+    page_namespace: TagNamespace,
+) -> Result<Option<(TagNamespace, String)>, SourceContractError> {
+    match page_namespace {
+        TagNamespace::Tag => tag_href(href),
+        TagNamespace::Artist => namespaced_href(href, "/artist/", TagNamespace::Artist),
+        TagNamespace::Group => namespaced_href(href, "/group/", TagNamespace::Group),
+        TagNamespace::Female | TagNamespace::Male => Err(SourceContractError::invalid_data(
+            "metadata catalog",
+            "gender namespaces do not own index pages",
+        )),
+    }
+}
+
+fn namespaced_href(
+    href: &str,
+    prefix: &str,
+    namespace: TagNamespace,
+) -> Result<Option<(TagNamespace, String)>, SourceContractError> {
+    let Some(value) = href.strip_prefix(prefix) else {
+        return Ok(None);
+    };
+    let Some(value) = value.strip_suffix("-all.html") else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err(SourceContractError::invalid_data(
+            "metadata catalog",
+            "catalog href has empty name",
+        ));
+    }
+    Ok(Some((namespace, value.to_owned())))
+}
+
 fn tag_href(href: &str) -> Result<Option<(TagNamespace, String)>, SourceContractError> {
     let Some(value) = href.strip_prefix("/tag/") else {
         return Ok(None);
@@ -123,7 +187,7 @@ fn tag_href(href: &str) -> Result<Option<(TagNamespace, String)>, SourceContract
     };
     if value.is_empty() {
         return Err(SourceContractError::invalid_data(
-            "all tags",
+            "metadata catalog",
             "tag href has empty name",
         ));
     }
@@ -152,7 +216,7 @@ fn percent_decode(value: &str) -> Result<String, SourceContractError> {
         if raw[index] == b'%' {
             if index + 2 >= raw.len() {
                 return Err(SourceContractError::invalid_data(
-                    "all tags",
+                    "metadata catalog",
                     "invalid percent encoding",
                 ));
             }
@@ -166,7 +230,7 @@ fn percent_decode(value: &str) -> Result<String, SourceContractError> {
             };
             let (Some(a), Some(b)) = (nibble(raw[index + 1]), nibble(raw[index + 2])) else {
                 return Err(SourceContractError::invalid_data(
-                    "all tags",
+                    "metadata catalog",
                     "invalid percent encoding",
                 ));
             };
@@ -178,7 +242,7 @@ fn percent_decode(value: &str) -> Result<String, SourceContractError> {
         }
     }
     String::from_utf8(bytes)
-        .map_err(|_| SourceContractError::invalid_data("all tags", "href is not UTF-8"))
+        .map_err(|_| SourceContractError::invalid_data("metadata catalog", "href is not UTF-8"))
 }
 fn strip_html(value: &str) -> String {
     let mut out = String::new();
@@ -194,13 +258,13 @@ fn strip_html(value: &str) -> String {
     out
 }
 fn anchor_count(text: &str, after_anchor: &str) -> Result<u64, SourceContractError> {
-    // Hitomi's all-tags pages render the count after the closing anchor:
+    // Hitomi's catalog pages render the count after the closing anchor:
     // `<a ...>tag</a> (123)`. Keep support for the inline form used by older
     // pages/fixtures, but never scan past the next HTML element.
     count_in_text(text)
         .or_else(|| count_in_text(after_anchor.split('<').next().unwrap_or_default()))
         .ok_or_else(|| {
-            SourceContractError::invalid_data("all tags", "anchor is missing gallery count")
+            SourceContractError::invalid_data("metadata catalog", "anchor is missing gallery count")
         })
 }
 
@@ -226,6 +290,44 @@ mod tests {
     #[test]
     fn has_all_urls() {
         assert_eq!(all_tags_urls().len(), ALL_TAGS_PAGE_COUNT);
+        let pages = all_catalog_pages();
+        assert_eq!(pages.len(), ALL_CATALOG_PAGE_COUNT);
+        assert!(pages.contains(&(
+            TagNamespace::Artist,
+            "https://hitomi.la/allartists-123.html".to_owned()
+        )));
+        assert!(pages.contains(&(
+            TagNamespace::Group,
+            "https://hitomi.la/allgroups-z.html".to_owned()
+        )));
+    }
+
+    #[test]
+    fn parses_artist_and_group_catalog_pages_into_search_tokens() {
+        let artists = parse_catalog_page(
+            "<a href='/artist/mizuno%20tooru-all.html'>mizuno tooru</a> (142)",
+            TagNamespace::Artist,
+        )
+        .unwrap();
+        let groups = parse_catalog_page(
+            "<a href='/group/circle%20energy-all.html'>circle energy</a> (76)",
+            TagNamespace::Group,
+        )
+        .unwrap();
+
+        assert_eq!(artists[0].canonical_token, "artist:mizuno_tooru");
+        assert_eq!(artists[0].gallery_count, 142);
+        assert_eq!(groups[0].canonical_token, "group:circle_energy");
+        assert_eq!(groups[0].gallery_count, 76);
+    }
+
+    #[test]
+    fn rejects_cross_namespace_links_in_catalog_pages() {
+        assert!(parse_catalog_page(
+            "<a href='/group/not-an-artist-all.html'>wrong</a> (1)",
+            TagNamespace::Artist,
+        )
+        .is_err());
     }
 
     #[test]

@@ -41,9 +41,9 @@ pub use internal_duplicate::{
     InternalDuplicateGroup, InternalDuplicateReview, InternalDuplicateSnapshot,
     InternalGroupRecord, InternalMatchKind, InternalPageEvidence, InternalRemovalApplyRequest,
     InternalRemovalPlan, InternalRemovalPlanRequest, InternalRemovalResult,
-    InternalRemovalSelection, InternalRemovalUndoRequest, InternalScanRun, InternalScanSkip,
-    InternalScanState, PageQuarantineRecord, PageQuarantineSaga, PageQuarantineState,
-    INTERNAL_DUPLICATE_ALGORITHM_VERSION,
+    InternalRemovalSelection, InternalRemovalUndoRequest, InternalScanRequest, InternalScanRun,
+    InternalScanSkip, InternalScanState, PageQuarantineRecord, PageQuarantineSaga,
+    PageQuarantineState, INTERNAL_DUPLICATE_ALGORITHM_VERSION,
 };
 pub use job::{
     DownloadChangedEvent, DownloadJobDescriptor, DownloadJobProjection, FixtureDownloadJobStep,

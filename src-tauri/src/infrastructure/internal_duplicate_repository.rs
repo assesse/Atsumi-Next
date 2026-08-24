@@ -246,6 +246,7 @@ impl InternalDuplicateRepository for SqliteRepository {
         state: InternalScanState,
         error_code: Option<&str>,
         error_message: Option<&str>,
+        completed_gallery_ids: &[GalleryId],
     ) -> Result<Option<InternalScanRun>, RepositoryError> {
         if state == InternalScanState::Running {
             return Err(RepositoryError::Other(
@@ -272,17 +273,19 @@ impl InternalDuplicateRepository for SqliteRepository {
             )
             .map_err(repository_sql_error)?;
         if changed == 1 && state == InternalScanState::Completed {
-            transaction
-                .execute(
-                    r#"
-                        UPDATE internal_duplicate_groups
-                        SET revision = revision + 1, resolved = 1,
-                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                        WHERE last_seen_run_id != ?1 AND resolved = 0
-                    "#,
-                    [run_id],
-                )
-                .map_err(repository_sql_error)?;
+            for gallery_id in completed_gallery_ids {
+                transaction
+                    .execute(
+                        r#"
+                            UPDATE internal_duplicate_groups
+                            SET revision = revision + 1, resolved = 1,
+                                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                            WHERE gallery_id = ?1 AND last_seen_run_id != ?2 AND resolved = 0
+                        "#,
+                        params![gallery_id.get(), run_id],
+                    )
+                    .map_err(repository_sql_error)?;
+            }
         }
         transaction.commit().map_err(repository_sql_error)?;
         read_internal_run(&connection, run_id)
@@ -1351,4 +1354,85 @@ fn repository_sql_error(error: rusqlite::Error) -> RepositoryError {
     RepositoryError::Other(format!(
         "SQLite internal duplicate operation failed: {error}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::params;
+
+    use crate::{
+        application::InternalDuplicateRepository,
+        domain::{GalleryId, InternalScanState},
+        infrastructure::SqliteRepository,
+    };
+
+    #[test]
+    fn selected_scan_completion_resolves_only_the_scanned_gallery() {
+        let repository = SqliteRepository::open_in_memory().expect("open repository");
+        let connection = repository.connection().expect("lock repository");
+        for gallery_id in [101_i64, 202_i64] {
+            connection
+                .execute(
+                    "INSERT INTO galleries (gallery_id, revision, title, source_page_count) VALUES (?1, 0, ?2, 2)",
+                    params![gallery_id, format!("Gallery {gallery_id}")],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO download_entries (entry_id, gallery_id, revision, state, progress, created_at, updated_at) VALUES (?1, ?2, 0, 'completed', 100, 'now', 'now')",
+                    params![format!("entry-{gallery_id}"), gallery_id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO internal_duplicate_runs (run_id, revision, state, profile_version, total_artifacts, scanned_artifacts, total_pages, compared_pairs, groups_found, started_at, updated_at, finished_at) VALUES (?1, 0, 'completed', 1, 1, 1, 2, 1, 1, 'now', 'now', 'now')",
+                    [format!("old-run-{gallery_id}")],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO internal_duplicate_groups (group_id, block_id, sequence_index, revision, last_seen_run_id, entry_id, gallery_id, relation, confidence, recommended_keep_source_page, resolved, created_at, updated_at) VALUES (?1, ?2, 0, 0, ?3, ?4, ?5, 'exact', 1, 1, 0, 'now', 'now')",
+                    params![
+                        format!("group-{gallery_id}"),
+                        format!("block-{gallery_id}"),
+                        format!("old-run-{gallery_id}"),
+                        format!("entry-{gallery_id}"),
+                        gallery_id,
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let run = repository
+            .internal_scan_start(1, 3, 1, 2, &[])
+            .expect("start selected run");
+        repository
+            .internal_scan_finish(
+                &run.run_id,
+                InternalScanState::Completed,
+                None,
+                None,
+                &[GalleryId::new(101).unwrap()],
+            )
+            .expect("finish selected run");
+
+        let connection = repository.connection().expect("lock repository");
+        let selected_resolved: bool = connection
+            .query_row(
+                "SELECT resolved FROM internal_duplicate_groups WHERE group_id = 'group-101'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let unselected_resolved: bool = connection
+            .query_row(
+                "SELECT resolved FROM internal_duplicate_groups WHERE group_id = 'group-202'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(selected_resolved);
+        assert!(!unselected_resolved);
+    }
 }

@@ -45,8 +45,8 @@ impl HttpPriority {
         match self {
             Self::Critical => 0,
             Self::Visible => 1,
-            Self::Prefetch => 2,
-            Self::Download => 3,
+            Self::Download => 2,
+            Self::Prefetch => 3,
         }
     }
 }
@@ -870,6 +870,58 @@ mod tests {
         critical.join().unwrap();
         prefetch.join().unwrap();
         assert_eq!(gate.snapshot().requests_started, 3);
+    }
+
+    #[test]
+    fn downloads_overtake_speculative_prefetch_waiters() {
+        let gate = Arc::new(RequestGate::new(1, 1, Duration::ZERO));
+        let blocker = gate
+            .acquire(
+                "ltn.gold-usergeneratedcontent.net",
+                HttpPriority::Visible,
+                None,
+            )
+            .unwrap();
+        let (sender, receiver) = mpsc::channel();
+
+        let prefetch_gate = Arc::clone(&gate);
+        let prefetch_sender = sender.clone();
+        let prefetch = thread::spawn(move || {
+            let _permit = prefetch_gate
+                .acquire(
+                    "ltn.gold-usergeneratedcontent.net",
+                    HttpPriority::Prefetch,
+                    None,
+                )
+                .unwrap();
+            prefetch_sender.send("prefetch").unwrap();
+        });
+        wait_for_waiters(&gate, 1);
+
+        let download_gate = Arc::clone(&gate);
+        let download = thread::spawn(move || {
+            let _permit = download_gate
+                .acquire(
+                    "ltn.gold-usergeneratedcontent.net",
+                    HttpPriority::Download,
+                    None,
+                )
+                .unwrap();
+            sender.send("download").unwrap();
+        });
+        wait_for_waiters(&gate, 2);
+        drop(blocker);
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "download"
+        );
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "prefetch"
+        );
+        download.join().unwrap();
+        prefetch.join().unwrap();
     }
 
     #[test]

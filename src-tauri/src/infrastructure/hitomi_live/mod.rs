@@ -9,7 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use image::{GenericImageView, ImageFormat, ImageReader, Limits};
+use image::{
+    codecs::webp::WebPEncoder, ExtendedColorType, GenericImageView, ImageEncoder, ImageFormat,
+    ImageReader, Limits,
+};
 
 use crate::{
     application::{
@@ -19,10 +22,11 @@ use crate::{
     domain::{Gallery, GalleryId, GalleryMetadata, SourcePageNumber, TagCatalogEntry},
     source::{
         hitomi::{
-            all_tags_urls, download_full_candidates, galleryinfo_script_url, gg_script_url,
-            merge_catalog, parse_all_tags_page, parse_galleryinfo_script, parse_gg_routing,
-            parse_nozomi_ids, webp_thumbnail_candidates, GgRoutingTable, HitomiGalleryMetadata,
-            HitomiImageCandidate, HitomiImageFormat, ThumbnailSize, HITOMI_METADATA_ORIGIN,
+            all_catalog_pages, download_full_candidates, galleryinfo_script_url, gg_script_url,
+            merge_catalog, parse_catalog_page, parse_galleryinfo_script, parse_gg_routing,
+            parse_nozomi_ids, webp_full_candidates, webp_thumbnail_candidates, GgRoutingTable,
+            HitomiGalleryMetadata, HitomiImageCandidate, HitomiImageFormat, HitomiImageKind,
+            ThumbnailSize, HITOMI_METADATA_ORIGIN,
         },
         SourceCandidateDiagnostic, SourceContractError, SourceErrorCode,
     },
@@ -42,9 +46,10 @@ const SCRIPT_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 const NOZOMI_RESPONSE_LIMIT: usize = 32 * 1024 * 1024;
 const THUMBNAIL_RESPONSE_LIMIT: usize = 12 * 1024 * 1024;
 const FULL_IMAGE_RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
-const ALL_TAGS_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
+const CATALOG_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 16_384;
 const MAX_IMAGE_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
+const SOURCE_PAGE_FALLBACK_MAX_EDGE: u32 = 768;
 
 #[derive(Debug, Clone)]
 pub struct HitomiLiveConfig {
@@ -92,6 +97,7 @@ pub struct HitomiLiveAdapter {
     metadata_inflight: Mutex<HashMap<u64, Weak<Mutex<()>>>>,
     gg_cache: Mutex<Option<TimedValue<Arc<GgRoutingTable>>>>,
     queries: Mutex<QueryCache>,
+    source_page_fallback_decode: Mutex<()>,
 }
 
 impl HitomiLiveAdapter {
@@ -121,6 +127,7 @@ impl HitomiLiveAdapter {
             metadata_inflight: Mutex::new(HashMap::new()),
             gg_cache: Mutex::new(None),
             queries: Mutex::new(QueryCache::new(query_capacity)),
+            source_page_fallback_decode: Mutex::new(()),
         }
     }
 
@@ -288,6 +295,7 @@ impl HitomiLiveAdapter {
         candidate: &HitomiImageCandidate,
         priority: ThumbnailPriority,
         cancellation: &CancellationToken,
+        normalize_source_page_fallback: bool,
     ) -> Result<ResolvedThumbnail, SourceContractError> {
         let payload = self.transport.execute(HttpRequest {
             url: candidate.url.clone(),
@@ -297,7 +305,26 @@ impl HitomiLiveAdapter {
             priority: priority.into(),
             cancellation: Some(cancellation.clone()),
         })?;
-        decode_thumbnail(payload, candidate.source_revision.clone().into_string())
+        if normalize_source_page_fallback {
+            check_cancelled(cancellation)?;
+            // Full-size mirror fallbacks are decoded one at a time and reduced
+            // before entering the thumbnail cache/IPC. This keeps a missing
+            // derivative from recreating the WebView memory spike that the
+            // bounded Detail preview window is intended to prevent.
+            let _decode = unpoison(self.source_page_fallback_decode.lock());
+            check_cancelled(cancellation)?;
+            decode_thumbnail(
+                payload,
+                candidate.source_revision.clone().into_string(),
+                Some(SOURCE_PAGE_FALLBACK_MAX_EDGE),
+            )
+        } else {
+            decode_thumbnail(
+                payload,
+                candidate.source_revision.clone().into_string(),
+                None,
+            )
+        }
     }
 
     fn resolve_thumbnail(
@@ -320,9 +347,28 @@ impl HitomiLiveAdapter {
         let routing = self.fetch_gg_routing()?;
         check_cancelled(cancellation)?;
         let mut candidates = webp_thumbnail_candidates(page, &routing, ThumbnailSize::Large)?;
-        // Retain the established low-cost WebP path for every ordinary card
-        // and source-page preview. AVIF is only tried after those derivative
-        // candidates are exhausted.
+        // Floating Detail source-page previews need the alternate w1/w2 WebP
+        // routes when Hitomi's derivative and primary routes have not caught
+        // up yet. Keep ordinary gallery covers on the established low-cost
+        // path so GalleryCard traffic and payload sizes do not change.
+        if matches!(key, ThumbnailKey::GalleryPage { .. }) {
+            for candidate in webp_full_candidates(page, &routing)? {
+                if let Some(existing) = candidates
+                    .iter_mut()
+                    .find(|existing| existing.url == candidate.url)
+                {
+                    // The primary full-path URL also appears in the legacy
+                    // thumbnail list. Preserve its position but mark its real
+                    // payload class so it is normalized before IPC.
+                    existing.kind = HitomiImageKind::Full;
+                } else {
+                    candidates.push(candidate);
+                }
+            }
+        }
+        // AVIF remains the final display-format fallback after every WebP
+        // route. Original JPEG/PNG candidates are intentionally not used by
+        // the thumbnail IPC path.
         if page.has_avif {
             candidates.extend(
                 download_full_candidates(page, &routing)?
@@ -337,7 +383,15 @@ impl HitomiLiveAdapter {
         let mut last_error = None;
         for candidate in candidates {
             check_cancelled(cancellation)?;
-            match self.fetch_image_candidate(&candidate, priority, cancellation) {
+            let normalize_source_page_fallback = matches!(key, ThumbnailKey::GalleryPage { .. })
+                && candidate.kind == HitomiImageKind::Full
+                && candidate.format == HitomiImageFormat::Webp;
+            match self.fetch_image_candidate(
+                &candidate,
+                priority,
+                cancellation,
+                normalize_source_page_fallback,
+            ) {
                 Ok(thumbnail) => {
                     check_cancelled(cancellation)?;
                     return Ok(thumbnail);
@@ -384,18 +438,19 @@ impl ThumbnailResolver for HitomiLiveAdapter {
 impl TagCatalogSource for HitomiLiveAdapter {
     fn tag_catalog_fetch_all(&self) -> Result<Vec<TagCatalogEntry>, RepositoryError> {
         let mut entries = Vec::new();
-        for url in all_tags_urls() {
+        for (namespace, url) in all_catalog_pages() {
             let payload = self.transport.execute(HttpRequest {
                 url,
                 expected: ExpectedContent::Html,
-                max_bytes: ALL_TAGS_RESPONSE_LIMIT,
+                max_bytes: CATALOG_RESPONSE_LIMIT,
                 range: None,
                 priority: HttpPriority::Visible,
                 cancellation: None,
             })?;
-            let html = String::from_utf8(payload.bytes)
-                .map_err(|_| SourceContractError::invalid_data("all tags", "page is not UTF-8"))?;
-            entries.extend(parse_all_tags_page(&html)?);
+            let html = String::from_utf8(payload.bytes).map_err(|_| {
+                SourceContractError::invalid_data("metadata catalog", "page is not UTF-8")
+            })?;
+            entries.extend(parse_catalog_page(&html, namespace)?);
         }
         Ok(merge_catalog(entries)?)
     }
@@ -648,6 +703,7 @@ fn check_cancelled(cancellation: &CancellationToken) -> Result<(), SourceContrac
 fn decode_thumbnail(
     payload: HttpPayload,
     source_revision: String,
+    normalize_max_edge: Option<u32>,
 ) -> Result<ResolvedThumbnail, SourceContractError> {
     let format = image::guess_format(&payload.bytes).map_err(|_| {
         SourceContractError::image_response_invalid(
@@ -715,6 +771,27 @@ fn decode_thumbnail(
         return Err(SourceContractError::image_decode_failed(
             "decoded thumbnail dimensions must be positive",
         ));
+    }
+
+    if let Some(max_edge) = normalize_max_edge {
+        let image = image.thumbnail(max_edge, max_edge);
+        let (width, height) = image.dimensions();
+        let rgba = image.to_rgba8();
+        let mut bytes = Vec::new();
+        WebPEncoder::new_lossless(&mut bytes)
+            .write_image(&rgba, width, height, ExtendedColorType::Rgba8)
+            .map_err(|_| {
+                SourceContractError::image_decode_failed(
+                    "full source-page fallback could not be encoded as a bounded preview",
+                )
+            })?;
+        return Ok(ResolvedThumbnail {
+            content_type: "image/webp".to_owned(),
+            bytes,
+            width,
+            height,
+            source_revision: Some(source_revision),
+        });
     }
 
     Ok(ResolvedThumbnail {

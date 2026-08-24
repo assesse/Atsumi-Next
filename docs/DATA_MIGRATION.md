@@ -128,6 +128,12 @@
 - migration 이름은 `related_gallery_preview_preference`다.
 - `settings.related_preview_width`는 180~320px의 고정 preset(20px 단위)만 허용하며 기본값은 240px이다. Explore·Downloads의 `preview_width`와 독립적으로 Floating Detail의 Related galleries cover에만 적용한다.
 
+### v23 추가 규칙
+
+- migration 이름은 `preview_privacy_mode`다. v20 tag catalog, v21 내부 N-way 장면 묶음, v22 판본 track migration 뒤에만 추가한다.
+- `settings.privacy_mode`는 `0|1` CHECK와 기본값 `0`을 갖는 additive column이다. 기존 사용자의 preview는 migration 뒤에도 자동으로 가려지지 않는다.
+- 이 설정은 실제 이미지·artifact·thumbnail cache를 수정하거나 삭제하지 않고 frontend의 전역 visual mask만 제어한다.
+
 ## 유지보수 데이터 초기화
 
 - thumbnail cache clear는 완료된 재생성 가능 cache만 제거한다. DB artifact/page와 실제 파일에는 쓰지 않는다.
@@ -154,7 +160,7 @@ D:\Atsumi\.atsumi-quarantine\<record-id>\[artist] Gallery title [group] 4051027\
 ## rollback
 
 - Next가 생성한 manifest는 schema와 writer version을 가진다.
-- schema v15~v19 downgrade는 지원하지 않는다. 오래된 binary는 future-schema를 쓰기 전에 거부하며 실제 downgrade는 migration 전 backup과 호환 binary를 함께 복원해야 한다.
+- schema v15~v23 downgrade는 지원하지 않는다. 오래된 binary는 future-schema를 쓰기 전에 거부하며 실제 downgrade는 migration 전 backup과 호환 binary를 함께 복원해야 한다.
 - 운영 DB에 과거 migration table/column을 수동 삭제하거나 migration history를 편집하지 않는다. 복구는 migration 전 일관 backup과 호환 binary를 함께 사용한다.
 
 quarantine에는 자동 보존 만료가 없다. 사용자가 명시적으로 복원하거나, 별도 재확인을 거친 비우기 기능을 실행하기 전까지 파일을 유지한다.

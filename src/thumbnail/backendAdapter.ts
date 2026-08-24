@@ -85,12 +85,12 @@ export class BackendThumbnailAdapter implements ThumbnailCoordinatorAdapter {
   private readonly bufferedCompletions = new Map<string, ThumbnailCompletionEvent>();
   private readonly cancelledRequestIds = new Set<string>();
   private readonly displayUrls = new Map<string, string>();
-  private readonly listenerReady: Promise<void>;
+  private readonly completionListenerReady: Promise<void>;
   private unlisten?: () => void;
   private disposed = false;
 
   constructor(private readonly backend: BackendClient) {
-    this.listenerReady = backend.on("thumbnail:ready", (event) => this.complete(event)).then((unlisten) => {
+    this.completionListenerReady = backend.on("thumbnail:ready", (event) => this.complete(event)).then((unlisten) => {
       if (this.disposed) unlisten();
       else this.unlisten = unlisten;
     });
@@ -202,7 +202,7 @@ export class BackendThumbnailAdapter implements ThumbnailCoordinatorAdapter {
   private async start(pending: PendingResolution, identity: string): Promise<void> {
     const submittedPriority = pending.request.priority;
     try {
-      await this.listenerReady;
+      await this.completionListenerReady;
       if (pending.cancelled) return;
       const result = await this.backend.thumbnailRequest(requestDto(pending.request));
       if (!result.ok) throw errorFrom(result.error.message, result.error.code);

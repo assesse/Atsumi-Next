@@ -75,6 +75,8 @@ pub enum ApplicationError {
     InternalDuplicateEntryNotFound(String),
     #[error("internal removal plan is invalid: {0}")]
     InternalRemovalPlanInvalid(String),
+    #[error("the application is already shutting down")]
+    AppQuitInProgress,
     #[error(transparent)]
     DownloadPipeline(#[from] DownloadPipelineError),
     #[error(transparent)]

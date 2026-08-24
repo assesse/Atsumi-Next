@@ -12,6 +12,7 @@ const settings: SettingsSnapshot = {
   maxColumns: 3,
   previewWidth: 220,
   relatedPreviewWidth: 240,
+  privacyMode: false,
   cacheLimitGb: 5,
   concurrentImageRequests: 5,
   requestStartIntervalMs: 25,
@@ -103,6 +104,16 @@ describe("SettingsDialog operational boundaries", () => {
       expect(relatedPreviewRange?.min).toBe("180");
       expect(relatedPreviewRange?.max).toBe("320");
       expect(relatedPreviewRange?.value).toBe("240");
+      const privacyMode = container.querySelector<HTMLInputElement>('[aria-label="개인정보 보호 모드"]');
+      expect(privacyMode).not.toBeChecked();
+      await act(async () => privacyMode?.click());
+      expect(privacyMode).toBeChecked();
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent === "설정 기본값")
+          ?.click();
+      });
+      expect(privacyMode).not.toBeChecked();
       expect(container.textContent).toContain("사용가능 인자 : {artist}, {title}, {group}, {id}");
       expect(container.textContent).toContain("미리보기 : [작가] 작품 제목 [그룹] 4113714");
       expect(container.textContent).not.toContain("{id}는 필수입니다");
@@ -119,6 +130,9 @@ describe("SettingsDialog operational boundaries", () => {
           ?.click();
       });
       await act(async () => {
+        privacyMode?.click();
+      });
+      await act(async () => {
         [...container.querySelectorAll<HTMLButtonElement>("button")]
           .find((button) => button.textContent === "저장")
           ?.click();
@@ -127,6 +141,7 @@ describe("SettingsDialog operational boundaries", () => {
         folderNameTemplate: "[{artist}] {title} [{group}] {id}",
         autoFindHistoryMode: "include_all_history",
         relatedPreviewWidth: 240,
+        privacyMode: true,
       }));
     } finally {
       await act(async () => root.unmount());

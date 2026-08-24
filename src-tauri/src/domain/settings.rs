@@ -144,6 +144,7 @@ pub struct SettingsSnapshot {
     pub max_columns: u32,
     pub preview_width: u32,
     pub related_preview_width: u32,
+    pub privacy_mode: bool,
     pub cache_limit_gb: u32,
     pub concurrent_image_requests: u32,
     pub request_start_interval_ms: u64,
@@ -159,6 +160,7 @@ impl Default for SettingsSnapshot {
             max_columns: DEFAULT_MAX_COLUMNS,
             preview_width: DEFAULT_PREVIEW_WIDTH,
             related_preview_width: DEFAULT_RELATED_PREVIEW_WIDTH,
+            privacy_mode: false,
             cache_limit_gb: DEFAULT_CACHE_LIMIT_GB,
             concurrent_image_requests: DEFAULT_CONCURRENT_IMAGE_REQUESTS,
             request_start_interval_ms: DEFAULT_REQUEST_START_INTERVAL_MS,
@@ -175,6 +177,7 @@ pub struct SettingsPatch {
     pub max_columns: Option<u32>,
     pub preview_width: Option<u32>,
     pub related_preview_width: Option<u32>,
+    pub privacy_mode: Option<bool>,
     pub cache_limit_gb: Option<u32>,
     pub concurrent_image_requests: Option<u32>,
     pub request_start_interval_ms: Option<u64>,
@@ -199,6 +202,9 @@ impl SettingsSnapshot {
         }
         if let Some(value) = patch.related_preview_width {
             next.related_preview_width = value;
+        }
+        if let Some(value) = patch.privacy_mode {
+            next.privacy_mode = value;
         }
         if let Some(value) = patch.cache_limit_gb {
             next.cache_limit_gb = value;

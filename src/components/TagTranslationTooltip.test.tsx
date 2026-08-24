@@ -1,9 +1,14 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MetadataChip } from "./MetadataChip";
 
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true));
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("TagTranslationTooltip", () => {
   it("opens on focus, describes the tag, and closes on Escape or blur", async () => {
@@ -30,6 +35,7 @@ describe("TagTranslationTooltip", () => {
   });
 
   it("uses a short hover delay and never traps pointer interaction", async () => {
+    vi.useFakeTimers();
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -37,9 +43,9 @@ describe("TagTranslationTooltip", () => {
       await act(async () => root.render(<MetadataChip value="tag:webtoon" kind="tag" onSearch={vi.fn()} onToggleFavorite={vi.fn()} />));
       const chip = container.querySelector<HTMLButtonElement>(".tag")!;
       await act(async () => chip.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
-      await act(async () => new Promise((resolve) => window.setTimeout(resolve, 220)));
+      await act(async () => vi.advanceTimersByTime(220));
       expect(document.body.querySelector("[role='tooltip']")).toBeNull();
-      await act(async () => new Promise((resolve) => window.setTimeout(resolve, 20)));
+      await act(async () => vi.advanceTimersByTime(20));
       expect(document.body.querySelector<HTMLElement>("[role='tooltip']")).toHaveClass("tag-translation-tooltip");
       await act(async () => chip.dispatchEvent(new MouseEvent("mouseout", { bubbles: true })));
       expect(document.body.querySelector("[role='tooltip']")).toBeNull();

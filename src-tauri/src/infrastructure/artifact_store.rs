@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs::{self, File, OpenOptions},
     io::{BufWriter, Cursor, ErrorKind, Read, Write},
     path::{Path, PathBuf},
@@ -161,30 +162,18 @@ impl ArtifactStore for FilesystemArtifactStore {
                 reason: "ambiguous page files were moved to recovery review storage",
             });
         }
-        let stored = match verify_webp_file(
-            &layout.root,
-            relative_path.clone(),
-            source_page_number,
-            source_revision,
-        ) {
-            Ok(stored) => stored,
-            Err(_) => {
-                recover_conflicting_page_files(layout, std::slice::from_ref(&relative_path))?;
-                return Ok(ExistingPageVerification::Invalid {
-                    relative_path,
-                    reason: "an unverifiable page was moved to recovery review storage",
-                });
-            }
-        };
-        if let Some(expected) = expected {
-            if expected.byte_length != stored.byte_length || expected.sha256 != stored.sha256 {
-                recover_conflicting_page_files(layout, std::slice::from_ref(&relative_path))?;
-                return Ok(ExistingPageVerification::Invalid {
-                    relative_path,
-                    reason: "stored page length or SHA-256 does not match the database checkpoint",
-                });
-            }
-        }
+        let expected = expected.expect("the ambiguous checkpoint branch returned above");
+        let stored =
+            match verify_checkpoint_webp_file(&layout.root, relative_path.clone(), expected) {
+                Ok(stored) => stored,
+                Err(_) => {
+                    recover_conflicting_page_files(layout, std::slice::from_ref(&relative_path))?;
+                    return Ok(ExistingPageVerification::Invalid {
+                        relative_path,
+                        reason: "an unverifiable page was moved to recovery review storage",
+                    });
+                }
+            };
         Ok(ExistingPageVerification::Verified(stored))
     }
 
@@ -207,6 +196,23 @@ impl ArtifactStore for FilesystemArtifactStore {
         reject_symlink_leaf(&final_path)?;
         reject_symlink_leaf(&part_path)?;
         let bytes = normalized_webp_bytes(page)?;
+        let expected_part = StoredPage {
+            source_page_number: page.source_page_number,
+            relative_path: part_relative_path.clone(),
+            byte_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            sha256: ArtifactSha256::new(format!("{:x}", Sha256::digest(bytes.as_ref()))).map_err(
+                |error| {
+                    DownloadPipelineError::new(
+                        DownloadPipelineErrorCode::HashMismatch,
+                        error.to_string(),
+                        false,
+                    )
+                },
+            )?,
+            storage_format: ArtifactStorageFormat::Webp,
+            source_revision: page.source_revision.clone(),
+            verified_at: now_unix_ms(),
+        };
         ensure_not_cancelled(cancellation)?;
 
         let file = OpenOptions::new()
@@ -231,18 +237,13 @@ impl ArtifactStore for FilesystemArtifactStore {
         drop(writer);
         ensure_not_cancelled(cancellation)?;
 
-        let part_stored = verify_webp_file(
-            &layout.root,
-            part_relative_path.clone(),
-            page.source_page_number,
-            &page.source_revision,
-        )?;
+        let part_stored =
+            verify_checkpoint_webp_file(&layout.root, part_relative_path.clone(), &expected_part)?;
         if final_path.exists() {
-            let final_stored = verify_webp_file(
+            let final_stored = verify_checkpoint_webp_file(
                 &layout.root,
                 final_relative_path.clone(),
-                page.source_page_number,
-                &page.source_revision,
+                &expected_part,
             )?;
             if final_stored.sha256 != part_stored.sha256 {
                 return Err(DownloadPipelineError::new(
@@ -258,12 +259,10 @@ impl ArtifactStore for FilesystemArtifactStore {
         }
         fs::rename(&part_path, &final_path)
             .map_err(|_| filesystem_error("The verified page could not be finalized atomically"))?;
-        verify_webp_file(
-            &layout.root,
-            final_relative_path,
-            page.source_page_number,
-            &page.source_revision,
-        )
+        Ok(StoredPage {
+            relative_path: final_relative_path,
+            ..part_stored
+        })
     }
 
     fn write_manifest(
@@ -413,6 +412,32 @@ impl ArtifactStore for FilesystemArtifactStore {
                 false,
             )),
         }
+    }
+
+    fn artifact_directory_path(
+        &self,
+        root: &Path,
+        relative_directory: &ArtifactRelativePath,
+    ) -> Result<PathBuf, DownloadPipelineError> {
+        let directory = resolve_managed_path(root, relative_directory, true).map_err(|error| {
+            if error.code == DownloadPipelineErrorCode::ArtifactMissing {
+                DownloadPipelineError::new(
+                    DownloadPipelineErrorCode::ArtifactMissing,
+                    "The gallery storage folder is not ready yet",
+                    false,
+                )
+            } else {
+                error
+            }
+        })?;
+        if !directory.is_dir() {
+            return Err(DownloadPipelineError::new(
+                DownloadPipelineErrorCode::ArtifactMissing,
+                "The managed gallery storage path is not a folder",
+                false,
+            ));
+        }
+        Ok(directory)
     }
 
     fn open_with_default_viewer(&self, path: &Path) -> Result<(), DownloadPipelineError> {
@@ -672,10 +697,10 @@ fn recover_conflicting_page_files(
 
 pub(crate) fn normalized_webp_bytes(
     page: &DownloadPagePayload,
-) -> Result<Vec<u8>, DownloadPipelineError> {
+) -> Result<Cow<'_, [u8]>, DownloadPipelineError> {
     if page.source_format == DownloadSourceImageFormat::Webp {
         decode_image(&page.bytes, ImageFormat::WebP)?;
-        return Ok(page.bytes.clone());
+        return Ok(Cow::Borrowed(&page.bytes));
     }
     let format = match page.source_format {
         DownloadSourceImageFormat::Webp => ImageFormat::WebP,
@@ -705,7 +730,8 @@ pub(crate) fn normalized_webp_bytes(
                         false,
                     )
                 })?;
-            return Ok(output);
+            decode_image(&output, ImageFormat::WebP)?;
+            return Ok(Cow::Owned(output));
         }
     };
     let image = decode_image(&page.bytes, format)?;
@@ -725,7 +751,8 @@ pub(crate) fn normalized_webp_bytes(
                 false,
             )
         })?;
-    Ok(output)
+    decode_image(&output, ImageFormat::WebP)?;
+    Ok(Cow::Owned(output))
 }
 
 fn decode_image(
@@ -756,55 +783,84 @@ fn decode_image(
     Ok(image)
 }
 
-fn verify_webp_file(
+/// Re-validates an already decoded and checkpointed page without decoding the
+/// same immutable payload again. Length, WebP signature and SHA-256 must all
+/// still match the canonical checkpoint before the page is reused or a bundle
+/// can complete.
+fn verify_checkpoint_webp_file(
     root: &Path,
     relative_path: ArtifactRelativePath,
-    source_page_number: SourcePageNumber,
-    source_revision: &str,
+    expected: &StoredPage,
 ) -> Result<StoredPage, DownloadPipelineError> {
+    if expected.storage_format != ArtifactStorageFormat::Webp {
+        return Err(DownloadPipelineError::new(
+            DownloadPipelineErrorCode::ManifestInvalid,
+            "The checkpoint storage format is not WebP",
+            false,
+        ));
+    }
     let path = resolve_managed_path(root, &relative_path, true)?;
     let mut file = File::open(&path)
-        .map_err(|_| filesystem_error("The page file could not be opened for verification"))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|_| filesystem_error("The page file could not be read for verification"))?;
-    if bytes.is_empty() {
+        .map_err(|_| filesystem_error("The checkpointed page could not be opened"))?;
+    let byte_length = file
+        .metadata()
+        .map_err(|_| filesystem_error("The checkpointed page length could not be read"))?
+        .len();
+    if byte_length != expected.byte_length {
         return Err(DownloadPipelineError::new(
-            DownloadPipelineErrorCode::ImageDecodeFailed,
-            "The page file is empty",
+            DownloadPipelineErrorCode::HashMismatch,
+            "The checkpointed page byte length changed",
             false,
         ));
     }
-    let format = image::guess_format(&bytes).map_err(|_| {
-        DownloadPipelineError::new(
-            DownloadPipelineErrorCode::ImageDecodeFailed,
-            "The stored page does not have a recognized image signature",
-            false,
-        )
-    })?;
-    if format != ImageFormat::WebP {
+
+    let mut digest = Sha256::new();
+    let mut signature = [0_u8; 12];
+    let mut signature_length = 0_usize;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| filesystem_error("The checkpointed page could not be hashed"))?;
+        if read == 0 {
+            break;
+        }
+        if signature_length < signature.len() {
+            let copied = (signature.len() - signature_length).min(read);
+            signature[signature_length..signature_length + copied]
+                .copy_from_slice(&buffer[..copied]);
+            signature_length += copied;
+        }
+        digest.update(&buffer[..read]);
+    }
+    if signature_length != signature.len()
+        || &signature[..4] != b"RIFF"
+        || &signature[8..] != b"WEBP"
+    {
         return Err(DownloadPipelineError::new(
             DownloadPipelineErrorCode::ImageDecodeFailed,
-            "The stored page is not a WebP image",
+            "The checkpointed page is not a WebP image",
             false,
         ));
     }
-    decode_image(&bytes, ImageFormat::WebP)?;
-    let digest = ArtifactSha256::new(format!("{:x}", Sha256::digest(&bytes))).map_err(|error| {
+    let actual = ArtifactSha256::new(format!("{:x}", digest.finalize())).map_err(|error| {
         DownloadPipelineError::new(
             DownloadPipelineErrorCode::HashMismatch,
             error.to_string(),
             false,
         )
     })?;
+    if actual != expected.sha256 {
+        return Err(DownloadPipelineError::new(
+            DownloadPipelineErrorCode::HashMismatch,
+            "The checkpointed page SHA-256 changed",
+            false,
+        ));
+    }
     Ok(StoredPage {
-        source_page_number,
         relative_path,
-        byte_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        sha256: digest,
-        storage_format: ArtifactStorageFormat::Webp,
-        source_revision: source_revision.to_owned(),
         verified_at: now_unix_ms(),
+        ..expected.clone()
     })
 }
 
@@ -959,7 +1015,7 @@ fn open_default_viewer(path: &Path) -> Result<(), DownloadPipelineError> {
         if result.0 as isize <= 32 {
             return Err(DownloadPipelineError::new(
                 DownloadPipelineErrorCode::Filesystem,
-                "Windows could not open the page with its default viewer",
+                "Windows could not open the selected artifact item",
                 false,
             ));
         }
@@ -971,7 +1027,7 @@ fn open_default_viewer(path: &Path) -> Result<(), DownloadPipelineError> {
         let _ = path;
         Err(DownloadPipelineError::new(
             DownloadPipelineErrorCode::Filesystem,
-            "Opening artifacts is supported only on Windows",
+            "Opening artifact files and folders is supported only on Windows",
             false,
         ))
     }
@@ -1039,6 +1095,33 @@ mod tests {
     }
 
     #[test]
+    fn artifact_directory_path_requires_an_existing_root_bound_folder() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("downloads");
+        fs::create_dir(&root).unwrap();
+        let relative = ArtifactRelativePath::new("gallery-42").unwrap();
+        let store = FilesystemArtifactStore::new();
+
+        let missing = store.artifact_directory_path(&root, &relative).unwrap_err();
+        assert_eq!(missing.code, DownloadPipelineErrorCode::ArtifactMissing);
+
+        let expected = root.join(relative.as_str());
+        fs::create_dir(&expected).unwrap();
+        assert_eq!(
+            store.artifact_directory_path(&root, &relative).unwrap(),
+            expected.canonicalize().unwrap()
+        );
+
+        fs::remove_dir(&expected).unwrap();
+        fs::write(&expected, b"not a directory").unwrap();
+        let not_a_directory = store.artifact_directory_path(&root, &relative).unwrap_err();
+        assert_eq!(
+            not_a_directory.code,
+            DownloadPipelineErrorCode::ArtifactMissing
+        );
+    }
+
+    #[test]
     fn page_without_checkpoint_is_moved_to_unique_recovery_storage() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("downloads");
@@ -1064,6 +1147,53 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(conflicts, 1);
+    }
+
+    #[test]
+    fn checkpoint_reuse_streams_hash_and_preserves_corruption_for_recovery() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("downloads");
+        fs::create_dir(&root).unwrap();
+        let store = FilesystemArtifactStore::new();
+        let relative = ArtifactRelativePath::new("reserved-43").unwrap();
+        let layout = store.prepare_layout(&root, &relative, false).unwrap();
+        let source_page = SourcePageNumber::new(1).unwrap();
+        let stored = store
+            .store_page(&layout, &png_page(), &CancellationToken::new())
+            .unwrap();
+
+        assert!(matches!(
+            store
+                .verify_existing_page(
+                    &layout,
+                    source_page,
+                    &stored.source_revision,
+                    Some(&stored),
+                )
+                .unwrap(),
+            ExistingPageVerification::Verified(ref verified)
+                if verified.byte_length == stored.byte_length && verified.sha256 == stored.sha256
+        ));
+
+        let final_path = root.join("reserved-43").join("0001.webp");
+        let mut corrupted = fs::read(&final_path).unwrap();
+        let last = corrupted.last_mut().expect("stored WebP is non-empty");
+        *last ^= 0x01;
+        fs::write(&final_path, corrupted).unwrap();
+
+        assert!(matches!(
+            store
+                .verify_existing_page(&layout, source_page, &stored.source_revision, Some(&stored),)
+                .unwrap(),
+            ExistingPageVerification::Invalid { .. }
+        ));
+        assert!(!final_path.exists());
+        assert_eq!(
+            fs::read_dir(root.join(".atsumi-recovery").join("conflicts"))
+                .unwrap()
+                .count(),
+            1
+        );
     }
 
     #[cfg(windows)]

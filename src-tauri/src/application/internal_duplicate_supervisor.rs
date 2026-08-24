@@ -10,11 +10,11 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ArtifactManifest, ArtifactRelativePath, DownloadEntryId, HashProfile,
+        ArtifactBundle, ArtifactManifest, ArtifactRelativePath, DownloadEntryId, HashProfile,
         InternalDuplicateReview, InternalDuplicateSnapshot, InternalRemovalApplyRequest,
         InternalRemovalPlan, InternalRemovalPlanRequest, InternalRemovalResult,
-        InternalRemovalUndoRequest, InternalScanRun, InternalScanSkip, InternalScanState,
-        PageArtifactState, PageQuarantineSaga, PageQuarantineState,
+        InternalRemovalUndoRequest, InternalScanRequest, InternalScanRun, InternalScanSkip,
+        InternalScanState, PageArtifactState, PageQuarantineSaga, PageQuarantineState,
         INTERNAL_DUPLICATE_ALGORITHM_VERSION,
     },
     thumbnail::CancellationToken,
@@ -49,8 +49,19 @@ struct InternalDuplicateSupervisorInner {
 
 struct ActiveRun {
     run_id: String,
+    entry_ids: Option<BTreeSet<DownloadEntryId>>,
     cancellation: CancellationToken,
     worker: Option<JoinHandle<()>>,
+}
+
+pub(crate) struct PreparedInternalScan {
+    requested_entry_ids: Option<BTreeSet<DownloadEntryId>>,
+    root: PathBuf,
+    bundles: Vec<ArtifactBundle>,
+    skips: Vec<InternalScanSkip>,
+    total_artifacts: u32,
+    total_pages: u32,
+    profile: HashProfile,
 }
 
 impl InternalDuplicateSupervisor {
@@ -134,18 +145,76 @@ impl InternalDuplicateSupervisor {
             .ok_or_else(|| ApplicationError::InternalDuplicateEntryNotFound(entry_id.to_string()))
     }
 
-    pub fn start(&self) -> Result<InternalScanRun, ApplicationError> {
-        let _control = self.control_lock()?;
-        self.reap_finished_worker();
-        if let Some(run) = self.active_run()? {
+    pub fn start(&self, request: InternalScanRequest) -> Result<InternalScanRun, ApplicationError> {
+        let entry_ids = normalize_scan_entry_ids(request.entry_ids)?;
+        let requested_entry_ids = entry_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if let Some(run) = self.active_for_scope(Some(&requested_entry_ids))? {
             return Ok(run);
         }
+        let prepared = self.prepare_start_scoped(Some(entry_ids))?;
+        self.commit_start(prepared)
+    }
+
+    /// Full-library analysis is reserved for the explicit maintenance rebuild.
+    /// User-facing scans always call `start` with selected entry IDs.
+    pub fn start_all(&self) -> Result<InternalScanRun, ApplicationError> {
+        if let Some(run) = self.active_for_scope(None)? {
+            return Ok(run);
+        }
+        let prepared = self.prepare_start_all()?;
+        self.commit_start(prepared)
+    }
+
+    pub(crate) fn prepare_start(
+        &self,
+        request: InternalScanRequest,
+    ) -> Result<PreparedInternalScan, ApplicationError> {
+        let entry_ids = normalize_scan_entry_ids(request.entry_ids)?;
+        self.prepare_start_scoped(Some(entry_ids))
+    }
+
+    pub(crate) fn prepare_start_all(&self) -> Result<PreparedInternalScan, ApplicationError> {
+        self.prepare_start_scoped(None)
+    }
+
+    fn prepare_start_scoped(
+        &self,
+        entry_ids: Option<Vec<DownloadEntryId>>,
+    ) -> Result<PreparedInternalScan, ApplicationError> {
+        let requested_entry_ids = entry_ids
+            .as_ref()
+            .map(|values| values.iter().cloned().collect::<BTreeSet<_>>());
         let root = self.download_root()?;
-        let candidates = select_scan_bundles(
-            self.inner
-                .duplicate_repository
-                .duplicate_artifact_bundles()?,
-        );
+        let candidates = if let Some(entry_ids) = entry_ids {
+            let mut gallery_ids = BTreeSet::new();
+            let mut bundles = Vec::with_capacity(entry_ids.len());
+            for entry_id in entry_ids {
+                let bundle = self
+                    .inner
+                    .artifact_repository
+                    .artifact_bundle_get(&entry_id)?
+                    .filter(|bundle| verified_scan_pages(bundle).is_some())
+                    .ok_or_else(|| {
+                        ApplicationError::InternalDuplicateEntryNotFound(entry_id.to_string())
+                    })?;
+                if !gallery_ids.insert(bundle.gallery.id) {
+                    return Err(crate::domain::ValidationError::new(
+                        "entryIds",
+                        "must not contain multiple artifacts for the same gallery",
+                    )
+                    .into());
+                }
+                bundles.push(bundle);
+            }
+            sort_scan_bundles(&mut bundles);
+            bundles
+        } else {
+            select_scan_bundles(
+                self.inner
+                    .duplicate_repository
+                    .duplicate_artifact_bundles()?,
+            )
+        };
         let (bundles, skips) = split_scan_bundles(candidates);
         let total_artifacts = u32::try_from(bundles.len()).unwrap_or(u32::MAX);
         let total_pages = bundles
@@ -153,7 +222,45 @@ impl InternalDuplicateSupervisor {
             .filter_map(verified_scan_pages)
             .map(|pages| u32::try_from(pages.len()).unwrap_or(u32::MAX))
             .fold(0_u32, u32::saturating_add);
-        let profile = HashProfile::current();
+        Ok(PreparedInternalScan {
+            requested_entry_ids,
+            root,
+            bundles,
+            skips,
+            total_artifacts,
+            total_pages,
+            profile: HashProfile::current(),
+        })
+    }
+
+    pub(crate) fn commit_start(
+        &self,
+        prepared: PreparedInternalScan,
+    ) -> Result<InternalScanRun, ApplicationError> {
+        let _control = self.control_lock()?;
+        self.reap_finished_worker();
+        if let Some(run) = self.active_run()? {
+            let same_scope = self.active_lock()?.as_ref().is_some_and(|active| {
+                active.entry_ids.as_ref() == prepared.requested_entry_ids.as_ref()
+            });
+            return if same_scope {
+                Ok(run)
+            } else {
+                Err(RepositoryError::OperationActive(
+                    "internal duplicate scan for another selection".into(),
+                )
+                .into())
+            };
+        }
+        let PreparedInternalScan {
+            requested_entry_ids,
+            root,
+            bundles,
+            skips,
+            total_artifacts,
+            total_pages,
+            profile,
+        } = prepared;
         let run = self.inner.repository.internal_scan_start(
             profile.profile_version,
             INTERNAL_DUPLICATE_ALGORITHM_VERSION,
@@ -188,6 +295,7 @@ impl InternalDuplicateSupervisor {
                     InternalScanState::Failed,
                     Some("INTERNAL_SCAN_WORKER_UNAVAILABLE"),
                     Some("The internal duplicate worker could not be started"),
+                    &[],
                 );
                 RepositoryError::Other(format!(
                     "could not start internal duplicate worker: {error}"
@@ -195,11 +303,35 @@ impl InternalDuplicateSupervisor {
             })?;
         *self.active_lock()? = Some(ActiveRun {
             run_id,
+            entry_ids: requested_entry_ids,
             cancellation,
             worker: Some(worker),
         });
         let _ = self.inner.events.send(run.clone());
         Ok(run)
+    }
+
+    fn active_for_scope(
+        &self,
+        requested_entry_ids: Option<&BTreeSet<DownloadEntryId>>,
+    ) -> Result<Option<InternalScanRun>, ApplicationError> {
+        let _control = self.control_lock()?;
+        self.reap_finished_worker();
+        let Some(run) = self.active_run()? else {
+            return Ok(None);
+        };
+        let same_scope = self
+            .active_lock()?
+            .as_ref()
+            .is_some_and(|active| active.entry_ids.as_ref() == requested_entry_ids);
+        if same_scope {
+            Ok(Some(run))
+        } else {
+            Err(RepositoryError::OperationActive(
+                "internal duplicate scan for another selection".into(),
+            )
+            .into())
+        }
     }
 
     pub fn cancel(&self) -> Result<InternalScanRun, ApplicationError> {
@@ -221,6 +353,7 @@ impl InternalDuplicateSupervisor {
                 InternalScanState::Cancelled,
                 Some("INTERNAL_SCAN_CANCELLED"),
                 Some("The internal duplicate scan was cancelled"),
+                &[],
             )?
             .ok_or(ApplicationError::InternalDuplicateScanNotRunning)?;
         if let Some(mut active) = self.active_lock()?.take() {
@@ -370,11 +503,20 @@ impl InternalDuplicateSupervisor {
                 InternalScanState::Cancelled,
                 Some("INTERNAL_SCAN_APP_EXIT"),
                 Some("The application closed during internal duplicate scanning"),
+                &[],
             );
             if let Some(worker) = active.worker.take() {
                 let _ = worker.join();
             }
         }
+    }
+
+    /// Read a stable active-run projection without leaking selection details
+    /// or retaining a completed worker as active work.
+    pub fn active_run_snapshot(&self) -> Result<Option<InternalScanRun>, ApplicationError> {
+        let _control = self.control_lock()?;
+        self.reap_finished_worker();
+        self.active_run()
     }
 
     fn finish_quarantine(
@@ -602,6 +744,7 @@ fn run_scan(
                 InternalScanState::Failed,
                 Some("INTERNAL_SCAN_FAILED"),
                 Some(&stable_scan_error(&error)),
+                &[],
             ) {
                 let _ = inner.events.send(run);
             }
@@ -685,11 +828,17 @@ fn scan_inner(
     if cancelled(inner, run_id, cancellation)? {
         return Ok(());
     }
-    if let Some(run) =
-        inner
-            .repository
-            .internal_scan_finish(run_id, InternalScanState::Completed, None, None)?
-    {
+    let completed_gallery_ids = bundles
+        .iter()
+        .map(|bundle| bundle.gallery.id)
+        .collect::<Vec<_>>();
+    if let Some(run) = inner.repository.internal_scan_finish(
+        run_id,
+        InternalScanState::Completed,
+        None,
+        None,
+        &completed_gallery_ids,
+    )? {
         let _ = inner.events.send(run);
     }
     Ok(())
@@ -710,6 +859,12 @@ fn select_scan_bundles(
         .into_iter()
         .filter(|bundle| verified_scan_pages(bundle).is_some())
         .collect::<Vec<_>>();
+    sort_scan_bundles(&mut bundles);
+    bundles.dedup_by(|left, right| left.gallery.id == right.gallery.id);
+    bundles
+}
+
+fn sort_scan_bundles(bundles: &mut [crate::domain::ArtifactBundle]) {
     bundles.sort_by(|left, right| {
         left.gallery.id.cmp(&right.gallery.id).then_with(|| {
             right
@@ -720,8 +875,6 @@ fn select_scan_bundles(
                 .then_with(|| left.artifact.entry_id.cmp(&right.artifact.entry_id))
         })
     });
-    bundles.dedup_by(|left, right| left.gallery.id == right.gallery.id);
-    bundles
 }
 
 fn canonical_page_count(bundle: &crate::domain::ArtifactBundle) -> usize {
@@ -777,6 +930,24 @@ fn validate_selections(
     Ok(())
 }
 
+fn normalize_scan_entry_ids(values: Vec<String>) -> Result<Vec<DownloadEntryId>, ApplicationError> {
+    if values.is_empty() {
+        return Err(crate::domain::ValidationError::new("entryIds", "must not be empty").into());
+    }
+    if values.len() > 200 {
+        return Err(crate::domain::ValidationError::new(
+            "entryIds",
+            "must contain at most 200 entries",
+        )
+        .into());
+    }
+    let mut unique = BTreeSet::new();
+    for value in values {
+        unique.insert(DownloadEntryId::new(value)?);
+    }
+    Ok(unique.into_iter().collect())
+}
+
 fn normalized_entry_id(value: &str) -> Result<DownloadEntryId, ApplicationError> {
     DownloadEntryId::new(value).map_err(Into::into)
 }
@@ -805,7 +976,12 @@ fn short_id(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, sync::mpsc, time::Duration};
+    use std::{
+        collections::BTreeSet,
+        io::Cursor,
+        sync::{mpsc, Arc},
+        time::Duration,
+    };
 
     use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
     use sha2::{Digest, Sha256};
@@ -820,13 +996,17 @@ mod tests {
             ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
             ArtifactStorageFormat, DownloadArtifact, DownloadArtifactState, Gallery, GalleryId,
             GalleryMetadata, InternalRemovalApplyRequest, InternalRemovalPlanRequest,
-            InternalRemovalSelection, InternalRemovalUndoRequest, PageArtifact, PageArtifactState,
-            PageQuarantineState, SourcePageNumber,
+            InternalRemovalSelection, InternalRemovalUndoRequest, InternalScanRequest,
+            InternalScanState, PageArtifact, PageArtifactState, PageQuarantineState,
+            SourcePageNumber, INTERNAL_DUPLICATE_ALGORITHM_VERSION,
         },
         infrastructure::{FilesystemArtifactStore, SqliteRepository},
+        thumbnail::CancellationToken,
     };
 
-    use super::{ArtifactLayout, InternalDuplicateSupervisor};
+    use super::{
+        ActiveRun, ApplicationError, ArtifactLayout, InternalDuplicateSupervisor, RepositoryError,
+    };
 
     fn webp_fixture(seed: u8) -> Vec<u8> {
         let mut image = RgbaImage::new(24, 24);
@@ -849,6 +1029,138 @@ mod tests {
             .write_to(&mut cursor, ImageFormat::WebP)
             .unwrap();
         cursor.into_inner()
+    }
+
+    #[test]
+    fn active_run_snapshot_includes_running_and_excludes_terminal_runs() {
+        let repository = Arc::new(SqliteRepository::open_in_memory().unwrap());
+        let run = InternalDuplicateRepository::internal_scan_start(
+            repository.as_ref(),
+            1,
+            INTERNAL_DUPLICATE_ALGORITHM_VERSION,
+            0,
+            0,
+            &[],
+        )
+        .expect("seed running internal duplicate scan");
+        let store: Arc<dyn ArtifactStore> = Arc::new(FilesystemArtifactStore::new());
+        let (events, _receiver) = mpsc::channel();
+        let supervisor = InternalDuplicateSupervisor::new(
+            repository.clone(),
+            repository.clone(),
+            repository.clone(),
+            repository.clone(),
+            store,
+            events,
+        );
+        *supervisor.active_lock().unwrap() = Some(ActiveRun {
+            run_id: run.run_id.clone(),
+            entry_ids: None,
+            cancellation: CancellationToken::new(),
+            worker: None,
+        });
+
+        let active = supervisor
+            .active_run_snapshot()
+            .expect("read active internal duplicate run")
+            .expect("running scan should be included");
+        assert_eq!(active.run_id, run.run_id);
+        assert_eq!(active.state, InternalScanState::Running);
+
+        InternalDuplicateRepository::internal_scan_finish(
+            repository.as_ref(),
+            &run.run_id,
+            InternalScanState::Completed,
+            None,
+            None,
+            &[],
+        )
+        .expect("finish internal duplicate scan");
+        assert!(supervisor
+            .active_run_snapshot()
+            .expect("read terminal internal duplicate run")
+            .is_none());
+        *supervisor.active_lock().unwrap() = None;
+    }
+
+    #[test]
+    fn commit_rechecks_for_a_same_scope_run_started_during_unlocked_preflight() {
+        let temporary = tempdir().expect("create internal scan root");
+        let root = temporary.path().join("downloads");
+        std::fs::create_dir_all(&root).expect("create download root");
+        let repository = Arc::new(SqliteRepository::open_in_memory().unwrap());
+        let mut settings = StateRepository::settings_get(repository.as_ref()).unwrap();
+        let expected_revision = settings.revision;
+        settings.revision += 1;
+        settings.download_root = root.to_string_lossy().into_owned();
+        assert!(StateRepository::settings_compare_and_set(
+            repository.as_ref(),
+            &settings,
+            expected_revision,
+        )
+        .unwrap());
+        let store: Arc<dyn ArtifactStore> = Arc::new(FilesystemArtifactStore::new());
+        let (events, _receiver) = mpsc::channel();
+        let supervisor = InternalDuplicateSupervisor::new(
+            repository.clone(),
+            repository.clone(),
+            repository.clone(),
+            repository.clone(),
+            store,
+            events,
+        );
+
+        let prepared = supervisor
+            .prepare_start_all()
+            .expect("prepare full-library scan input");
+        let conflicting_prepared = supervisor
+            .prepare_start_all()
+            .expect("prepare a second full-library scan input");
+        let existing = InternalDuplicateRepository::internal_scan_start(
+            repository.as_ref(),
+            1,
+            INTERNAL_DUPLICATE_ALGORITHM_VERSION,
+            0,
+            0,
+            &[],
+        )
+        .expect("start competing internal duplicate scan");
+        *supervisor.active_lock().unwrap() = Some(ActiveRun {
+            run_id: existing.run_id.clone(),
+            entry_ids: None,
+            cancellation: CancellationToken::new(),
+            worker: None,
+        });
+
+        let returned = supervisor
+            .commit_start(prepared)
+            .expect("reuse the same-scope run that won the commit race");
+        assert_eq!(returned.run_id, existing.run_id);
+        supervisor
+            .active_lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .entry_ids = Some(BTreeSet::from([crate::domain::DownloadEntryId::new(
+            "selected-entry",
+        )
+        .unwrap()]));
+        assert!(matches!(
+            supervisor.commit_start(conflicting_prepared),
+            Err(ApplicationError::Repository(
+                RepositoryError::OperationActive(_)
+            ))
+        ));
+        *supervisor.active_lock().unwrap() = None;
+        InternalDuplicateRepository::internal_scan_finish(
+            repository.as_ref(),
+            &existing.run_id,
+            InternalScanState::Cancelled,
+            None,
+            None,
+            &[],
+        )
+        .expect("finish seeded internal duplicate run");
     }
 
     #[test]
@@ -972,7 +1284,19 @@ mod tests {
             std::sync::Arc::clone(&store),
             events,
         );
-        supervisor.start().unwrap();
+        assert!(supervisor
+            .start(InternalScanRequest { entry_ids: vec![] })
+            .is_err());
+        assert!(supervisor
+            .start(InternalScanRequest {
+                entry_ids: vec!["missing-entry".into()],
+            })
+            .is_err());
+        supervisor
+            .start(InternalScanRequest {
+                entry_ids: vec![entry_id.to_string()],
+            })
+            .unwrap();
         let snapshot = (0..100)
             .find_map(|_| {
                 let snapshot = supervisor.snapshot().unwrap();

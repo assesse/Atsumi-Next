@@ -95,7 +95,8 @@ impl JobState {
             ) | (
                 Self::Interrupted | Self::Failed | Self::Cancelled,
                 Self::Queued
-            ) | (Self::Interrupted | Self::Failed, Self::Cancelled)
+            ) | (Self::Interrupted, Self::Failed)
+                | (Self::Interrupted | Self::Failed, Self::Cancelled)
                 | (
                     Self::Completed,
                     Self::Quarantined | Self::ReviewRequired | Self::Failed

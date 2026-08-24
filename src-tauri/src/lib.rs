@@ -9,26 +9,28 @@ pub mod thumbnail;
 mod tests;
 
 use std::{
-    sync::{mpsc, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     thread,
     time::Duration,
 };
 
 use application::{
     ApplicationService, ArtifactRepository, ArtifactStore, AutoFindSource, AutoFindSupervisor,
-    AutomationRepository, DetailOriginalReady, DetailOriginalSupervisor,
-    DisabledDuplicateRelationProvider, DownloadPipelineRepository, DownloadSourcePort,
-    DownloadSupervisor, DuplicateRepository, DuplicateSupervisor, InternalDuplicateRepository,
-    InternalDuplicateSupervisor, StateRepository,
+    AutomationRepository, DetailOriginalSupervisor, DisabledDuplicateRelationProvider,
+    DownloadPipelineRepository, DownloadSourcePort, DownloadSupervisor, DuplicateRepository,
+    DuplicateSupervisor, InternalDuplicateRepository, InternalDuplicateSupervisor, StateRepository,
 };
 use domain::{AutoFindRun, DownloadJobProjection, DuplicateScanRun, InternalScanRun};
 use infrastructure::{
     CompositeThumbnailResolver, FilesystemArtifactStore, HitomiLiveAdapter, HitomiLiveConfig,
     SqliteRepository, WindowsFolderPicker,
 };
-use interface::AppState;
+use interface::{AppQuitRequest, AppState};
 use tauri::{
-    http::Response,
+    http::{Method, Request, Response, StatusCode},
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
     Emitter, Manager,
@@ -61,24 +63,232 @@ fn apply_pending_factory_reset(data_dir: &std::path::Path) -> std::io::Result<()
 
 const TRAY_WORK_STATUS_ID: &str = "tray-work-status";
 const TRAY_QUIT_ID: &str = "tray-quit";
+const TRAY_EVENT_REFRESH_DEBOUNCE: Duration = Duration::from_millis(200);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayQuitAction {
+    AwaitValidatedShutdown,
+    RestoreAndRequestConfirmation,
+}
+
+fn tray_quit_action<E>(result: Result<bool, E>) -> TrayQuitAction {
+    match result {
+        Ok(true) => TrayQuitAction::AwaitValidatedShutdown,
+        Ok(false) | Err(_) => TrayQuitAction::RestoreAndRequestConfirmation,
+    }
+}
+
+pub(crate) fn shutdown_all_then_exit<Internal, Duplicates, AutoFind, Downloads, Exit>(
+    shutdown_internal_duplicates: Internal,
+    shutdown_duplicates: Duplicates,
+    shutdown_auto_find: AutoFind,
+    shutdown_downloads: Downloads,
+    exit: Exit,
+) where
+    Internal: FnOnce(),
+    Duplicates: FnOnce(),
+    AutoFind: FnOnce(),
+    Downloads: FnOnce(),
+    Exit: FnOnce(),
+{
+    shutdown_internal_duplicates();
+    shutdown_duplicates();
+    shutdown_auto_find();
+    shutdown_downloads();
+    exit();
+}
+
+pub(crate) fn minimize_to_tray<T, E>(hide: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
+    hide()
+}
+
+fn detail_original_protocol_request_id(request: &Request<Vec<u8>>) -> Result<String, StatusCode> {
+    if request.method() != Method::GET {
+        return Err(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    if request.uri().query().is_some() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let Some(request_id) = request
+        .uri()
+        .path()
+        .strip_prefix('/')
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+    else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    application::canonical_request_id(request_id).map_err(|_| StatusCode::NOT_FOUND)
+}
+
+fn detail_original_protocol_response(
+    status: StatusCode,
+    bytes: Vec<u8>,
+    content_type: Option<&str>,
+) -> Response<Vec<u8>> {
+    let mut response = Response::builder()
+        .status(status)
+        .header("cache-control", "no-store")
+        .header("x-content-type-options", "nosniff");
+    if let Some(content_type) = content_type {
+        response = response
+            .header("content-type", content_type)
+            .header("content-length", bytes.len());
+    }
+    response
+        .body(bytes)
+        .unwrap_or_else(|_| Response::new(Vec::new()))
+}
+
+#[cfg(test)]
+mod detail_original_protocol_tests {
+    use super::*;
+
+    const REQUEST_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn protocol_accepts_only_a_single_canonical_uuid_get_path() {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("http://detail-original.localhost/{REQUEST_ID}"))
+            .body(Vec::new())
+            .unwrap();
+        assert_eq!(
+            detail_original_protocol_request_id(&request),
+            Ok(REQUEST_ID.into())
+        );
+
+        let query = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "http://detail-original.localhost/{REQUEST_ID}?extra=1"
+            ))
+            .body(Vec::new())
+            .unwrap();
+        assert_eq!(
+            detail_original_protocol_request_id(&query),
+            Err(StatusCode::NOT_FOUND)
+        );
+
+        let traversal = Request::builder()
+            .method(Method::GET)
+            .uri("http://detail-original.localhost/../outside")
+            .body(Vec::new())
+            .unwrap();
+        assert_eq!(
+            detail_original_protocol_request_id(&traversal),
+            Err(StatusCode::NOT_FOUND)
+        );
+
+        let post = Request::builder()
+            .method(Method::POST)
+            .uri(format!("http://detail-original.localhost/{REQUEST_ID}"))
+            .body(Vec::new())
+            .unwrap();
+        assert_eq!(
+            detail_original_protocol_request_id(&post),
+            Err(StatusCode::METHOD_NOT_ALLOWED)
+        );
+    }
+
+    #[test]
+    fn protocol_success_response_is_non_cacheable_and_nosniff() {
+        let response =
+            detail_original_protocol_response(StatusCode::OK, vec![1, 2, 3], Some("image/webp"));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/webp");
+        assert_eq!(response.headers()["content-length"], "3");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    }
+}
 
 struct TrayMenuState {
     work_status: MenuItem<tauri::Wry>,
+    event_refresh_pending: Arc<AtomicBool>,
 }
 
-fn tray_work_status_label(active_downloads: Option<u64>) -> String {
-    match active_downloads {
-        Some(0) => "작업 상태: 진행 중인 다운로드 없음".into(),
-        Some(count) => format!("작업 상태: 다운로드 {count}개 진행 중"),
-        None => "작업 상태: 다운로드 확인 불가".into(),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrayWorkCounts {
+    active_downloads: u64,
+    auto_find_active: bool,
+    duplicate_scan_active: bool,
+    internal_duplicate_scan_active: bool,
+}
+
+fn tray_work_status_label(work: Option<TrayWorkCounts>) -> String {
+    let Some(work) = work else {
+        return "작업 상태: 확인 불가".into();
+    };
+    let mut kinds = Vec::new();
+    if work.active_downloads > 0 {
+        kinds.push(format!("다운로드 {}개", work.active_downloads));
+    }
+    if work.auto_find_active {
+        kinds.push("Auto Find".into());
+    }
+    if work.duplicate_scan_active {
+        kinds.push("작품 중복 검사".into());
+    }
+    if work.internal_duplicate_scan_active {
+        kinds.push("내부 중복 검사".into());
+    }
+    if kinds.is_empty() {
+        "작업 상태: 진행 중인 작업 없음".into()
+    } else {
+        format!("작업 상태: {}", kinds.join(" · "))
+    }
+}
+
+fn restore_main_window(app: &tauri::AppHandle, action: &str) -> Option<tauri::WebviewWindow> {
+    let Some(window) = app.get_webview_window("main") else {
+        tracing::warn!("could not {action}; the main Atsumi Next window is unavailable");
+        return None;
+    };
+    if let Err(error) = window.show() {
+        tracing::warn!(error = %error, "could not show Atsumi Next from the tray");
+    }
+    if let Err(error) = window.unminimize() {
+        tracing::warn!(error = %error, "could not unminimize Atsumi Next from the tray");
+    }
+    if let Err(error) = window.set_focus() {
+        tracing::warn!(error = %error, "could not focus Atsumi Next from the tray");
+    }
+    Some(window)
+}
+
+fn request_tray_exit_confirmation(app: &tauri::AppHandle) {
+    let Some(window) = restore_main_window(app, "request tray exit confirmation") else {
+        return;
+    };
+    if let Err(error) = window.emit(
+        "app:exit-requested",
+        serde_json::json!({ "source": "tray_menu" }),
+    ) {
+        tracing::warn!(error = %error, "could not request the exit confirmation dialog from the tray");
     }
 }
 
 fn refresh_tray_work_status(app: &tauri::AppHandle) {
-    let active_downloads = app.state::<AppState>().active_download_count().ok();
-    let label = tray_work_status_label(active_downloads);
-    if let Err(error) = app.state::<TrayMenuState>().work_status.set_text(&label) {
-        tracing::warn!(error = %error, "could not update tray work status");
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let work = match state.active_work_snapshot() {
+        Ok(snapshot) => Some(TrayWorkCounts {
+            active_downloads: snapshot.downloads.active_count,
+            auto_find_active: snapshot.auto_find.is_some(),
+            duplicate_scan_active: snapshot.duplicate_scan.is_some(),
+            internal_duplicate_scan_active: snapshot.internal_duplicate_scan.is_some(),
+        }),
+        Err(error) => {
+            tracing::warn!(error = %error, "could not refresh tray work status");
+            None
+        }
+    };
+    let label = tray_work_status_label(work);
+    if let Some(menu_state) = app.try_state::<TrayMenuState>() {
+        if let Err(error) = menu_state.work_status.set_text(&label) {
+            tracing::warn!(error = %error, "could not update tray work status");
+        }
     }
     if let Some(tray) = app.tray_by_id("main") {
         if let Err(error) = tray.set_tooltip(Some(&label)) {
@@ -87,21 +297,89 @@ fn refresh_tray_work_status(app: &tauri::AppHandle) {
     }
 }
 
+fn claim_tray_event_refresh(pending: &AtomicBool) -> bool {
+    pending
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+/// Event relays can deliver a rapid progress burst.  Coalesce that burst into
+/// one deferred refresh while leaving explicit tray interactions immediate.
+fn schedule_tray_work_status_refresh(app: &tauri::AppHandle) {
+    let Some(menu_state) = app.try_state::<TrayMenuState>() else {
+        return;
+    };
+    let pending = Arc::clone(&menu_state.event_refresh_pending);
+    if !claim_tray_event_refresh(&pending) {
+        return;
+    }
+    let worker_pending = Arc::clone(&pending);
+    let refresh_app = app.clone();
+    if let Err(error) = thread::Builder::new()
+        .name("atsumi-tray-work-refresh".into())
+        .spawn(move || {
+            thread::sleep(TRAY_EVENT_REFRESH_DEBOUNCE);
+            // Release the coalescing slot before the read. An event that lands
+            // while this snapshot/menu update is running then schedules one
+            // trailing refresh instead of being lost with a stale label.
+            worker_pending.store(false, Ordering::Release);
+            refresh_tray_work_status(&refresh_app);
+        })
+    {
+        pending.store(false, Ordering::Release);
+        tracing::warn!(error = %error, "could not schedule tray work status refresh");
+    }
+}
+
+fn request_tray_quit(app: &tauri::AppHandle) {
+    let result = if let Some(state) = app.try_state::<AppState>() {
+        match state.request_graceful_quit(
+            app.clone(),
+            AppQuitRequest {
+                expected_work_set_fingerprint: String::new(),
+                confirm_active_work: false,
+                force_when_status_unknown: false,
+            },
+        ) {
+            Ok(result) => Ok(result.accepted),
+            Err(error) => {
+                tracing::warn!(error = ?error, "could not start graceful quit from the tray");
+                Err(())
+            }
+        }
+    } else {
+        Err(())
+    };
+    if tray_quit_action(result) == TrayQuitAction::RestoreAndRequestConfirmation {
+        request_tray_exit_confirmation(app);
+    }
+}
+
 pub fn run() -> tauri::Result<()> {
     infrastructure::telemetry::init();
 
     let result = tauri::Builder::default()
-        .register_uri_scheme_protocol("detail-original", |context, request| {
-            let request_id = request.uri().path().trim_matches('/');
+        .register_asynchronous_uri_scheme_protocol("detail-original", |context, request, responder| {
+            let request_id = match detail_original_protocol_request_id(&request) {
+                Ok(request_id) => request_id,
+                Err(status) => {
+                    responder.respond(detail_original_protocol_response(status, Vec::new(), None));
+                    return;
+                }
+            };
             let state = context.app_handle().state::<AppState>();
-            match state.detail_original_media(request_id) {
-                Some((bytes, content_type)) => Response::builder()
-                    .header("content-type", content_type)
-                    .header("cache-control", "no-store")
-                    .body(bytes)
-                    .unwrap_or_else(|_| Response::new(Vec::new())),
-                None => Response::builder().status(404).body(Vec::new()).unwrap_or_else(|_| Response::new(Vec::new())),
-            }
+            let Some((path, content_type)) = state.detail_original_media_file(&request_id) else {
+                responder.respond(detail_original_protocol_response(StatusCode::NOT_FOUND, Vec::new(), None));
+                return;
+            };
+            tracing::info!(request_id = %request_id, "detail original media_requested");
+            thread::spawn(move || {
+                let response = match std::fs::read(path) {
+                    Ok(bytes) => detail_original_protocol_response(StatusCode::OK, bytes, Some(&content_type)),
+                    Err(_) => detail_original_protocol_response(StatusCode::NOT_FOUND, Vec::new(), None),
+                };
+                responder.respond(response);
+            });
         })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -140,15 +418,7 @@ pub fn run() -> tauri::Result<()> {
             if !restore {
                 return;
             }
-            if let Some(window) = app.get_webview_window("main") {
-                if let Err(error) = window
-                    .show()
-                    .and_then(|_| window.unminimize())
-                    .and_then(|_| window.set_focus())
-                {
-                    tracing::warn!(error = %error, "could not restore Atsumi Next from the tray");
-                }
-            }
+            restore_main_window(app, "restore Atsumi Next from the tray");
         })
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -156,7 +426,9 @@ pub fn run() -> tauri::Result<()> {
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                if let Err(error) = window.emit("app:exit-requested", ()) {
+                if let Err(error) =
+                    window.emit("app:exit-requested", serde_json::json!({ "source": "window_close" }))
+                {
                     tracing::warn!(error = %error, "could not request the exit confirmation dialog");
                 }
             }
@@ -201,6 +473,7 @@ pub fn run() -> tauri::Result<()> {
                         if let Err(error) = auto_find_app.emit("auto-find:changed", &run) {
                             tracing::warn!(error = %error, "could not emit auto-find:changed");
                         }
+                        schedule_tray_work_status_refresh(&auto_find_app);
                     }
                 })?;
             let artifact_store: Arc<dyn ArtifactStore> =
@@ -234,18 +507,7 @@ pub fn run() -> tauri::Result<()> {
                         }
                     }
                 })?;
-            let (detail_original_tx, detail_original_rx) = mpsc::channel::<DetailOriginalReady>();
-            let detail_originals = DetailOriginalSupervisor::new(live_source.clone(), &data_dir, detail_original_tx)?;
-            let detail_original_app = app.handle().clone();
-            thread::Builder::new()
-                .name("atsumi-detail-original-events".into())
-                .spawn(move || {
-                    while let Ok(event) = detail_original_rx.recv() {
-                        if let Err(error) = detail_original_app.emit("detail-original:ready", &event) {
-                            tracing::warn!(error = %error, "could not emit detail original readiness");
-                        }
-                    }
-                })?;
+            let detail_originals = DetailOriginalSupervisor::new(live_source.clone(), &data_dir)?;
             let duplicate_repository: Arc<dyn DuplicateRepository> = repository.clone();
             let duplicate_settings: Arc<dyn StateRepository> = repository.clone();
             let (duplicate_event_tx, duplicate_event_rx) = mpsc::channel::<DuplicateScanRun>();
@@ -265,6 +527,7 @@ pub fn run() -> tauri::Result<()> {
                         if let Err(error) = duplicate_app.emit("duplicate:changed", &run) {
                             tracing::warn!(error = %error, "could not emit duplicate:changed");
                         }
+                        schedule_tray_work_status_refresh(&duplicate_app);
                     }
                 })?;
             let internal_repository: Arc<dyn InternalDuplicateRepository> = repository.clone();
@@ -305,6 +568,7 @@ pub fn run() -> tauri::Result<()> {
                                 "could not emit internal-duplicate:changed"
                             );
                         }
+                        schedule_tray_work_status_refresh(&internal_app);
                     }
                 })?;
             let download_repository: Arc<dyn DownloadPipelineRepository> = repository.clone();
@@ -325,6 +589,7 @@ pub fn run() -> tauri::Result<()> {
                         {
                             tracing::warn!(error = %error, "could not emit download:changed");
                         }
+                        schedule_tray_work_status_refresh(&download_app);
                     }
                 })?;
             let downloads = DownloadSupervisor::new(
@@ -366,7 +631,7 @@ pub fn run() -> tauri::Result<()> {
             let tray_status = MenuItem::with_id(
                 app,
                 TRAY_WORK_STATUS_ID,
-                tray_work_status_label(None),
+                "작업 상태: 진행 중인 작업 없음",
                 false,
                 None::<&str>,
             )?;
@@ -379,11 +644,12 @@ pub fn run() -> tauri::Result<()> {
             tray.set_menu(Some(tray_menu))?;
             tray.on_menu_event(|app, event| {
                 if event.id() == TRAY_QUIT_ID {
-                    app.state::<AppState>().begin_graceful_quit(app.clone());
+                    request_tray_quit(app);
                 }
             });
             app.manage(TrayMenuState {
                 work_status: tray_status,
+                event_refresh_pending: Arc::new(AtomicBool::new(false)),
             });
             refresh_tray_work_status(app.handle());
             if let Some(window) = app.get_webview_window("main") {
@@ -446,8 +712,8 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::download_cancel,
             interface::commands::download_quarantine,
             interface::commands::download_quarantine_undo,
-            interface::commands::download_active_count,
             interface::commands::artifact_open_first,
+            interface::commands::artifact_open_folder,
             interface::commands::app_reconcile,
             interface::commands::thumbnail_request,
             interface::commands::thumbnail_cancel,
@@ -455,10 +721,10 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::thumbnail_reprioritize,
             interface::commands::thumbnail_stats,
             interface::commands::thumbnail_cache_clear,
-            interface::commands::detail_original_request,
-            interface::commands::detail_original_cancel,
-            interface::commands::detail_original_release,
+            interface::commands::detail_original_prepare,
+            interface::commands::detail_original_dispose,
             interface::commands::app_minimize_to_tray,
+            interface::commands::app_active_work_snapshot,
             interface::commands::app_quit,
         ])
         .run(tauri::generate_context!());
@@ -471,21 +737,125 @@ pub fn run() -> tauri::Result<()> {
 
 #[cfg(test)]
 mod tray_menu_tests {
-    use super::tray_work_status_label;
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    use super::{
+        claim_tray_event_refresh, minimize_to_tray, shutdown_all_then_exit, tray_quit_action,
+        tray_work_status_label, TrayQuitAction, TrayWorkCounts,
+    };
 
     #[test]
-    fn labels_active_and_idle_download_work_without_exposing_internal_details() {
+    fn tray_quit_restores_confirmation_for_active_or_unknown_work() {
         assert_eq!(
-            tray_work_status_label(Some(0)),
-            "작업 상태: 진행 중인 다운로드 없음"
+            tray_quit_action(Ok::<_, ()>(false)),
+            TrayQuitAction::RestoreAndRequestConfirmation
         );
         assert_eq!(
-            tray_work_status_label(Some(2)),
-            "작업 상태: 다운로드 2개 진행 중"
+            tray_quit_action(Err::<bool, _>("active work status unavailable")),
+            TrayQuitAction::RestoreAndRequestConfirmation
+        );
+    }
+
+    #[test]
+    fn tray_quit_awaits_only_a_validated_shutdown() {
+        assert_eq!(
+            tray_quit_action(Ok::<_, ()>(true)),
+            TrayQuitAction::AwaitValidatedShutdown
+        );
+    }
+
+    #[test]
+    fn shutdown_joins_every_worker_in_order_before_exit() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let record = |event: &'static str| {
+            let events = Rc::clone(&events);
+            move || events.borrow_mut().push(event)
+        };
+
+        shutdown_all_then_exit(
+            record("internal_duplicates"),
+            record("duplicates"),
+            record("auto_find"),
+            record("downloads"),
+            record("exit"),
+        );
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                "internal_duplicates",
+                "duplicates",
+                "auto_find",
+                "downloads",
+                "exit",
+            ]
+        );
+    }
+
+    #[test]
+    fn minimize_to_tray_performs_only_the_supplied_hide_operation() {
+        let events = RefCell::new(Vec::new());
+
+        let result = minimize_to_tray(|| {
+            events.borrow_mut().push("hide");
+            Ok::<_, ()>(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(events.into_inner(), ["hide"]);
+    }
+
+    #[test]
+    fn labels_aggregate_active_work_without_exposing_work_identities() {
+        assert_eq!(
+            tray_work_status_label(Some(TrayWorkCounts {
+                active_downloads: 0,
+                auto_find_active: false,
+                duplicate_scan_active: false,
+                internal_duplicate_scan_active: false,
+            })),
+            "작업 상태: 진행 중인 작업 없음"
         );
         assert_eq!(
-            tray_work_status_label(None),
-            "작업 상태: 다운로드 확인 불가"
+            tray_work_status_label(Some(TrayWorkCounts {
+                active_downloads: 2,
+                auto_find_active: false,
+                duplicate_scan_active: false,
+                internal_duplicate_scan_active: false,
+            })),
+            "작업 상태: 다운로드 2개"
         );
+        assert_eq!(
+            tray_work_status_label(Some(TrayWorkCounts {
+                active_downloads: 2,
+                auto_find_active: true,
+                duplicate_scan_active: true,
+                internal_duplicate_scan_active: true,
+            })),
+            "작업 상태: 다운로드 2개 · Auto Find · 작품 중복 검사 · 내부 중복 검사"
+        );
+        assert_eq!(
+            tray_work_status_label(Some(TrayWorkCounts {
+                active_downloads: 0,
+                auto_find_active: false,
+                duplicate_scan_active: false,
+                internal_duplicate_scan_active: true,
+            })),
+            "작업 상태: 내부 중복 검사"
+        );
+        assert_eq!(tray_work_status_label(None), "작업 상태: 확인 불가");
+    }
+
+    #[test]
+    fn event_refresh_claim_coalesces_a_burst_until_the_worker_completes() {
+        let pending = AtomicBool::new(false);
+        assert!(claim_tray_event_refresh(&pending));
+        assert!(!claim_tray_event_refresh(&pending));
+        pending.store(false, Ordering::Release);
+        assert!(claim_tray_event_refresh(&pending));
     }
 }

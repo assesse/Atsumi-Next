@@ -88,6 +88,42 @@ describe("gallery API projection", () => {
     expect([...result.galleries.keys()]).toEqual([galleryId(1), galleryId(2), galleryId(3)]);
   });
 
+  it("preserves hydrated page dimensions when a later search summary refreshes the gallery", () => {
+    const dimensions = [{ sourcePage: 1, width: 720, height: 1080 }];
+    const hydrated: Gallery = {
+      ...projectGallerySummary(summary(1, "Hydrated title")),
+      pageDimensions: dimensions,
+    };
+    const page: GalleryPage = {
+      page: 1,
+      totalPages: 1,
+      items: [summary(1, "Refreshed title")],
+    };
+
+    const refreshed = mergeGalleryPage(new Map([[hydrated.id, hydrated]]), page).galleries;
+
+    expect(refreshed.get(hydrated.id)?.title).toBe("Refreshed title");
+    expect(refreshed.get(hydrated.id)?.pageDimensions).toBe(dimensions);
+  });
+
+  it("preserves another open detail's page dimensions when it appears as a related summary", () => {
+    const dimensions = [{ sourcePage: 1, width: 1600, height: 900 }];
+    const openRelated: Gallery = {
+      ...projectGallerySummary(summary(2, "Open related detail")),
+      pageDimensions: dimensions,
+    };
+    const incoming: GalleryDetail = {
+      ...summary(1),
+      related: [summary(2, "Related summary refresh")],
+      pageDimensions: [{ sourcePage: 1, width: 720, height: 1080 }],
+    };
+
+    const merged = mergeGalleryDetail(new Map([[openRelated.id, openRelated]]), incoming);
+
+    expect(merged.get(openRelated.id)?.title).toBe("Related summary refresh");
+    expect(merged.get(openRelated.id)?.pageDimensions).toBe(dimensions);
+  });
+
   it("hydrates related summaries and projects queue snapshots onto the same galleries", () => {
     const detail: GalleryDetail = { ...summary(1), related: [summary(2), summary(3)], pageDimensions: [{ sourcePage: 1, width: 720, height: 1080 }] };
     const hydrated = mergeGalleryDetail(new Map(), detail);

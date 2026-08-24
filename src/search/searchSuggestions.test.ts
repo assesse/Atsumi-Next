@@ -11,4 +11,11 @@ describe("search suggestion catalog", () => {
   it("adapts only SQLite tag suggestions and never creates synthetic candidates", () => {
     expect(catalogSuggestion({ namespace: "female", name: "big balls", token: "female:big_balls", galleryCount: 4822, favorite: true })).toMatchObject({ type: "FEMALE", label: "big balls", favorite: true, galleryCount: 4822 });
   });
+
+  it("keeps artist and group namespaces distinct in the suggestion UI", () => {
+    expect(catalogSuggestion({ namespace: "artist", name: "mizuno tooru", token: "artist:mizuno_tooru", galleryCount: 142, favorite: false }))
+      .toMatchObject({ type: "ARTIST", token: "artist:mizuno_tooru", label: "mizuno tooru" });
+    expect(catalogSuggestion({ namespace: "group", name: "circle energy", token: "group:circle_energy", galleryCount: 76, favorite: true }))
+      .toMatchObject({ type: "GROUP", token: "group:circle_energy", label: "circle energy", favorite: true });
+  });
 });

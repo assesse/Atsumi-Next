@@ -85,6 +85,7 @@ export function projectGallerySummary(summary: GallerySummary, current?: Gallery
     ...(thumbnailWidth !== undefined ? { thumbnailWidth } : {}),
     ...(thumbnailHeight !== undefined ? { thumbnailHeight } : {}),
     ...(current?.relatedIds ? { relatedIds: current.relatedIds } : {}),
+    ...(current?.pageDimensions !== undefined ? { pageDimensions: current.pageDimensions } : {}),
     ...(current?.favorite !== undefined ? { favorite: current.favorite } : {}),
     ...(current?.download ? { download: current.download } : {}),
   };

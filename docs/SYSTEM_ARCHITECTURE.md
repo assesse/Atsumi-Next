@@ -147,7 +147,7 @@ type JobEvent = {
 - host별 동시성, 전역 요청 시작 간격, cooldown을 독립 설정한다.
 - 2026-08-04 Classic 실측의 `동시 5, 최소 25ms`를 초기 profile로 가져온다.
 - connection pool 구조로 바뀌면 별도 probe로 다시 측정한다.
-- 검색, thumbnail, 다운로드는 하나의 pooled transport와 전역/host별 permit을 공유하고 `critical > visible > prefetch > download` 순서로 dispatch한다. 화면에 곧 보일 미리보기가 백그라운드 artifact 다운로드에 굶지 않는다.
+- 검색, thumbnail, 다운로드는 하나의 pooled transport와 전역/host별 permit을 공유하고 `critical > visible > download > prefetch` 순서로 dispatch한다. 현재 화면의 critical/visible media를 우선하면서 실제 artifact 다운로드가 화면 밖 speculative prefetch에 굶지 않는다.
 - 429는 `Retry-After` 또는 기본 cooldown, 503·timeout은 bounded exponential backoff와 stable jitter를 적용한다. 404와 계약 오류는 반복 재시도하지 않는다.
 - 대기·backoff·body read는 cancellation token을 확인하며, 취소 뒤 도착한 결과는 cache에 넣지 않는다.
 - telemetry는 host, attempt, elapsed와 분류 code만 기록하고 URL query·cookie·검색어는 기록하지 않는다.
@@ -184,6 +184,7 @@ type JobEvent = {
 
 - 작가·그룹·시리즈·캐릭터·태그 즐겨찾기와 성공한 명시적 검색 이력은 SQLite가 소유한다. frontend set과 suggestion 목록은 backend snapshot의 projection이며 localStorage를 canonical source로 사용하지 않는다. 검색·상세·Related의 `GallerySummary`는 `series[]`와 `characters[]`를 항상 전달한다.
 - 검색 입력은 local draft일 뿐이다. `search_submit`이 성공한 뒤 non-empty text/include/exclude가 있는 요청만 이력에 기록하며, 자동 Recent와 key 입력은 원격 요청이나 이력 쓰기를 만들지 않는다.
+- Explore 자동완성은 SQLite의 artist/group/tag/female/male catalog만 조회한다. 수동 최신화가 Hitomi의 고정된 81개 index URL을 공용 scheduler로 읽어 transaction 교체하며, 키 입력마다 원격 요청하거나 loaded gallery metadata로 synthetic 후보를 만들지 않는다.
 - `AutoFindSupervisor`는 프로세스에 하나만 두고 명시적 `auto_find_refresh`에서만 background worker를 시작한다. 동시에 하나의 run만 허용하며 실행 중 재요청은 기존 run을 재사용한다.
 - 갱신 대상은 현재 `artist` 즐겨찾기다. 각 작가의 `artist:{value}` 검색은 production의 같은 `HitomiLiveAdapter`와 공용 HTTP scheduler를 사용한다. 별도 HTTP client나 thumbnail coordinator를 만들지 않는다.
 - favorite 값은 사람이 읽는 정규화 공백으로 저장하고 source token을 만들 때 공백을 underscore로 바꾼다. `artist`, `group`, `series`, `character`, `tag` prefix는 명시적 Nozomi namespace로 직렬화되며 unknown prefix만 residual text filter로 남긴다.

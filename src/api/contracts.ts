@@ -12,6 +12,57 @@ export type ApiError = {
 
 export type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 
+export type AppActiveWorkSnapshot = {
+  queriedAt: string;
+  workSetFingerprint: string;
+  downloads: {
+    activeCount: number;
+  };
+  autoFind?: {
+    runId: string;
+    completedFavorites: number;
+    totalFavorites: number;
+    candidatesFound: number;
+  };
+  duplicateScan?: {
+    runId: string;
+    hashedArtifacts: number;
+    totalArtifacts: number;
+    comparedPairs: number;
+    totalPairs: number;
+    candidatesFound: number;
+  };
+  internalDuplicateScan?: {
+    runId: string;
+    scannedArtifacts: number;
+    totalArtifacts: number;
+    skippedArtifacts: number;
+    groupsFound: number;
+  };
+};
+
+export const hasActiveWork = (snapshot: AppActiveWorkSnapshot): boolean =>
+  snapshot.downloads.activeCount > 0
+  || snapshot.autoFind !== undefined
+  || snapshot.duplicateScan !== undefined
+  || snapshot.internalDuplicateScan !== undefined;
+
+export type AppQuitRequest = {
+  expectedWorkSetFingerprint: string;
+  confirmActiveWork: boolean;
+  forceWhenStatusUnknown?: boolean;
+};
+
+export type AppQuitResult = {
+  accepted: boolean;
+  reason?: "active_work_confirmation_required" | "active_work_changed";
+  snapshot?: AppActiveWorkSnapshot;
+};
+
+export type AppExitRequestedEvent = {
+  source: "window_close" | "tray_menu";
+};
+
 export type SettingsSnapshot = {
   revision: number;
   downloadRoot: string;
@@ -20,6 +71,7 @@ export type SettingsSnapshot = {
   maxColumns: number;
   previewWidth: number;
   relatedPreviewWidth: number;
+  privacyMode: boolean;
   cacheLimitGb: number;
   concurrentImageRequests: number;
   requestStartIntervalMs: number;
@@ -172,21 +224,19 @@ export type ThumbnailWorkerStats = {
   cancelledWork: number;
 };
 
-export type DetailOriginalRequest = {
-  galleryId: GalleryId;
-  sourcePage: number;
-};
-
-export type DetailOriginalToken = {
+export type DetailOriginalPrepareRequest = {
   requestId: string;
   galleryId: GalleryId;
   sourcePage: number;
 };
 
 /** Opaque custom-protocol URL only; no filesystem path is exposed to the UI. */
-export type DetailOriginalReady = DetailOriginalToken & {
+export type DetailOriginalPrepared = {
+  requestId: string;
+  galleryId: GalleryId;
+  sourcePage: number;
   mediaUrl: string;
-  contentType: string;
+  contentType: "image/webp" | "image/jpeg" | "image/png";
   width: number;
   height: number;
 };
@@ -222,13 +272,15 @@ export type SearchRequest = {
   pageSize: number;
 };
 
-export type TagNamespace = "tag" | "female" | "male";
+export type TagNamespace = "artist" | "group" | "tag" | "female" | "male";
 export type TagCatalogStatus = {
   revision: number;
   entryCount: number;
   neutralCount: number;
   femaleCount: number;
   maleCount: number;
+  artistCount: number;
+  groupCount: number;
   lastAttemptAt?: string;
   lastSuccessAt?: string;
   lastErrorCode?: string;
@@ -475,6 +527,10 @@ export type DuplicateSnapshot = {
 };
 
 export type InternalScanState = "running" | "completed" | "failed" | "cancelled";
+
+export type InternalScanRequest = {
+  entryIds: string[];
+};
 
 export type InternalScanRun = {
   runId: string;
