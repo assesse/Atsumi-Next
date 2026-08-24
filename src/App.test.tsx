@@ -13,6 +13,7 @@ import type {
   InternalScanRun,
 } from "./api/contracts";
 import { galleryId } from "./core/types";
+import { mockGalleries } from "./data/mockGalleries";
 import { browserFixtureThumbnailAdapter, ThumbnailClient, ThumbnailProvider } from "./thumbnail";
 
 const testThumbnailClient = new ThumbnailClient(browserFixtureThumbnailAdapter);
@@ -37,6 +38,18 @@ const explorePage = (page: number, totalPages = 20): GalleryPage => ({
     thumbnailWidth: 512,
     thumbnailHeight: 768,
   }],
+});
+
+const selectionFixturePage = (): GalleryPage => ({
+  page: 1,
+  totalPages: 1,
+  items: [mockGalleries[0]!, mockGalleries[3]!].map(({ download: _download, ...gallery }) => ({
+    ...gallery,
+    publishedRank: Number(gallery.publishedAt.replaceAll("-", "")),
+    popularity: gallery.score,
+    thumbnailWidth: gallery.thumbnailWidth ?? 512,
+    thumbnailHeight: gallery.thumbnailHeight ?? 768,
+  })),
 });
 
 const clickButtonContaining = (container: HTMLElement, label: string): HTMLButtonElement => {
@@ -188,12 +201,11 @@ describe("App Phase 3A backend flow", () => {
   });
 
   it("hydrates Explore after an explicit search and queues through the formal backend client", async () => {
-    const seeded = await backend.downloadQueueAdd([galleryId(4051038)], "app-test-seed-download");
-    if (!seeded.ok) throw new Error(seeded.error.message);
-
-    const search = vi.spyOn(backend, "searchSubmit");
+    const search = vi.spyOn(backend, "searchSubmit").mockResolvedValue({
+      ok: true,
+      data: { queryId: "selection-queue", firstPage: selectionFixturePage() },
+    });
     const downloadList = vi.spyOn(backend, "downloadEntriesList");
-    const detail = vi.spyOn(backend, "galleryDetailGet");
     const queue = vi.spyOn(backend, "downloadQueueAdd");
     const container = document.createElement("div");
     document.body.append(container);
@@ -208,28 +220,88 @@ describe("App Phase 3A backend flow", () => {
     await submitExploreSearch(container);
     expect(search).toHaveBeenCalledWith(expect.objectContaining({ text: "", sort: "recent" }));
     expect(downloadList).toHaveBeenCalledWith({ page: 1, pageSize: 200 });
-    expect(detail).toHaveBeenCalledWith(galleryId(4051038));
     expect(container.textContent).toContain("Archive of Rain");
     expect(container.textContent).toContain("브라우저 fixture");
     expect(container.textContent).not.toContain("backend fixture");
 
-    const firstCard = container.querySelector<HTMLElement>('[data-gallery-id="4051027"]');
+    const [firstCard, secondCard] = [...container.querySelectorAll<HTMLElement>(".gallery-grid > .gallery-card")];
+    if (!firstCard || !secondCard) throw new Error("Two Explore selection fixtures were not rendered");
+    const firstId = galleryId(Number(firstCard.dataset.galleryId));
+    const secondId = galleryId(Number(secondCard.dataset.galleryId));
     await act(async () => {
-      firstCard?.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      firstCard.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    });
+    expect(firstCard).toHaveClass("is-selected");
+    expect(container.querySelector(".selection-toolbar")).not.toHaveClass("is-visible");
+    await act(async () => {
+      secondCard.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true }));
     });
     const queueButton = container.querySelector<HTMLButtonElement>(".selection-toolbar .primary");
+    expect(container.querySelector(".selection-toolbar")).toHaveClass("is-visible");
     await act(async () => {
       queueButton?.click();
       await settle();
     });
 
     expect(queue).toHaveBeenCalledWith(
-      [galleryId(4051027)],
+      [firstId, secondId],
       expect.stringMatching(/^frontend-queue-\d+-\d+$/),
     );
 
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  it("shows batch controls only while two or more gallery cards are selected", async () => {
+    vi.spyOn(backend, "searchSubmit").mockResolvedValue({
+      ok: true,
+      data: { queryId: "selection-mode", firstPage: selectionFixturePage() },
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      await submitExploreSearch(container);
+      const [first, second] = [...container.querySelectorAll<HTMLElement>(".gallery-grid > .gallery-card")];
+      if (!first || !second) throw new Error("Two Explore cards are required for selection mode coverage");
+      const toolbar = container.querySelector<HTMLElement>(".selection-toolbar");
+      const grid = container.querySelector<HTMLElement>(".gallery-grid");
+
+      await act(async () => first.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 })));
+      expect(first).toHaveClass("is-selected");
+      expect(toolbar).not.toHaveClass("is-visible");
+      expect(toolbar).not.toHaveTextContent("1개 선택됨");
+      expect(toolbar?.querySelector("button")).toBeNull();
+      expect(grid).not.toHaveClass("is-selection-context");
+
+      await act(async () => second.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true })));
+      expect(first).toHaveClass("is-selected");
+      expect(second).toHaveClass("is-selected");
+      expect(toolbar).toHaveClass("is-visible");
+      expect(toolbar).toHaveTextContent("2개 선택됨");
+      expect(toolbar?.querySelector(".primary")).not.toBeNull();
+      expect(grid).toHaveClass("is-selection-context");
+
+      await act(async () => second.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true })));
+      expect(first).toHaveClass("is-selected");
+      expect(second).not.toHaveClass("is-selected");
+      expect(toolbar).not.toHaveClass("is-visible");
+      expect(grid).not.toHaveClass("is-selection-context");
+
+      await act(async () => second.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true })));
+      await act(async () => first.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 })));
+      expect(first).toHaveClass("is-selected");
+      expect(second).not.toHaveClass("is-selected");
+      expect(toolbar).not.toHaveClass("is-visible");
+      expect(grid).not.toHaveClass("is-selection-context");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   it("opens the active download entry folder from Floating Detail", async () => {
@@ -640,10 +712,11 @@ describe("App Phase 3A backend flow", () => {
 
     const cardsBeforeExclude = container.querySelectorAll(".gallery-card").length;
     const firstCard = container.querySelector<HTMLDivElement>(".gallery-card");
+    if (!firstCard) throw new Error("An Auto Find card is required for keyboard exclusion coverage");
     await act(async () => {
-      firstCard?.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      firstCard.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
       await settle();
-      clickButtonContaining(container, "제외");
+      firstCard.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
       await settle();
     });
     expect(exclude).toHaveBeenCalledWith(

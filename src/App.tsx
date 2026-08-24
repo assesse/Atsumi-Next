@@ -1525,6 +1525,7 @@ export default function App() {
   }, [query.page, query.queryId]);
 
   const selectedIds = useMemo(() => [...ui.selection.ids], [ui.selection.ids]);
+  const multiSelectionMode = ui.selection.ids.size >= 2;
   const selectedCompletedEntryIds = useMemo(() => [...new Set(selectedIds.flatMap((id) => {
     const download = displayGalleries.get(id)?.download;
     return download?.state === "completed" ? [download.entryId] : [];
@@ -1635,7 +1636,7 @@ export default function App() {
     <GalleryGrid
       columns={galleryColumns}
       previewWidth={previewWidth}
-      selectionContext={ui.selection.ids.size > 0}
+      selectionContext={multiSelectionMode}
       ariaLabel={ariaLabel}
     >
       {items.map((gallery, index) => (
@@ -1645,7 +1646,7 @@ export default function App() {
           thumbnailPriority={index < galleryColumns ? "visible" : "prefetch"}
           view={ui.view}
           selected={ui.selection.ids.has(gallery.id)}
-          selectionContext={ui.selection.ids.size > 0}
+          selectionContext={multiSelectionMode}
           favoriteMetadata={favoriteMetadataForDisplay}
           duplicateCandidateCount={duplicateCandidateCounts.get(gallery.id) ?? 0}
           internalDuplicateResultCount={gallery.download
@@ -1826,6 +1827,7 @@ export default function App() {
             <div className="context-summary">{visible.length}개 결과 · {resultSourceLabel}</div>
           </section>
           <SelectionToolbar
+            active={multiSelectionMode}
             count={ui.selection.ids.size}
             downloadsView={ui.view === "downloads"}
             restoreMode={selectedIds.length > 0 && selectedIds.every((id) => displayGalleries.get(id)?.download?.state === "quarantined")}

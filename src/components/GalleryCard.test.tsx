@@ -200,7 +200,7 @@ describe("GalleryCard event projection", () => {
     container.remove();
   });
 
-  it("keeps metadata search available while a selection exists and reserves selection for modifiers", async () => {
+  it("keeps metadata search available for a singly selected card and reserves selection for modifiers", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -210,8 +210,8 @@ describe("GalleryCard event projection", () => {
       <GalleryCard
         gallery={gallery}
         view="explore"
-        selected={false}
-        selectionContext
+        selected
+        selectionContext={false}
         favoriteMetadata={new Set()}
         {...callbacks}
       />,
@@ -226,6 +226,41 @@ describe("GalleryCard event projection", () => {
       container.querySelector<HTMLButtonElement>(".card-byline .byline")?.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
     });
     expect(callbacks.onSelect).toHaveBeenCalledWith(gallery.id, expect.anything());
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".card-byline .byline")?.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+    });
+    expect(callbacks.onSelect).toHaveBeenCalledTimes(2);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("keeps double-click opening available for a singly selected card", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery = mockGalleries[0]!;
+    const render = (view: "explore" | "downloads", selectionContext = false) => root.render(
+      <GalleryCard
+        gallery={gallery}
+        view={view}
+        selected
+        selectionContext={selectionContext}
+        favoriteMetadata={new Set()}
+        {...callbacks}
+      />,
+    );
+
+    await act(async () => render("explore", true));
+    await act(async () => render("explore"));
+    await act(async () => container.querySelector<HTMLElement>("article")?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 })));
+    expect(callbacks.onOpenDetail).toHaveBeenCalledWith(gallery.id);
+
+    callbacks.onOpenDetail.mockClear();
+    await act(async () => render("downloads"));
+    await act(async () => container.querySelector<HTMLElement>("article")?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 })));
+    expect(callbacks.onOpenArtifact).toHaveBeenCalledWith(gallery.id);
+    expect(callbacks.onOpenDetail).not.toHaveBeenCalled();
+
     await act(async () => root.unmount());
     container.remove();
   });

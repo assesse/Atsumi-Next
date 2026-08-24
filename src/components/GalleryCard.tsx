@@ -1,6 +1,7 @@
 import {
   memo,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -28,6 +29,7 @@ type GalleryCardProps = {
   thumbnailClient?: ThumbnailClient;
   view: ViewId;
   selected: boolean;
+  /** True only for the derived two-or-more-card batch selection mode. */
   selectionContext: boolean;
   favoriteMetadata: ReadonlySet<string>;
   duplicateCandidateCount?: number;
@@ -80,6 +82,9 @@ function GalleryCardComponent({
 }: GalleryCardProps) {
   const download = gallery.download;
   const gestureSelectionContext = useRef(selectionContext);
+  useEffect(() => {
+    gestureSelectionContext.current = selectionContext;
+  }, [selectionContext]);
   const progress = Math.min(
     100,
     Math.max(0, download?.state === "completed" ? 100 : download?.progress ?? 0),

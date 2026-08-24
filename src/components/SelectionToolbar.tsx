@@ -1,6 +1,8 @@
 import { FluentIcon } from "./FluentIcon";
 
 type SelectionToolbarProps = {
+  /** True only while two or more cards are selected. */
+  active: boolean;
   count: number;
   downloadsView: boolean;
   restoreMode?: boolean;
@@ -10,11 +12,11 @@ type SelectionToolbarProps = {
   onDelete: () => void;
 };
 
-export function SelectionToolbar({ count, downloadsView, restoreMode = false, onAll, onClear, onPrimary, onDelete }: SelectionToolbarProps) {
+export function SelectionToolbar({ active, count, downloadsView, restoreMode = false, onAll, onClear, onPrimary, onDelete }: SelectionToolbarProps) {
   return (
     <div className="selection-slot">
-      <div className={`selection-toolbar${count > 0 ? " is-visible" : ""}`} aria-live="polite">
-        {count > 0 ? (
+      <div className={`selection-toolbar${active ? " is-visible" : ""}`} aria-live={active ? "polite" : "off"}>
+        {active ? (
           <>
             <strong>{count}개 선택됨</strong>
             <button type="button" className="text-button" onClick={onAll}>

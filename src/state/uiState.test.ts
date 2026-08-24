@@ -14,6 +14,7 @@ describe("uiReducer selection", () => {
       shift: false,
     });
     expect([...selected.selection.ids]).toEqual([ids[1]]);
+    expect(selected.selection.anchorId).toBe(ids[1]);
 
     const reselected = uiReducer(selected, {
       type: "selection.click",
@@ -26,12 +27,43 @@ describe("uiReducer selection", () => {
     expect(reselected.selection.anchorId).toBeNull();
   });
 
+  it("enters multiple selection only after Control adds a second card and keeps the existing toggle anchor contract", () => {
+    const selected = uiReducer(initialUiState, {
+      type: "selection.click",
+      id: ids[0]!,
+      visibleIds: ids,
+      ctrl: false,
+      shift: false,
+    });
+    const multiple = uiReducer(selected, {
+      type: "selection.click",
+      id: ids[1]!,
+      visibleIds: ids,
+      ctrl: true,
+      shift: false,
+    });
+    expect([...multiple.selection.ids]).toEqual([ids[0], ids[1]]);
+    expect(multiple.selection.anchorId).toBe(ids[1]);
+
+    const oneRemaining = uiReducer(multiple, {
+      type: "selection.click",
+      id: ids[1]!,
+      visibleIds: ids,
+      ctrl: true,
+      shift: false,
+    });
+    expect([...oneRemaining.selection.ids]).toEqual([ids[0]]);
+    // Toggling is intentionally anchored to the action target even when that
+    // target was removed; projection/retain clears a stale anchor as before.
+    expect(oneRemaining.selection.anchorId).toBe(ids[1]);
+  });
+
   it("replaces a multiple selection with the plain-clicked card", () => {
     const first = uiReducer(initialUiState, {
       type: "selection.click",
       id: ids[0]!,
       visibleIds: ids,
-      ctrl: true,
+      ctrl: false,
       shift: false,
     });
     const multiple = uiReducer(first, {
