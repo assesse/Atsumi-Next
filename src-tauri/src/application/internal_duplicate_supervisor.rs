@@ -1,7 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{mpsc::Sender, Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Sender},
+        Arc, Mutex,
+    },
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -11,10 +15,11 @@ use uuid::Uuid;
 use crate::{
     domain::{
         ArtifactBundle, ArtifactManifest, ArtifactRelativePath, DownloadEntryId, HashProfile,
-        InternalDuplicateReview, InternalDuplicateSnapshot, InternalRemovalApplyRequest,
-        InternalRemovalPlan, InternalRemovalPlanRequest, InternalRemovalResult,
-        InternalRemovalUndoRequest, InternalScanRequest, InternalScanRun, InternalScanSkip,
-        InternalScanState, PageArtifactState, PageQuarantineSaga, PageQuarantineState,
+        InternalArtifactScanProgress, InternalArtifactScanStage, InternalDuplicateReview,
+        InternalDuplicateSnapshot, InternalRemovalApplyRequest, InternalRemovalPlan,
+        InternalRemovalPlanRequest, InternalRemovalResult, InternalRemovalUndoRequest,
+        InternalScanRequest, InternalScanRun, InternalScanSkip, InternalScanState,
+        PageArtifactState, PageQuarantineSaga, PageQuarantineState,
         INTERNAL_DUPLICATE_ALGORITHM_VERSION,
     },
     thumbnail::CancellationToken,
@@ -22,7 +27,7 @@ use crate::{
 
 use super::{
     duplicate_analyzer::{compute_page_hash, gallery_ref, verified_scan_pages, HashedArtifact},
-    internal_duplicate_analyzer::detect_internal_groups,
+    internal_duplicate_analyzer::detect_internal_groups_with_progress,
     ApplicationError, ArtifactLayout, ArtifactRepository, ArtifactStore, DuplicateRepository,
     InternalDuplicateRepository, InternalPlanPrepareOutcome, RepositoryError, StateRepository,
 };
@@ -43,6 +48,7 @@ struct InternalDuplicateSupervisorInner {
     settings: Arc<dyn StateRepository>,
     store: Arc<dyn ArtifactStore>,
     events: Sender<InternalScanRun>,
+    progress_events: Sender<InternalArtifactScanProgress>,
     control: Mutex<()>,
     active: Mutex<Option<ActiveRun>>,
 }
@@ -52,6 +58,13 @@ struct ActiveRun {
     entry_ids: Option<BTreeSet<DownloadEntryId>>,
     cancellation: CancellationToken,
     worker: Option<JoinHandle<()>>,
+    progress: Arc<ActiveProgress>,
+}
+
+#[derive(Default)]
+struct ActiveProgress {
+    current: Mutex<Option<InternalArtifactScanProgress>>,
+    next_sequence: AtomicU64,
 }
 
 pub(crate) struct PreparedInternalScan {
@@ -74,6 +87,29 @@ impl InternalDuplicateSupervisor {
         store: Arc<dyn ArtifactStore>,
         events: Sender<InternalScanRun>,
     ) -> Self {
+        let (progress_events, progress_receiver) = mpsc::channel();
+        drop(progress_receiver);
+        Self::new_with_progress_events(
+            repository,
+            duplicate_repository,
+            artifact_repository,
+            settings,
+            store,
+            events,
+            progress_events,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_progress_events(
+        repository: Arc<dyn InternalDuplicateRepository>,
+        duplicate_repository: Arc<dyn DuplicateRepository>,
+        artifact_repository: Arc<dyn ArtifactRepository>,
+        settings: Arc<dyn StateRepository>,
+        store: Arc<dyn ArtifactStore>,
+        events: Sender<InternalScanRun>,
+        progress_events: Sender<InternalArtifactScanProgress>,
+    ) -> Self {
         Self {
             inner: Arc::new(InternalDuplicateSupervisorInner {
                 repository,
@@ -82,6 +118,7 @@ impl InternalDuplicateSupervisor {
                 settings,
                 store,
                 events,
+                progress_events,
                 control: Mutex::new(()),
                 active: Mutex::new(None),
             }),
@@ -274,6 +311,8 @@ impl InternalDuplicateSupervisor {
 
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
+        let progress = Arc::new(ActiveProgress::default());
+        let worker_progress = Arc::clone(&progress);
         let inner = Arc::clone(&self.inner);
         let run_id = run.run_id.clone();
         let worker_run_id = run_id.clone();
@@ -287,6 +326,7 @@ impl InternalDuplicateSupervisor {
                     bundles,
                     profile,
                     worker_cancellation,
+                    worker_progress,
                 );
             })
             .map_err(|error| {
@@ -306,6 +346,7 @@ impl InternalDuplicateSupervisor {
             entry_ids: requested_entry_ids,
             cancellation,
             worker: Some(worker),
+            progress,
         });
         let _ = self.inner.events.send(run.clone());
         Ok(run)
@@ -360,6 +401,7 @@ impl InternalDuplicateSupervisor {
             if let Some(worker) = active.worker.take() {
                 let _ = worker.join();
             }
+            clear_progress(&active.progress);
         }
         let _ = self.inner.events.send(run.clone());
         Ok(run)
@@ -508,6 +550,7 @@ impl InternalDuplicateSupervisor {
             if let Some(worker) = active.worker.take() {
                 let _ = worker.join();
             }
+            clear_progress(&active.progress);
         }
     }
 
@@ -517,6 +560,29 @@ impl InternalDuplicateSupervisor {
         let _control = self.control_lock()?;
         self.reap_finished_worker();
         self.active_run()
+    }
+
+    /// Returns only ephemeral worker progress; no repository state or file I/O
+    /// is performed while the progress mutex is held.
+    pub fn active_artifact_progress(
+        &self,
+    ) -> Result<Option<InternalArtifactScanProgress>, ApplicationError> {
+        self.reap_finished_worker();
+        let progress = self
+            .active_lock()?
+            .as_ref()
+            .map(|active| Arc::clone(&active.progress));
+        let Some(progress) = progress else {
+            return Ok(None);
+        };
+        progress
+            .current
+            .lock()
+            .map(|current| current.clone())
+            .map_err(|_| {
+                RepositoryError::Other("internal duplicate progress mutex was poisoned".into())
+                    .into()
+            })
     }
 
     fn finish_quarantine(
@@ -730,8 +796,18 @@ fn run_scan(
     bundles: Vec<crate::domain::ArtifactBundle>,
     profile: HashProfile,
     cancellation: CancellationToken,
+    progress: Arc<ActiveProgress>,
 ) {
-    let result = scan_inner(&inner, &run_id, &root, &bundles, &profile, &cancellation);
+    let result = scan_inner(
+        &inner,
+        &run_id,
+        &root,
+        &bundles,
+        &profile,
+        &cancellation,
+        &progress,
+    );
+    clear_progress(&progress);
     if let Err(error) = result {
         if !cancellation.is_cancelled()
             && inner
@@ -752,6 +828,105 @@ fn run_scan(
     }
 }
 
+struct ProgressUpdate<'a> {
+    run_id: &'a str,
+    bundle: &'a ArtifactBundle,
+    artifact_index: u32,
+    total_artifacts: u32,
+    processed_pages: u32,
+    total_pages: u32,
+    compared_pairs: u64,
+    total_pairs: u64,
+    stage: InternalArtifactScanStage,
+}
+
+fn publish_progress(
+    inner: &InternalDuplicateSupervisorInner,
+    state: &ActiveProgress,
+    update: ProgressUpdate<'_>,
+) -> Result<(), RepositoryError> {
+    let sequence = state.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+    let progress = InternalArtifactScanProgress {
+        run_id: update.run_id.to_owned(),
+        sequence,
+        entry_id: update.bundle.artifact.entry_id.to_string(),
+        gallery_id: update.bundle.gallery.id,
+        artifact_index: update.artifact_index,
+        total_artifacts: update.total_artifacts,
+        processed_pages: update.processed_pages.min(update.total_pages),
+        total_pages: update.total_pages,
+        compared_pairs: update.compared_pairs.min(update.total_pairs),
+        total_pairs: update.total_pairs,
+        progress_percent: artifact_progress_percent(
+            update.processed_pages,
+            update.total_pages,
+            update.compared_pairs,
+            update.total_pairs,
+            update.stage,
+        ),
+        stage: update.stage,
+    };
+    *state.current.lock().map_err(|_| {
+        RepositoryError::Other("internal duplicate progress mutex was poisoned".into())
+    })? = Some(progress.clone());
+    let _ = inner.progress_events.send(progress);
+    Ok(())
+}
+
+fn clear_progress(state: &ActiveProgress) {
+    if let Ok(mut current) = state.current.lock() {
+        *current = None;
+    }
+}
+
+fn artifact_progress_percent(
+    processed_pages: u32,
+    total_pages: u32,
+    compared_pairs: u64,
+    total_pairs: u64,
+    stage: InternalArtifactScanStage,
+) -> u32 {
+    const HASHING_PERCENT: u128 = 35;
+    const COMPARING_PERCENT: u128 = 60;
+    match stage {
+        InternalArtifactScanStage::Hashing => {
+            if total_pages == 0 {
+                return 0;
+            }
+            u32::try_from(
+                u128::from(processed_pages.min(total_pages)).saturating_mul(HASHING_PERCENT)
+                    / u128::from(total_pages),
+            )
+            .unwrap_or(HASHING_PERCENT as u32)
+            .min(HASHING_PERCENT as u32)
+        }
+        InternalArtifactScanStage::Comparing => {
+            if total_pairs == 0 {
+                return (HASHING_PERCENT + COMPARING_PERCENT) as u32;
+            }
+            let pair_percent = u128::from(compared_pairs.min(total_pairs))
+                .saturating_mul(COMPARING_PERCENT)
+                / u128::from(total_pairs);
+            u32::try_from(HASHING_PERCENT.saturating_add(pair_percent))
+                .unwrap_or((HASHING_PERCENT + COMPARING_PERCENT) as u32)
+                .min((HASHING_PERCENT + COMPARING_PERCENT) as u32)
+        }
+        InternalArtifactScanStage::Finalizing => 99,
+    }
+}
+
+fn progress_report_interval(total: u64) -> u64 {
+    total.div_ceil(100).max(1)
+}
+
+fn should_report_progress_step(completed: u64, total: u64, next_report: &mut u64) -> bool {
+    if completed < *next_report && completed != total {
+        return false;
+    }
+    *next_report = completed.saturating_add(progress_report_interval(total));
+    true
+}
+
 fn scan_inner(
     inner: &InternalDuplicateSupervisorInner,
     run_id: &str,
@@ -759,6 +934,7 @@ fn scan_inner(
     bundles: &[crate::domain::ArtifactBundle],
     profile: &HashProfile,
     cancellation: &CancellationToken,
+    progress: &Arc<ActiveProgress>,
 ) -> Result<(), RepositoryError> {
     let mut compared_pairs = 0_u64;
     for (artifact_index, bundle) in bundles.iter().enumerate() {
@@ -768,8 +944,29 @@ fn scan_inner(
         let pages = verified_scan_pages(bundle).ok_or_else(|| {
             RepositoryError::Corrupt("artifact lost internal scan eligibility".into())
         })?;
+        let artifact_index = u32::try_from(artifact_index + 1).unwrap_or(u32::MAX);
+        let total_artifacts = u32::try_from(bundles.len()).unwrap_or(u32::MAX);
+        let total_pages = u32::try_from(pages.len()).unwrap_or(u32::MAX);
+        let page_count = u64::from(total_pages);
+        let total_pairs = page_count.saturating_mul(page_count.saturating_sub(1)) / 2;
+        let mut next_hash_report = progress_report_interval(page_count);
+        publish_progress(
+            inner,
+            progress,
+            ProgressUpdate {
+                run_id,
+                bundle,
+                artifact_index,
+                total_artifacts,
+                processed_pages: 0,
+                total_pages,
+                compared_pairs: 0,
+                total_pairs,
+                stage: InternalArtifactScanStage::Hashing,
+            },
+        )?;
         let mut hashes = Vec::with_capacity(pages.len());
-        for page in pages {
+        for (page_index, page) in pages.iter().enumerate() {
             if cancelled(inner, run_id, cancellation)? {
                 return Ok(());
             }
@@ -803,25 +1000,106 @@ fn scan_inner(
                 hash
             };
             hashes.push(hash);
+            let processed_pages = u32::try_from(page_index + 1).unwrap_or(u32::MAX);
+            if should_report_progress_step(
+                u64::from(processed_pages),
+                page_count,
+                &mut next_hash_report,
+            ) {
+                publish_progress(
+                    inner,
+                    progress,
+                    ProgressUpdate {
+                        run_id,
+                        bundle,
+                        artifact_index,
+                        total_artifacts,
+                        processed_pages,
+                        total_pages,
+                        compared_pairs: 0,
+                        total_pairs,
+                        stage: InternalArtifactScanStage::Hashing,
+                    },
+                )?;
+            }
         }
         hashes.sort_by_key(|hash| hash.source_page_number);
         let artifact = HashedArtifact {
             gallery: gallery_ref(bundle, hashes.len() as u32),
             pages: hashes,
         };
-        let detection = detect_internal_groups(run_id, &artifact, profile);
+        publish_progress(
+            inner,
+            progress,
+            ProgressUpdate {
+                run_id,
+                bundle,
+                artifact_index,
+                total_artifacts,
+                processed_pages: total_pages,
+                total_pages,
+                compared_pairs: 0,
+                total_pairs,
+                stage: InternalArtifactScanStage::Comparing,
+            },
+        )?;
+        let mut progress_error = None;
+        let detection = detect_internal_groups_with_progress(
+            run_id,
+            &artifact,
+            profile,
+            |artifact_compared_pairs, reported_total_pairs| {
+                if progress_error.is_some() {
+                    return;
+                }
+                progress_error = publish_progress(
+                    inner,
+                    progress,
+                    ProgressUpdate {
+                        run_id,
+                        bundle,
+                        artifact_index,
+                        total_artifacts,
+                        processed_pages: total_pages,
+                        total_pages,
+                        compared_pairs: artifact_compared_pairs,
+                        total_pairs: reported_total_pairs,
+                        stage: InternalArtifactScanStage::Comparing,
+                    },
+                )
+                .err();
+            },
+        );
+        if let Some(error) = progress_error {
+            return Err(error);
+        }
         compared_pairs = compared_pairs.saturating_add(detection.compared_pairs);
+        publish_progress(
+            inner,
+            progress,
+            ProgressUpdate {
+                run_id,
+                bundle,
+                artifact_index,
+                total_artifacts,
+                processed_pages: total_pages,
+                total_pages,
+                compared_pairs: detection.compared_pairs,
+                total_pairs,
+                stage: InternalArtifactScanStage::Finalizing,
+            },
+        )?;
         for record in detection.groups {
             if cancelled(inner, run_id, cancellation)? {
                 return Ok(());
             }
             let _ = inner.repository.internal_group_replace(&record)?;
         }
-        if let Some(run) = inner.repository.internal_scan_progress(
-            run_id,
-            u32::try_from(artifact_index + 1).unwrap_or(u32::MAX),
-            compared_pairs,
-        )? {
+        if let Some(run) =
+            inner
+                .repository
+                .internal_scan_progress(run_id, artifact_index, compared_pairs)?
+        {
             let _ = inner.events.send(run);
         }
     }
@@ -832,6 +1110,7 @@ fn scan_inner(
         .iter()
         .map(|bundle| bundle.gallery.id)
         .collect::<Vec<_>>();
+    clear_progress(progress);
     if let Some(run) = inner.repository.internal_scan_finish(
         run_id,
         InternalScanState::Completed,
@@ -1005,7 +1284,8 @@ mod tests {
     };
 
     use super::{
-        ActiveRun, ApplicationError, ArtifactLayout, InternalDuplicateSupervisor, RepositoryError,
+        should_report_progress_step, ActiveProgress, ActiveRun, ApplicationError, ArtifactLayout,
+        InternalDuplicateSupervisor, RepositoryError,
     };
 
     fn webp_fixture(seed: u8) -> Vec<u8> {
@@ -1029,6 +1309,85 @@ mod tests {
             .write_to(&mut cursor, ImageFormat::WebP)
             .unwrap();
         cursor.into_inner()
+    }
+
+    #[test]
+    fn hashing_progress_is_bounded_to_roughly_one_percent_updates() {
+        let total = 499_u64;
+        let mut next_report = super::progress_report_interval(total);
+        let updates = (1..=total)
+            .filter(|completed| should_report_progress_step(*completed, total, &mut next_report))
+            .collect::<Vec<_>>();
+
+        // The separate initial hashing event plus these step events remains
+        // bounded to 101 emissions per artifact.
+        assert!(updates.len() <= 100, "updates={}", updates.len() + 1);
+        assert_eq!(updates.last(), Some(&total));
+        assert!(updates.windows(2).all(|window| window[0] < window[1]));
+    }
+
+    #[test]
+    fn artifact_progress_percent_reserves_visible_ranges_for_each_stage() {
+        use crate::domain::InternalArtifactScanStage;
+
+        assert_eq!(
+            super::artifact_progress_percent(0, 211, 0, 22_155, InternalArtifactScanStage::Hashing),
+            0
+        );
+        assert_eq!(
+            super::artifact_progress_percent(
+                105,
+                211,
+                0,
+                22_155,
+                InternalArtifactScanStage::Hashing
+            ),
+            17
+        );
+        assert_eq!(
+            super::artifact_progress_percent(
+                211,
+                211,
+                0,
+                22_155,
+                InternalArtifactScanStage::Hashing
+            ),
+            35
+        );
+        assert_eq!(
+            super::artifact_progress_percent(
+                211,
+                211,
+                0,
+                22_155,
+                InternalArtifactScanStage::Comparing
+            ),
+            35
+        );
+        assert_eq!(
+            super::artifact_progress_percent(
+                211,
+                211,
+                22_155,
+                22_155,
+                InternalArtifactScanStage::Comparing
+            ),
+            95
+        );
+        assert_eq!(
+            super::artifact_progress_percent(1, 1, 0, 0, InternalArtifactScanStage::Comparing),
+            95
+        );
+        assert_eq!(
+            super::artifact_progress_percent(
+                211,
+                211,
+                22_155,
+                22_155,
+                InternalArtifactScanStage::Finalizing
+            ),
+            99
+        );
     }
 
     #[test]
@@ -1058,6 +1417,7 @@ mod tests {
             entry_ids: None,
             cancellation: CancellationToken::new(),
             worker: None,
+            progress: Arc::new(ActiveProgress::default()),
         });
 
         let active = supervisor
@@ -1130,6 +1490,7 @@ mod tests {
             entry_ids: None,
             cancellation: CancellationToken::new(),
             worker: None,
+            progress: Arc::new(ActiveProgress::default()),
         });
 
         let returned = supervisor
@@ -1276,13 +1637,15 @@ mod tests {
             .unwrap();
 
         let (events, _receiver) = mpsc::channel();
-        let supervisor = InternalDuplicateSupervisor::new(
+        let (progress_events, progress_receiver) = mpsc::channel();
+        let supervisor = InternalDuplicateSupervisor::new_with_progress_events(
             repository.clone(),
             repository.clone(),
             repository.clone(),
             repository.clone(),
             std::sync::Arc::clone(&store),
             events,
+            progress_events,
         );
         assert!(supervisor
             .start(InternalScanRequest { entry_ids: vec![] })
@@ -1312,6 +1675,34 @@ mod tests {
                 }
             })
             .expect("internal scan completes");
+        let progress_updates = progress_receiver.try_iter().collect::<Vec<_>>();
+        assert!(progress_updates
+            .iter()
+            .any(|progress| progress.stage == crate::domain::InternalArtifactScanStage::Hashing));
+        assert!(progress_updates.iter().any(|progress| {
+            progress.stage == crate::domain::InternalArtifactScanStage::Comparing
+        }));
+        let finalizing = progress_updates
+            .iter()
+            .find(|progress| progress.stage == crate::domain::InternalArtifactScanStage::Finalizing)
+            .expect("finalizing progress is emitted");
+        assert_eq!(finalizing.artifact_index, 1);
+        assert_eq!(finalizing.total_artifacts, 1);
+        assert_eq!(finalizing.processed_pages, 8);
+        assert_eq!(finalizing.total_pages, 8);
+        assert_eq!(finalizing.compared_pairs, 28);
+        assert_eq!(finalizing.total_pairs, 28);
+        assert_eq!(finalizing.progress_percent, 99);
+        assert!(progress_updates
+            .windows(2)
+            .all(|window| window[0].sequence < window[1].sequence));
+        assert!(progress_updates
+            .iter()
+            .all(|progress| progress.run_id == snapshot.run.as_ref().unwrap().run_id));
+        assert!(supervisor
+            .active_artifact_progress()
+            .expect("read terminal progress")
+            .is_none());
         assert_eq!(snapshot.groups.len(), 1);
         assert_eq!(
             snapshot.groups[0]

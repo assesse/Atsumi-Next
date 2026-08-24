@@ -25,13 +25,13 @@ use crate::{
         DownloadEntry, DownloadListRequest, DownloadPage, DuplicateDecisionRequest,
         DuplicateReview, DuplicateScanRun, DuplicateSnapshot, ExplorationDataResetRequest,
         ExplorationDataResetResult, FavoriteKey, FavoriteMutationResult, FavoriteRecord,
-        GalleryDetail, GalleryPage, InternalDuplicateReview, InternalDuplicateSnapshot,
-        InternalRemovalApplyRequest, InternalRemovalPlan, InternalRemovalPlanRequest,
-        InternalRemovalResult, InternalRemovalUndoRequest, InternalScanRequest, InternalScanRun,
-        JobRef, MaintenanceAction, MaintenancePreview, MaintenanceResult, SearchHistoryEntry,
-        SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot, TagCatalogStatus,
-        TagSuggestion, TagSuggestionRequest, ValidationError, WindowPlacement,
-        WindowPlacementSnapshot,
+        GalleryDetail, GalleryPage, InternalArtifactScanProgress, InternalDuplicateReview,
+        InternalDuplicateSnapshot, InternalRemovalApplyRequest, InternalRemovalPlan,
+        InternalRemovalPlanRequest, InternalRemovalResult, InternalRemovalUndoRequest,
+        InternalScanRequest, InternalScanRun, JobRef, MaintenanceAction, MaintenancePreview,
+        MaintenanceResult, SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsPatch,
+        SettingsSnapshot, TagCatalogStatus, TagSuggestion, TagSuggestionRequest, ValidationError,
+        WindowPlacement, WindowPlacementSnapshot,
     },
     infrastructure::HitomiLiveAdapter,
     thumbnail::{
@@ -759,6 +759,19 @@ pub async fn internal_duplicate_snapshot(
     Ok(
         run_application_blocking("internal_duplicate_snapshot", move || supervisor.snapshot())
             .await,
+    )
+}
+
+#[tauri::command]
+pub async fn internal_duplicate_active_artifact(
+    state: State<'_, AppState>,
+) -> Result<ApiResult<Option<InternalArtifactScanProgress>>, ApiError> {
+    let supervisor = state.internal_duplicates.clone();
+    Ok(
+        run_application_blocking("internal_duplicate_active_artifact", move || {
+            supervisor.active_artifact_progress()
+        })
+        .await,
     )
 }
 

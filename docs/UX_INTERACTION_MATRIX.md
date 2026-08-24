@@ -70,6 +70,17 @@ metadata target이 이벤트를 처리하면 card의 상세 열기와 선택은 
 - 명령 순서는 화면별 primary action 우선순위를 따른다.
 - 선택 개수, 전체 선택, primary action, destructive action을 제공한다.
 
+## 앨범 내부 중복 검사
+
+| 상황 | 표시·입력 | 동작 | 상태 |
+|---|---|---|---|
+| 선택한 완료 앨범 scan 실행 중 | 해당 Downloads 카드에 `내부 검사 n/N`, 단계, artifact 진행률 | 실제 worker의 현재 `entryId`와 `galleryId`가 모두 일치하는 카드만 갱신 | 확정 |
+| N-way edition block 검토 | 행=판본 세트, 열=장면, 각 행 맨 왼쪽 radio | 선택한 세트 행 전체를 유지하고 다른 세트의 대응 page를 격리 예정으로 표시 | 확정 |
+| 선택 세트에 장면 누락 | 해당 cell에 `누락 · 행 보존` | 그 scene row를 plan에서 제외해 어느 page도 자동 격리하지 않음 | 확정 |
+| standalone exact/legacy 결과 | 기존 page별 radio | track 정보가 없는 결과만 개별 keep 선택 유지 | 확정 |
+
+edition matrix의 page preview는 약 200px 비교 폭을 유지하고 장면 수가 많으면 dialog 내부에서 가로 스크롤한다. 검사 진행 상태는 휘발성이며 scan 결과나 다운로드 진행률을 덮어쓰지 않는다.
+
 ## Settings maintenance
 
 | 입력 | 동작 | 상태 |

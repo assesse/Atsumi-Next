@@ -2,8 +2,16 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { backend } from "./api/backend";
-import type { AppActiveWorkSnapshot, DownloadPage, GalleryPage, InternalDuplicateReview, InternalScanRun } from "./api/contracts";
+import { backend, type BackendEventMap } from "./api/backend";
+import type {
+  AppActiveWorkSnapshot,
+  DownloadPage,
+  GalleryPage,
+  InternalArtifactScanProgress,
+  InternalDuplicateReview,
+  InternalDuplicateSnapshot,
+  InternalScanRun,
+} from "./api/contracts";
 import { galleryId } from "./core/types";
 import { browserFixtureThumbnailAdapter, ThumbnailClient, ThumbnailProvider } from "./thumbnail";
 
@@ -669,7 +677,7 @@ describe("App Phase 3A backend flow", () => {
       totalPages: 24,
       comparedPairs: 276,
       groupsFound: 0,
-      algorithmVersion: 3,
+      algorithmVersion: 4,
       skippedArtifacts: 0,
       skippedPages: 0,
       startedAt: "2026-08-23T00:00:00.000Z",
@@ -784,6 +792,183 @@ describe("App Phase 3A backend flow", () => {
       });
       expect(scanStart).toHaveBeenLastCalledWith({ entryIds: ["selected-entry-a"] });
       expect(scanStart).toHaveBeenCalledTimes(3);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it("hydrates, routes, and clears per-artifact internal scan progress on exact Downloads cards", async () => {
+    const downloads: DownloadPage = {
+      page: 1,
+      totalItems: 2,
+      entries: [
+        { entryId: "progress-entry-a", galleryId: galleryId(4051038), revision: 1, state: "completed", progress: 100 },
+        { entryId: "progress-entry-b", galleryId: galleryId(4050754), revision: 1, state: "completed", progress: 100 },
+      ],
+    };
+    const runningRun: InternalScanRun = {
+      runId: "progress-internal-run",
+      revision: 0,
+      state: "running",
+      totalArtifacts: 2,
+      scannedArtifacts: 0,
+      totalPages: 48,
+      comparedPairs: 0,
+      groupsFound: 0,
+      algorithmVersion: 4,
+      skippedArtifacts: 0,
+      skippedPages: 0,
+      startedAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:00:00.000Z",
+    };
+    const completedRun: InternalScanRun = {
+      ...runningRun,
+      revision: 1,
+      state: "completed",
+      scannedArtifacts: 2,
+      comparedPairs: 552,
+      updatedAt: "2026-08-25T00:00:02.000Z",
+      finishedAt: "2026-08-25T00:00:02.000Z",
+    };
+    const progressA: InternalArtifactScanProgress = {
+      runId: runningRun.runId,
+      sequence: 1,
+      entryId: "progress-entry-a",
+      galleryId: galleryId(4051038),
+      artifactIndex: 1,
+      totalArtifacts: 2,
+      processedPages: 6,
+      totalPages: 24,
+      comparedPairs: 0,
+      totalPairs: 276,
+      progressPercent: 18,
+      stage: "hashing",
+    };
+    const initialSnapshot: InternalDuplicateSnapshot = {
+      run: runningRun,
+      groups: [],
+      quarantineRecords: [],
+      skips: [],
+    };
+    const completedSnapshot: InternalDuplicateSnapshot = {
+      ...initialSnapshot,
+      run: completedRun,
+    };
+    const eventHandlers = new Map<keyof BackendEventMap, (payload: unknown) => void>();
+
+    vi.spyOn(backend, "downloadEntriesList").mockResolvedValue({ ok: true, data: downloads });
+    vi.spyOn(backend, "internalDuplicateSnapshot")
+      .mockResolvedValueOnce({ ok: true, data: initialSnapshot })
+      .mockResolvedValue({ ok: true, data: completedSnapshot });
+    const activeArtifact = vi.spyOn(backend, "internalDuplicateActiveArtifact")
+      .mockResolvedValue({ ok: true, data: progressA });
+    vi.spyOn(backend, "on").mockImplementation(async (event, handler) => {
+      eventHandlers.set(event, handler as (payload: unknown) => void);
+      return () => eventHandlers.delete(event);
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      await act(async () => {
+        clickButtonContaining(container, "Downloads");
+        await settle();
+      });
+
+      await vi.waitFor(() => {
+        expect(container.querySelector('[data-gallery-id="4051038"] .internal-duplicate-card-progress'))
+          .toHaveTextContent("내부 검사 1/2");
+      });
+      expect(activeArtifact).toHaveBeenCalled();
+      expect(container.querySelector('[data-gallery-id="4051038"] .internal-duplicate-card-progress'))
+        .toHaveAccessibleName(expect.stringContaining("페이지 6/24"));
+      expect(container.querySelector('[data-gallery-id="4050754"] .internal-duplicate-card-progress')).toBeNull();
+
+      const progressHandler = eventHandlers.get("internal-duplicate:artifact-progress");
+      const runHandler = eventHandlers.get("internal-duplicate:changed");
+      if (!progressHandler || !runHandler) throw new Error("Internal duplicate event handlers were not registered");
+
+      await act(async () => {
+        progressHandler({
+          ...progressA,
+          sequence: 2,
+          galleryId: galleryId(4050754),
+          progressPercent: 44,
+        } satisfies InternalArtifactScanProgress);
+        await settle();
+      });
+      expect(container.querySelector(".internal-duplicate-card-progress")).toBeNull();
+
+      const progressB: InternalArtifactScanProgress = {
+        ...progressA,
+        sequence: 3,
+        entryId: "progress-entry-b",
+        galleryId: galleryId(4050754),
+        artifactIndex: 2,
+        processedPages: 24,
+        comparedPairs: 138,
+        progressPercent: 78,
+        stage: "comparing",
+      };
+      await act(async () => {
+        progressHandler(progressB);
+        await settle();
+      });
+      expect(container.querySelector('[data-gallery-id="4051038"] .internal-duplicate-card-progress')).toBeNull();
+      expect(container.querySelector('[data-gallery-id="4050754"] .internal-duplicate-card-progress'))
+        .toHaveAccessibleName(expect.stringContaining("비교 138/276"));
+
+      await act(async () => {
+        progressHandler({ ...progressA, sequence: 2 });
+        await settle();
+      });
+      expect(container.querySelector('[data-gallery-id="4050754"] .internal-duplicate-card-progress'))
+        .toHaveAttribute("aria-valuenow", "78");
+
+      let resolveLateHydration: ((value: Awaited<ReturnType<typeof backend.internalDuplicateActiveArtifact>>) => void) | undefined;
+      activeArtifact.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveLateHydration = resolve;
+      }));
+      const replacementRun: InternalScanRun = {
+        ...runningRun,
+        runId: "progress-internal-run-replacement",
+        startedAt: "2026-08-25T00:01:00.000Z",
+        updatedAt: "2026-08-25T00:01:00.000Z",
+      };
+      await act(async () => {
+        runHandler(replacementRun);
+        await settle();
+      });
+      expect(resolveLateHydration).toBeTypeOf("function");
+      await act(async () => {
+        progressHandler({ ...progressB, runId: replacementRun.runId, sequence: 1 });
+        await settle();
+      });
+      expect(container.querySelector('[data-gallery-id="4050754"] .internal-duplicate-card-progress'))
+        .toHaveAttribute("aria-valuenow", "78");
+
+      await act(async () => {
+        resolveLateHydration?.({ ok: true, data: null });
+        await settle();
+      });
+      expect(container.querySelector('[data-gallery-id="4050754"] .internal-duplicate-card-progress'))
+        .toHaveAttribute("aria-valuenow", "78");
+
+      await act(async () => {
+        runHandler({
+          ...completedRun,
+          runId: replacementRun.runId,
+          startedAt: replacementRun.startedAt,
+        });
+        await settle();
+      });
+      await vi.waitFor(() => expect(container.querySelector(".internal-duplicate-card-progress")).toBeNull());
     } finally {
       await act(async () => root.unmount());
       container.remove();

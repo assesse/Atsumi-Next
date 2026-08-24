@@ -9,6 +9,7 @@ import {
   type MouseEvent,
 } from "react";
 import type { Gallery, GalleryId, ViewId } from "../core/types";
+import type { InternalArtifactScanProgress } from "../api/contracts";
 import { languagePresentation } from "../data/languages";
 import {
   galleryCoverThumbnailKey,
@@ -30,6 +31,7 @@ type GalleryCardProps = {
   selectionContext: boolean;
   favoriteMetadata: ReadonlySet<string>;
   duplicateCandidateCount?: number;
+  internalDuplicateProgress?: InternalArtifactScanProgress;
   onSelect: (id: GalleryId, modifiers: { ctrlKey: boolean; shiftKey: boolean }) => void;
   onOpenDetail: (id: GalleryId) => void;
   onOpenArtifact: (id: GalleryId) => void;
@@ -63,6 +65,7 @@ function GalleryCardComponent({
   selectionContext,
   favoriteMetadata,
   duplicateCandidateCount = 0,
+  internalDuplicateProgress,
   onSelect,
   onOpenDetail,
   onOpenArtifact,
@@ -100,6 +103,17 @@ function GalleryCardComponent({
   const overflowMeasureRefs = useRef<Array<HTMLSpanElement | null>>([]);
   const lastContentSize = useRef({ width: 0, height: 0 });
   const hasDuplicateCandidates = duplicateCandidateCount > 0;
+  const visibleInternalDuplicateProgress = view === "downloads" ? internalDuplicateProgress : undefined;
+  const internalScanPercent = Math.min(100, Math.max(0, visibleInternalDuplicateProgress?.progressPercent ?? 0));
+  const internalScanStage = visibleInternalDuplicateProgress?.stage === "hashing"
+    ? visibleInternalDuplicateProgress.totalPages > 0
+      ? `페이지 ${visibleInternalDuplicateProgress.processedPages}/${visibleInternalDuplicateProgress.totalPages}`
+      : "페이지 해시 계산"
+    : visibleInternalDuplicateProgress?.stage === "comparing"
+      ? visibleInternalDuplicateProgress.totalPairs > 0
+        ? `비교 ${visibleInternalDuplicateProgress.comparedPairs}/${visibleInternalDuplicateProgress.totalPairs}`
+        : "페이지 비교"
+      : visibleInternalDuplicateProgress ? "결과 정리" : "";
   const iconOnlyStatus = hasDuplicateCandidates || download?.state === "downloading" || download?.state === "review_required";
   const cardStatusClass = download?.state === "completed"
     ? " is-complete"
@@ -202,7 +216,7 @@ function GalleryCardComponent({
 
   return (
     <article
-      className={`gallery-card${selected ? " is-selected" : ""}${gallery.favorite ? " is-favorite" : ""}${cardStatusClass}`}
+      className={`gallery-card${selected ? " is-selected" : ""}${gallery.favorite ? " is-favorite" : ""}${cardStatusClass}${visibleInternalDuplicateProgress ? " is-internal-scanning" : ""}`}
       ref={cardRef}
       data-gallery-id={gallery.id}
       style={{ "--download-progress": `${progress}%` } as CSSProperties}
@@ -212,6 +226,7 @@ function GalleryCardComponent({
         gallery.title,
         subtitle || null,
         download?.state === "completed" ? "다운로드 완료" : null,
+        visibleInternalDuplicateProgress ? `내부 중복 검사 ${internalScanPercent}%` : null,
         selected ? "선택됨" : "선택 안 됨",
       ].filter(Boolean).join(", ")}
       onKeyDown={selectFromKeyboard}
@@ -298,7 +313,7 @@ function GalleryCardComponent({
           </div>
         ) : null}
       </GalleryThumbnail>
-      <div ref={contentRef} className="card-content">
+      <div ref={contentRef} className={`card-content${visibleInternalDuplicateProgress ? " has-internal-scan" : ""}`}>
         <div className="card-title" title={gallery.title}>
           <strong title={gallery.title}>{displayTitle}</strong>
           {subtitle ? <span className="title-sub">{subtitle}</span> : null}
@@ -328,6 +343,21 @@ function GalleryCardComponent({
             </>
           ) : null}
         </div>
+        {visibleInternalDuplicateProgress ? (
+          <div
+            className="internal-duplicate-card-progress"
+            role="progressbar"
+            aria-label={`${gallery.title} 내부 중복 검사 · ${internalScanStage}`}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={internalScanPercent}
+          >
+            <span>내부 검사 {visibleInternalDuplicateProgress.artifactIndex}/{visibleInternalDuplicateProgress.totalArtifacts}</span>
+            <i aria-hidden="true"><b style={{ width: `${internalScanPercent}%` }} /></i>
+            <strong>{internalScanPercent}%</strong>
+            <small>{internalScanStage}</small>
+          </div>
+        ) : null}
         <div ref={tagListRef} className="tag-list" aria-label={`태그: ${sortedTags.map((tag) => tag.value).join(", ")}`}>
           {visibleTags.map((tag, index) => (
             <MetadataChip

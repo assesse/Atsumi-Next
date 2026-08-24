@@ -36,6 +36,11 @@ const bytes = (value: number): string => new Intl.NumberFormat("ko-KR", {
   maximumFractionDigits: 1,
 }).format(value / (value >= 1024 * 1024 ? 1024 * 1024 : 1024));
 
+const INTERNAL_REVIEW_DENSITY_STYLE = {
+  "--internal-scene-column-width": "208px",
+  "--internal-legacy-image-width": "200px",
+} as CSSProperties;
+
 export function InternalDuplicateDialog({
   open,
   review,
@@ -110,6 +115,8 @@ export function InternalDuplicateDialog({
     <dialog
       ref={dialog}
       className="review-dialog internal-review-dialog"
+      data-image-density="fixed-200"
+      style={INTERNAL_REVIEW_DENSITY_STYLE}
       aria-labelledby="internal-review-title"
       aria-busy={loading || busy}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
@@ -151,62 +158,63 @@ export function InternalDuplicateDialog({
                 </header>
                 {block.edition ? (
                   <>
-                    <fieldset className="internal-track-selector">
+                    <fieldset className="internal-edition-tracks">
                       <legend>남길 판본 세트 선택</legend>
-                      {block.tracks.map((track, trackIndex) => {
-                        const selected = (selectedTrackByBlock[block.blockId] ?? block.tracks[0]?.id) === track.id;
-                        return <label key={track.id} className={`internal-track-option${selected ? " is-selected" : ""}`}>
-                          <input
-                            type="radio"
-                            name={`track-${block.blockId}`}
-                            checked={selected}
-                            onChange={() => setSelectedTrackByBlock((current) => ({ ...current, [block.blockId]: track.id }))}
-                          />
-                          {track.firstPage ? <GalleryThumbnail
-                            className="internal-track-image"
-                            thumbnailKey={artifactPageThumbnailKey(review.entryId, track.firstPage.sourcePage, track.firstPage.sourcePage - 1)}
-                            consumer="review"
-                            priority={blockIndex === 0 && trackIndex < 2 ? "visible" : "prefetch"}
-                            client={thumbnailClient}
-                            alt={`${track.label} 첫 원본 ${track.firstPage.sourcePage}페이지`}
-                          /> : null}
-                          <strong>{track.label}</strong>
-                          <span>{track.pages[0]}–{track.pages.at(-1)}p · {track.coveredRows}/{block.rows.length}장</span>
-                          {track.missingRows ? <small>{track.missingRows}개 장면 누락</small> : null}
-                        </label>;
-                      })}
-                    </fieldset>
-                    <div
-                      className="internal-scene-matrix"
-                      role="region"
-                      aria-label={`장면 묶음 ${blockIndex + 1} 판본 행렬`}
-                      style={{ "--internal-track-count": block.tracks.length } as CSSProperties}
-                    >
-                      <div className="internal-scene-matrix-row internal-scene-matrix-header">
-                        <span>장면</span>{block.tracks.map((track) => <strong key={track.id}>{track.label}</strong>)}
-                      </div>
-                      {block.rows.map((group) => (
-                        <div className="internal-scene-matrix-row" key={group.groupId}>
-                          <strong>장면 {group.sequenceIndex + 1}</strong>
-                          {block.tracks.map((track) => {
-                            const page = group.pages.find((candidate) => candidate.editionTrackId === track.id);
-                            const selected = (selectedTrackByBlock[block.blockId] ?? block.tracks[0]?.id) === track.id;
-                            if (!page) return <span className={`internal-scene-cell is-missing${selected ? " is-kept" : ""}`} key={track.id}>{selected ? "선택 세트 누락 · 이 행 보존" : "—"}</span>;
-                            return <div className={`internal-scene-cell${selected ? " is-kept" : " is-quarantine"}`} key={track.id}>
-                              <GalleryThumbnail
-                                className="internal-page-image"
-                                thumbnailKey={artifactPageThumbnailKey(review.entryId, page.sourcePage, page.sourcePage - 1)}
-                                consumer="review"
-                                priority={blockIndex === 0 && group.sequenceIndex < 2 ? "visible" : "prefetch"}
-                                client={thumbnailClient}
-                                alt={`${track.label} 원본 ${page.sourcePage}페이지`}
-                              ><span>{page.sourcePage}p</span></GalleryThumbnail>
-                              <small>{selected ? "유지" : "격리 예정"}</small>
-                            </div>;
-                          })}
+                      <div
+                        className="internal-scene-matrix"
+                        role="region"
+                        aria-label={`장면 묶음 ${blockIndex + 1} 판본 행렬`}
+                        style={{ "--internal-scene-count": block.rows.length } as CSSProperties}
+                      >
+                        <div className="internal-scene-matrix-row internal-scene-matrix-header">
+                          <span>판본 세트</span>
+                          {block.rows.map((group) => <strong key={group.groupId}>장면 {group.sequenceIndex + 1}</strong>)}
                         </div>
-                      ))}
-                    </div>
+                        {block.tracks.map((track) => {
+                          const selected = (selectedTrackByBlock[block.blockId] ?? block.tracks[0]?.id) === track.id;
+                          return (
+                            <div
+                              className={`internal-scene-matrix-row internal-edition-track-row${selected ? " is-kept" : " is-quarantine"}`}
+                              key={track.id}
+                            >
+                              <label className="internal-edition-track-control">
+                                <input
+                                  type="radio"
+                                  name={`track-${block.blockId}`}
+                                  checked={selected}
+                                  onChange={() => setSelectedTrackByBlock((current) => ({ ...current, [block.blockId]: track.id }))}
+                                />
+                                <span>
+                                  <strong>{track.label}</strong>
+                                  <small>{track.pages[0]}–{track.pages.at(-1)}p · {track.coveredRows}/{block.rows.length}장</small>
+                                  {track.missingRows ? <small>{track.missingRows}개 장면 누락</small> : null}
+                                </span>
+                              </label>
+                              {block.rows.map((group) => {
+                                const page = group.pages.find((candidate) => candidate.editionTrackId === track.id);
+                                if (!page) return <span
+                                  className={`internal-scene-cell is-missing${selected ? " is-kept" : ""}`}
+                                  key={group.groupId}
+                                  aria-label={selected ? "선택 세트 누락 · 이 행 보존" : `${track.label} 장면 누락`}
+                                  title={selected ? "선택 세트 누락 · 이 행 보존" : undefined}
+                                >{selected ? "누락 · 행 보존" : "—"}</span>;
+                                return <div className={`internal-scene-cell${selected ? " is-kept" : " is-quarantine"}`} key={group.groupId}>
+                                  <GalleryThumbnail
+                                    className="internal-page-image"
+                                    thumbnailKey={artifactPageThumbnailKey(review.entryId, page.sourcePage, page.sourcePage - 1)}
+                                    consumer="review"
+                                    priority={blockIndex === 0 && group.sequenceIndex < 2 ? "visible" : "prefetch"}
+                                    client={thumbnailClient}
+                                    alt={`${track.label} 원본 ${page.sourcePage}페이지`}
+                                  ><span>{page.sourcePage}p</span></GalleryThumbnail>
+                                  <small>{selected ? "유지" : "격리 예정"}</small>
+                                </div>;
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </fieldset>
                     {(() => {
                       const selectedId = selectedTrackByBlock[block.blockId] ?? block.tracks[0]?.id;
                       const selectedTrack = block.tracks.find((track) => track.id === selectedId);

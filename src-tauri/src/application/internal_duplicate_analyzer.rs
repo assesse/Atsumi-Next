@@ -187,10 +187,24 @@ struct TrackAssignments {
 
 /// Hash features remain unchanged. Pair edges are aligned monotonically, then only runs that
 /// share at least two ordered rows can attach a new edition track to a scene block.
+#[allow(dead_code)]
 pub(crate) fn detect_internal_groups(
     run_id: &str,
     artifact: &HashedArtifact,
     profile: &HashProfile,
+) -> InternalDetection {
+    detect_internal_groups_with_progress(run_id, artifact, profile, |_, _| {})
+}
+
+/// Runs the unchanged internal detector while reporting bounded pair-comparison
+/// progress. The callback is observational only and is invoked at roughly 1%
+/// intervals, plus the terminal comparison, so it cannot influence evidence or
+/// threshold decisions.
+pub(crate) fn detect_internal_groups_with_progress(
+    run_id: &str,
+    artifact: &HashedArtifact,
+    profile: &HashProfile,
+    mut on_pair_progress: impl FnMut(u64, u64),
 ) -> InternalDetection {
     let prepared = artifact
         .pages
@@ -203,6 +217,10 @@ pub(crate) fn detect_internal_groups(
         .collect::<Vec<_>>();
     let mut edges = Vec::new();
     let mut compared_pairs = 0_u64;
+    let page_count = u64::try_from(prepared.len()).unwrap_or(u64::MAX);
+    let total_pairs = page_count.saturating_mul(page_count.saturating_sub(1)) / 2;
+    let report_interval = total_pairs.div_ceil(100).max(1);
+    let mut next_report = report_interval;
     for left in 0..prepared.len() {
         for right in (left + 1)..prepared.len() {
             compared_pairs = compared_pairs.saturating_add(1);
@@ -216,6 +234,10 @@ pub(crate) fn detect_internal_groups(
                         evidence,
                     });
                 }
+            }
+            if compared_pairs >= next_report || compared_pairs == total_pairs {
+                on_pair_progress(compared_pairs, total_pairs);
+                next_report = compared_pairs.saturating_add(report_interval);
             }
         }
     }
@@ -2651,6 +2673,24 @@ mod tests {
             .collect();
         let found = detect_internal_groups("run", &artifact(pages), &HashProfile::current());
         assert_eq!(found.compared_pairs, 22_155);
+    }
+    #[test]
+    fn pair_progress_is_bounded_and_reports_the_terminal_comparison() {
+        let pages = (1..=211)
+            .map(|number| page(number, u64::from(number) * 19))
+            .collect();
+        let mut updates = Vec::new();
+        let found = detect_internal_groups_with_progress(
+            "run",
+            &artifact(pages),
+            &HashProfile::current(),
+            |compared, total| updates.push((compared, total)),
+        );
+
+        assert_eq!(found.compared_pairs, 22_155);
+        assert!(updates.len() <= 101, "updates={}", updates.len());
+        assert_eq!(updates.last(), Some(&(22_155, 22_155)));
+        assert!(updates.windows(2).all(|window| window[0].0 < window[1].0));
     }
     #[test]
     fn hybrid_selector_preserves_a_bounded_three_or_four_track_legacy_block() {

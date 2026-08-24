@@ -532,6 +532,23 @@ export type InternalScanRequest = {
   entryIds: string[];
 };
 
+export type InternalArtifactScanStage = "hashing" | "comparing" | "finalizing";
+
+export type InternalArtifactScanProgress = {
+  runId: string;
+  sequence: number;
+  entryId: string;
+  galleryId: GalleryId;
+  artifactIndex: number;
+  totalArtifacts: number;
+  processedPages: number;
+  totalPages: number;
+  comparedPairs: number;
+  totalPairs: number;
+  progressPercent: number;
+  stage: InternalArtifactScanStage;
+};
+
 export type InternalScanRun = {
   runId: string;
   revision: number;

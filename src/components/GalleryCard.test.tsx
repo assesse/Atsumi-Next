@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DownloadChangedEvent } from "../api/contracts";
+import type { DownloadChangedEvent, InternalArtifactScanProgress } from "../api/contracts";
 import type { Gallery, GalleryId } from "../core/types";
 import { mockGalleries } from "../data/mockGalleries";
 import { applyDownloadChanged } from "../state/downloadProjection";
@@ -590,6 +590,97 @@ describe("GalleryCard event projection", () => {
     expect(cover?.querySelector('.status-pill [data-status-icon="downloading"]')).not.toBeNull();
     expect(progress).toHaveAttribute("aria-valuenow", "41");
     expect(progress?.querySelector("span")).toHaveStyle({ width: "41%" });
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("shows exact internal-scan stage progress beside existing Downloads status UI", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery: Gallery = {
+      ...mockGalleries[0]!,
+      download: { entryId: "entry-internal-progress", state: "completed", progress: 100 },
+    };
+    const internalDuplicateProgress: InternalArtifactScanProgress = {
+      runId: "internal-run-progress",
+      sequence: 7,
+      entryId: "entry-internal-progress",
+      galleryId: gallery.id,
+      artifactIndex: 2,
+      totalArtifacts: 4,
+      processedPages: 208,
+      totalPages: 208,
+      comparedPairs: 10_764,
+      totalPairs: 21_528,
+      progressPercent: 78,
+      stage: "comparing",
+    };
+
+    await act(async () => root.render(
+      <GalleryCard
+        gallery={gallery}
+        view="downloads"
+        selected={false}
+        selectionContext={false}
+        favoriteMetadata={new Set()}
+        duplicateCandidateCount={2}
+        internalDuplicateProgress={internalDuplicateProgress}
+        {...callbacks}
+      />,
+    ));
+
+    const article = container.querySelector<HTMLElement>("article");
+    const internalProgress = container.querySelector<HTMLElement>(".internal-duplicate-card-progress");
+    expect(article).toHaveClass("is-internal-scanning");
+    expect(article).toHaveAccessibleName(expect.stringContaining("내부 중복 검사 78%"));
+    expect(internalProgress).toHaveAttribute("role", "progressbar");
+    expect(internalProgress).toHaveAccessibleName(`${gallery.title} 내부 중복 검사 · 비교 10764/21528`);
+    expect(internalProgress).toHaveAttribute("aria-valuenow", "78");
+    expect(internalProgress).toHaveTextContent("내부 검사 2/4");
+    expect(internalProgress).toHaveTextContent("78%");
+    expect(internalProgress).toHaveTextContent("비교 10764/21528");
+    expect(internalProgress?.querySelector("i > b")).toHaveStyle({ width: "78%" });
+    expect(container.querySelector(".cover .progress-track")).toHaveAttribute("aria-valuenow", "100");
+    expect(container.querySelector(".status-pill.has-duplicate-count")).toHaveTextContent("2");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("does not render the internal-scan progress row outside Downloads", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery = mockGalleries[0]!;
+    const internalDuplicateProgress: InternalArtifactScanProgress = {
+      runId: "internal-run-hidden",
+      sequence: 1,
+      entryId: "entry-hidden",
+      galleryId: gallery.id,
+      artifactIndex: 1,
+      totalArtifacts: 1,
+      processedPages: 3,
+      totalPages: 24,
+      comparedPairs: 0,
+      totalPairs: 276,
+      progressPercent: 12,
+      stage: "hashing",
+    };
+
+    await act(async () => root.render(
+      <GalleryCard
+        gallery={gallery}
+        view="explore"
+        selected={false}
+        selectionContext={false}
+        favoriteMetadata={new Set()}
+        internalDuplicateProgress={internalDuplicateProgress}
+        {...callbacks}
+      />,
+    ));
+
+    expect(container.querySelector(".internal-duplicate-card-progress")).toBeNull();
     await act(async () => root.unmount());
     container.remove();
   });

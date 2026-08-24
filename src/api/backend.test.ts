@@ -5,6 +5,7 @@ import type {
   AutoFindSnapshot,
   DownloadEntry,
   DuplicateSnapshot,
+  InternalArtifactScanProgress,
   InternalDuplicateSnapshot,
   SearchRequest,
 } from "./contracts";
@@ -752,7 +753,9 @@ describe("browser backend internal duplicate contract", () => {
   it("persists exact source-page evidence and keeps quarantine undoable with revision checks", async () => {
     vi.useFakeTimers();
     const events: string[] = [];
+    const artifactEvents: InternalArtifactScanProgress[] = [];
     const unsubscribe = await backend.on("internal-duplicate:changed", (run) => events.push(`${run.state}:${run.revision}`));
+    const unsubscribeArtifact = await backend.on("internal-duplicate:artifact-progress", (progress) => artifactEvents.push(progress));
     try {
       const empty = await backend.internalDuplicateScanStart({ entryIds: [] });
       expect(empty).toMatchObject({ ok: false, error: { code: "VALIDATION_ERROR" } });
@@ -769,7 +772,49 @@ describe("browser backend internal duplicate contract", () => {
         entryIds: ["browser-artifact-other"],
       });
       expect(otherSelection).toMatchObject({ ok: false, error: { code: "OPERATION_ACTIVE" } });
-      await vi.advanceTimersByTimeAsync(90);
+      const hashing = await backend.internalDuplicateActiveArtifact();
+      expect(hashing).toMatchObject({
+        ok: true,
+        data: {
+          runId: started.data.runId,
+          entryId: "browser-artifact-4051038",
+          artifactIndex: 1,
+          totalArtifacts: 1,
+          sequence: 1,
+          stage: "hashing",
+          progressPercent: 0,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(35);
+      const comparing = await backend.internalDuplicateActiveArtifact();
+      expect(comparing).toMatchObject({
+        ok: true,
+        data: {
+          runId: started.data.runId,
+          sequence: 2,
+          stage: "comparing",
+          processedPages: 24,
+          comparedPairs: 138,
+          totalPairs: 276,
+          progressPercent: 65,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(25);
+      const finalizing = await backend.internalDuplicateActiveArtifact();
+      expect(finalizing).toMatchObject({
+        ok: true,
+        data: {
+          runId: started.data.runId,
+          sequence: 3,
+          stage: "finalizing",
+          comparedPairs: 276,
+          progressPercent: 99,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(30);
       const snapshot = await backend.internalDuplicateSnapshot();
       if (!snapshot.ok) throw new Error(snapshot.error.message);
       expect(snapshot.data).toMatchObject({
@@ -781,6 +826,12 @@ describe("browser backend internal duplicate contract", () => {
         ],
       });
       expect(events).toEqual(expect.arrayContaining(["running:0", "completed:2"]));
+      expect(artifactEvents.map((event) => [event.sequence, event.stage])).toEqual([
+        [1, "hashing"],
+        [2, "comparing"],
+        [3, "finalizing"],
+      ]);
+      await expect(backend.internalDuplicateActiveArtifact()).resolves.toEqual({ ok: true, data: null });
 
       const group = snapshot.data.groups[0]!;
       const stale = await backend.internalRemovalPlan({
@@ -822,6 +873,72 @@ describe("browser backend internal duplicate contract", () => {
       expect(restored.data.records).toEqual([
         expect.objectContaining({ sourcePage: 8, state: "restored" }),
       ]);
+    } finally {
+      unsubscribeArtifact();
+      unsubscribe();
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears active artifact progress on cancellation and suppresses queued updates", async () => {
+    vi.useFakeTimers();
+    const artifactEvents: InternalArtifactScanProgress[] = [];
+    const unsubscribe = await backend.on("internal-duplicate:artifact-progress", (progress) => artifactEvents.push(progress));
+    try {
+      const started = await backend.internalDuplicateScanStart({ entryIds: ["browser-artifact-cancel"] });
+      expect(started).toMatchObject({ ok: true, data: { state: "running" } });
+      await vi.advanceTimersByTimeAsync(35);
+      expect(artifactEvents.at(-1)).toMatchObject({ stage: "comparing", sequence: 2 });
+
+      const cancelled = await backend.internalDuplicateScanCancel();
+      expect(cancelled).toMatchObject({ ok: true, data: { state: "cancelled" } });
+      await expect(backend.internalDuplicateActiveArtifact()).resolves.toEqual({ ok: true, data: null });
+
+      const eventCountAfterCancel = artifactEvents.length;
+      await vi.advanceTimersByTimeAsync(100);
+      expect(artifactEvents).toHaveLength(eventCountAfterCancel);
+      const snapshot = await backend.internalDuplicateSnapshot();
+      expect(snapshot).toMatchObject({ ok: true, data: { run: { state: "cancelled" } } });
+    } finally {
+      unsubscribe();
+      vi.useRealTimers();
+    }
+  });
+
+  it("advances multi-artifact progress to each selected entry in deterministic order", async () => {
+    vi.useFakeTimers();
+    const artifactEvents: InternalArtifactScanProgress[] = [];
+    const unsubscribe = await backend.on("internal-duplicate:artifact-progress", (progress) => artifactEvents.push(progress));
+    try {
+      const started = await backend.internalDuplicateScanStart({
+        entryIds: ["browser-artifact-z", "browser-artifact-a"],
+      });
+      expect(started).toMatchObject({ ok: true, data: { state: "running", totalArtifacts: 2 } });
+      await expect(backend.internalDuplicateActiveArtifact()).resolves.toMatchObject({
+        ok: true,
+        data: { entryId: "browser-artifact-a", artifactIndex: 1, totalArtifacts: 2, sequence: 1 },
+      });
+
+      await vi.advanceTimersByTimeAsync(85);
+      await expect(backend.internalDuplicateActiveArtifact()).resolves.toMatchObject({
+        ok: true,
+        data: {
+          entryId: "browser-artifact-z",
+          artifactIndex: 2,
+          totalArtifacts: 2,
+          sequence: 4,
+          stage: "hashing",
+        },
+      });
+      expect(artifactEvents.map((event) => [event.entryId, event.artifactIndex, event.sequence])).toEqual([
+        ["browser-artifact-a", 1, 1],
+        ["browser-artifact-a", 1, 2],
+        ["browser-artifact-a", 1, 3],
+        ["browser-artifact-z", 2, 4],
+      ]);
+
+      await vi.advanceTimersByTimeAsync(80);
+      await expect(backend.internalDuplicateActiveArtifact()).resolves.toEqual({ ok: true, data: null });
     } finally {
       unsubscribe();
       vi.useRealTimers();

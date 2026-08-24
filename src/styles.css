@@ -1057,6 +1057,53 @@ h2 {
   padding: var(--card-padding, 12px);
 }
 
+.card-content.has-internal-scan {
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+}
+
+.internal-duplicate-card-progress {
+  display: grid;
+  grid-template-columns: auto minmax(24px, 1fr) auto;
+  align-items: center;
+  gap: 2px 6px;
+  min-width: 0;
+  padding: 3px 6px;
+  color: #165f75;
+  font-size: 10px;
+  line-height: 13px;
+  background: #e9f6fa;
+  border: 1px solid #a9d8e4;
+  border-radius: 4px;
+}
+
+.internal-duplicate-card-progress > span,
+.internal-duplicate-card-progress > strong,
+.internal-duplicate-card-progress > small {
+  white-space: nowrap;
+}
+
+.internal-duplicate-card-progress > i {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  background: rgba(22, 126, 164, 0.18);
+  border-radius: 2px;
+}
+
+.internal-duplicate-card-progress > i > b {
+  display: block;
+  height: 100%;
+  background: #167ea4;
+  border-radius: inherit;
+}
+
+.internal-duplicate-card-progress > small {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: #47717e;
+  text-overflow: ellipsis;
+}
+
 .card-title {
   display: grid;
   align-content: start;
@@ -2602,83 +2649,82 @@ dialog::backdrop {
   margin-top: 10px;
 }
 
-.internal-track-selector {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
-  gap: 8px;
+.internal-edition-tracks {
   min-width: 0;
+  min-inline-size: 0;
   margin: 12px 0 0;
-  padding: 8px;
-  border: 1px solid #dce8e6;
-  border-radius: 6px;
+  padding: 0;
+  border: 0;
 }
 
-.internal-track-selector legend {
+.internal-edition-tracks > legend {
   padding: 0 5px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
 }
 
-.internal-track-option {
+.internal-edition-track-control {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  grid-template-rows: auto auto auto;
-  gap: 2px 7px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 7px;
+  align-content: start;
+  align-items: start;
   min-width: 0;
-  padding: 7px;
-  background: #fff;
+  padding: 8px;
+  background: var(--surface);
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 5px;
   cursor: pointer;
 }
 
-.internal-track-option:hover,
-.internal-track-option:focus-within {
+.internal-edition-track-control:hover,
+.internal-edition-track-control:focus-within {
   border-color: var(--line-strong);
 }
 
-.internal-track-option.is-selected {
-  background: var(--primary-soft);
-  border-color: #2c7f98;
-  box-shadow: 0 0 0 1px #2c7f98;
+.internal-edition-track-control input {
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--primary-strong);
 }
 
-.internal-track-option input {
-  position: absolute;
-  inline-size: 1px;
-  block-size: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  clip-path: inset(50%);
-}
-
-.internal-track-option strong,
-.internal-track-option span,
-.internal-track-option small {
-  grid-column: 2;
+.internal-edition-track-control > span {
+  display: grid;
+  gap: 3px;
   min-width: 0;
 }
 
-.internal-track-option span,
-.internal-track-option small,
+.internal-edition-track-control strong {
+  font-size: 12px;
+}
+
+.internal-edition-track-control small,
 .internal-scene-cell small {
   color: var(--muted);
   font-size: 10px;
 }
 
-.internal-track-image {
-  grid-row: 1 / span 3;
-  aspect-ratio: 2 / 3;
-  overflow: hidden;
-  border-radius: 4px;
+.internal-edition-track-row.is-kept {
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px #2c7f98;
+}
+
+.internal-edition-track-row.is-kept > .internal-edition-track-control {
+  background: var(--primary-soft);
+  border-color: #2c7f98;
+}
+
+.internal-edition-track-row.is-quarantine > .internal-edition-track-control {
+  opacity: .78;
 }
 
 .internal-scene-matrix {
   display: grid;
-  gap: 4px;
-  min-width: max-content;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
   margin-top: 10px;
   overflow-x: auto;
   border: 1px solid #dce8e6;
@@ -2687,17 +2733,18 @@ dialog::backdrop {
 
 .internal-scene-matrix-row {
   display: grid;
-  grid-template-columns: 88px repeat(var(--internal-track-count, 2), minmax(132px, 1fr));
-  gap: 4px;
+  grid-template-columns: var(--internal-edition-label-width, 190px) repeat(var(--internal-scene-count, 2), var(--internal-scene-column-width, 208px));
+  gap: 2px;
+  width: max-content;
   min-width: max-content;
-  padding: 4px;
+  padding: 2px;
 }
 
-.internal-scene-matrix-row > :first-child {
+.internal-scene-matrix-header > :first-child {
   align-self: start;
-  padding: 5px;
+  padding: 3px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .internal-scene-matrix-header {
@@ -2709,15 +2756,17 @@ dialog::backdrop {
 }
 
 .internal-scene-matrix-header strong {
-  padding: 5px;
-  font-size: 11px;
+  padding: 3px;
+  font-size: 10px;
 }
 
 .internal-scene-cell {
   display: grid;
-  gap: 4px;
-  min-width: 132px;
-  padding: 5px;
+  gap: 2px;
+  box-sizing: border-box;
+  width: var(--internal-scene-column-width, 208px);
+  min-width: 0;
+  padding: 3px;
   background: #f3f7f6;
   border: 1px solid transparent;
   border-radius: 5px;
@@ -2733,7 +2782,7 @@ dialog::backdrop {
 }
 
 .internal-scene-cell.is-missing {
-  min-height: 54px;
+  min-height: 96px;
   place-content: center;
   color: var(--muted);
   font-size: 11px;
@@ -2769,13 +2818,15 @@ dialog::backdrop {
 
 .internal-page-options {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 190px));
+  grid-template-columns: repeat(auto-fill, minmax(232px, 260px));
   gap: 8px;
 }
 
 .internal-page-option {
   position: relative;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
   gap: 5px;
   min-width: 0;
   padding: 7px;
@@ -2785,7 +2836,8 @@ dialog::backdrop {
   cursor: pointer;
 }
 
-.internal-page-option:hover {
+.internal-page-option:hover,
+.internal-page-option:focus-within {
   border-color: var(--line-strong);
 }
 
@@ -2812,6 +2864,15 @@ dialog::backdrop {
   border-radius: 4px;
 }
 
+.internal-scene-cell > .internal-page-image {
+  inline-size: 100%;
+}
+
+.internal-page-option > .internal-page-image {
+  justify-self: center;
+  inline-size: min(100%, var(--internal-legacy-image-width, 200px));
+}
+
 .internal-page-image > span {
   position: absolute;
   right: 5px;
@@ -2821,6 +2882,14 @@ dialog::backdrop {
   font-size: 10px;
   background: rgba(18, 37, 44, 0.8);
   border-radius: 8px;
+}
+
+.internal-scene-cell .internal-page-image > span,
+.internal-page-option .internal-page-image > span {
+  right: 5px;
+  bottom: 5px;
+  padding: 2px 6px;
+  font-size: 10px;
 }
 
 .internal-page-option > strong {

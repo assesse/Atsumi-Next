@@ -15,6 +15,7 @@ import type {
   FavoriteRecord,
   InternalDuplicateReview,
   InternalDuplicateSnapshot,
+  InternalArtifactScanProgress,
   InternalRemovalPlan,
   InternalRemovalPlanRequest,
   InternalScanRun,
@@ -181,6 +182,7 @@ export default function App() {
   const [duplicateDecisionPending, setDuplicateDecisionPending] = useState(false);
   const [internalSnapshot, setInternalSnapshot] = useState<InternalDuplicateSnapshot>({ groups: [], quarantineRecords: [], skips: [] });
   const [internalRun, setInternalRun] = useState<InternalScanRun | undefined>(undefined);
+  const [internalArtifactProgress, setInternalArtifactProgress] = useState<InternalArtifactScanProgress | null>(null);
   const [internalLoading, setInternalLoading] = useState(true);
   const [internalError, setInternalError] = useState<string | null>(null);
   const [internalPending, setInternalPending] = useState(false);
@@ -212,6 +214,7 @@ export default function App() {
   const internalHydrationToken = useRef(0);
   const internalReviewToken = useRef(0);
   const internalRunRef = useRef<InternalScanRun | undefined>(undefined);
+  const internalArtifactProgressRef = useRef<InternalArtifactScanProgress | null>(null);
   const internalPendingRef = useRef(false);
   const downloadHydrationToken = useRef(0);
   const queueRequestSequence = useRef(0);
@@ -391,6 +394,29 @@ export default function App() {
     }
   }, []);
 
+  const hydrateInternalArtifactProgress = useCallback(async (expectedRunId: string) => {
+    try {
+      const result = await backend.internalDuplicateActiveArtifact();
+      if (!result.ok) return;
+      const progress = result.data;
+      const run = internalRunRef.current;
+      // A lookup started for an older run may resolve after cancel/restart. It must
+      // never clear or replace the newer run's event-driven progress.
+      if (run?.state !== "running" || run.runId !== expectedRunId) return;
+      // The worker can publish an event between the command snapshot and Promise
+      // resolution. A null/mismatched lookup is therefore not evidence that the
+      // already-received progress should be cleared.
+      if (!progress || progress.runId !== expectedRunId) return;
+      const current = internalArtifactProgressRef.current;
+      if (current?.runId === progress.runId && current.sequence >= progress.sequence) return;
+      internalArtifactProgressRef.current = progress;
+      setInternalArtifactProgress(progress);
+    } catch {
+      // The aggregate scan state remains authoritative; a transient activity lookup failure
+      // must not turn a running scan into a UI error.
+    }
+  }, []);
+
   const hydrateInternalSnapshot = useCallback(async (showLoading = false) => {
     const token = ++internalHydrationToken.current;
     if (showLoading) setInternalLoading(true);
@@ -413,6 +439,11 @@ export default function App() {
       internalRunRef.current = incoming;
       setInternalRun(incoming);
       setInternalSnapshot(result.data);
+      if (incoming?.state === "running") void hydrateInternalArtifactProgress(incoming.runId);
+      else {
+        internalArtifactProgressRef.current = null;
+        setInternalArtifactProgress(null);
+      }
       setInternalError(null);
     } catch {
       if (token === internalHydrationToken.current) {
@@ -421,7 +452,7 @@ export default function App() {
     } finally {
       if (token === internalHydrationToken.current) setInternalLoading(false);
     }
-  }, []);
+  }, [hydrateInternalArtifactProgress]);
 
   const beginDownloadMutation = useCallback((entryId: string): boolean => {
     if (pendingDownloadEntriesRef.current.has(entryId)) return false;
@@ -539,7 +570,15 @@ export default function App() {
       internalRunRef.current = run;
       setInternalRun(run);
       setInternalSnapshot((snapshot) => ({ ...snapshot, run }));
-      if (run.state !== "running") void hydrateInternalSnapshot();
+      if (run.state !== "running") {
+        internalArtifactProgressRef.current = null;
+        setInternalArtifactProgress(null);
+        void hydrateInternalSnapshot();
+      } else if (current?.runId !== run.runId) {
+        internalArtifactProgressRef.current = null;
+        setInternalArtifactProgress(null);
+        void hydrateInternalArtifactProgress(run.runId);
+      }
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unsubscribe = cleanup;
@@ -550,7 +589,29 @@ export default function App() {
       disposed = true;
       unsubscribe?.();
     };
-  }, [hydrateInternalSnapshot]);
+  }, [hydrateInternalArtifactProgress, hydrateInternalSnapshot]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    void backend.on("internal-duplicate:artifact-progress", (progress) => {
+      const run = internalRunRef.current;
+      if (run?.state !== "running" || run.runId !== progress.runId) return;
+      const current = internalArtifactProgressRef.current;
+      if (current?.runId === progress.runId && current.sequence >= progress.sequence) return;
+      internalArtifactProgressRef.current = progress;
+      setInternalArtifactProgress(progress);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unsubscribe = cleanup;
+    }).catch(() => {
+      // Run-level state remains available even when this additive progress stream is unavailable.
+    });
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, []);
 
   useEffect(() => {
     // Keep Explore idle until a form/suggestion/metadata search explicitly advances this generation.
@@ -926,6 +987,7 @@ export default function App() {
       setInternalRun(result.data);
       setInternalSnapshot((snapshot) => ({ ...snapshot, run: result.data }));
       await hydrateInternalSnapshot();
+      await hydrateInternalArtifactProgress(result.data.runId);
       showToast(`선택한 완료 앨범 ${entryIds.length}개의 내부 중복 페이지 검사를 시작했습니다.`);
     } catch {
       const message = "내부 중복 검사를 시작하지 못했습니다.";
@@ -935,7 +997,7 @@ export default function App() {
       internalPendingRef.current = false;
       setInternalPending(false);
     }
-  }, [hydrateInternalSnapshot, internalRun?.state, showToast]);
+  }, [hydrateInternalArtifactProgress, hydrateInternalSnapshot, internalRun?.state, showToast]);
 
   const cancelInternalScan = useCallback(async () => {
     if (internalPendingRef.current || internalRun?.state !== "running") return;
@@ -950,6 +1012,8 @@ export default function App() {
       }
       internalRunRef.current = result.data;
       setInternalRun(result.data);
+      internalArtifactProgressRef.current = null;
+      setInternalArtifactProgress(null);
       setInternalSnapshot((snapshot) => ({ ...snapshot, run: result.data }));
       showToast("내부 중복 검사를 취소했습니다. 기존 검토 결과는 유지됩니다.");
     } catch {
@@ -1576,6 +1640,12 @@ export default function App() {
           selectionContext={ui.selection.ids.size > 0}
           favoriteMetadata={favoriteMetadataForDisplay}
           duplicateCandidateCount={duplicateCandidateCounts.get(gallery.id) ?? 0}
+          internalDuplicateProgress={internalArtifactProgress
+            && ui.view === "downloads"
+            && gallery.download?.entryId === internalArtifactProgress.entryId
+            && gallery.id === internalArtifactProgress.galleryId
+            ? internalArtifactProgress
+            : undefined}
           onSelect={selectGallery}
           onOpenDetail={openDetail}
           onOpenArtifact={openArtifact}

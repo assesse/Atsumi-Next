@@ -15,6 +15,32 @@ pub enum InternalScanState {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalArtifactScanStage {
+    Hashing,
+    Comparing,
+    Finalizing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalArtifactScanProgress {
+    pub run_id: String,
+    pub sequence: u64,
+    pub entry_id: String,
+    pub gallery_id: GalleryId,
+    /// One-based position in the current scan's deterministic artifact order.
+    pub artifact_index: u32,
+    pub total_artifacts: u32,
+    pub processed_pages: u32,
+    pub total_pages: u32,
+    pub compared_pairs: u64,
+    pub total_pairs: u64,
+    pub progress_percent: u32,
+    pub stage: InternalArtifactScanStage,
+}
+
 impl InternalScanState {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -263,4 +289,49 @@ pub struct PageQuarantineSaga {
     pub quarantine_relative_path: String,
     pub reason: String,
     pub state: PageQuarantineState,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{InternalArtifactScanProgress, InternalArtifactScanStage};
+    use crate::domain::GalleryId;
+
+    #[test]
+    fn artifact_scan_progress_uses_the_frontend_wire_contract() {
+        let value = serde_json::to_value(InternalArtifactScanProgress {
+            run_id: "run-1".into(),
+            sequence: 7,
+            entry_id: "entry-1".into(),
+            gallery_id: GalleryId::new(4136275).unwrap(),
+            artifact_index: 2,
+            total_artifacts: 5,
+            processed_pages: 33,
+            total_pages: 77,
+            compared_pairs: 528,
+            total_pairs: 2_926,
+            progress_percent: 18,
+            stage: InternalArtifactScanStage::Comparing,
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "runId": "run-1",
+                "sequence": 7,
+                "entryId": "entry-1",
+                "galleryId": 4136275,
+                "artifactIndex": 2,
+                "totalArtifacts": 5,
+                "processedPages": 33,
+                "totalPages": 77,
+                "comparedPairs": 528,
+                "totalPairs": 2926,
+                "progressPercent": 18,
+                "stage": "comparing"
+            })
+        );
+    }
 }

@@ -74,6 +74,10 @@ describe("InternalDuplicateDialog", () => {
     );
     await act(async () => render());
 
+    const dialog = container.querySelector<HTMLDialogElement>(".internal-review-dialog");
+    expect(dialog).toHaveAttribute("data-image-density", "fixed-200");
+    expect(dialog?.style.getPropertyValue("--internal-scene-column-width")).toBe("208px");
+    expect(dialog?.style.getPropertyValue("--internal-legacy-image-width")).toBe("200px");
     expect(container.textContent).toContain("원본 페이지 번호는 바뀌지 않습니다");
     expect(container.textContent).toContain("원본 2p");
     expect(container.textContent).toContain("원본 8p");
@@ -218,10 +222,22 @@ describe("InternalDuplicateDialog", () => {
     ));
     expect(container.textContent).toContain("남길 판본 세트 선택");
     expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(4);
-    expect(container.querySelectorAll(".internal-scene-matrix-row")).toHaveLength(6);
+    expect(container.querySelector(".internal-track-selector")).toBeNull();
+    expect(container.querySelectorAll(".internal-scene-matrix-row")).toHaveLength(5);
+    expect(container.querySelectorAll(".internal-edition-track-row")).toHaveLength(4);
+    expect(container.querySelectorAll(".internal-scene-cell")).toHaveLength(20);
     expect(container.querySelectorAll(".internal-page-option")).toHaveLength(0);
+    const trackRows = container.querySelectorAll<HTMLElement>(".internal-edition-track-row");
+    expect(trackRows[0]?.querySelector(".internal-edition-track-control")).toHaveTextContent("세트 A1–5p · 5/5장");
+    expect(trackRows[2]?.querySelector(".internal-edition-track-control")).toHaveTextContent("세트 C11–15p · 4/5장1개 장면 누락");
+    expect([...trackRows[0]!.querySelectorAll(".internal-page-image > span")].map((page) => page.textContent)).toEqual(["1p", "2p", "3p", "4p", "5p"]);
+    expect([...trackRows[1]!.querySelectorAll(".internal-page-image > span")].map((page) => page.textContent)).toEqual(["6p", "7p", "8p", "9p", "10p"]);
+    expect(trackRows[0]).toHaveClass("is-kept");
+    expect(trackRows[1]).toHaveClass("is-quarantine");
     const setB = container.querySelectorAll<HTMLInputElement>('input[name="track-edition-block"]')[1];
     await act(async () => setB?.click());
+    expect(container.querySelectorAll(".internal-edition-track-row")[0]).toHaveClass("is-quarantine");
+    expect(container.querySelectorAll(".internal-edition-track-row")[1]).toHaveClass("is-kept");
     const preview = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("격리 계획 미리보기"));
     await act(async () => preview?.click());
     expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
@@ -231,6 +247,61 @@ describe("InternalDuplicateDialog", () => {
       ]),
     }));
     expect(onPlan.mock.calls[0]?.[0].selections).toHaveLength(5);
+
+    onPlan.mockClear();
+    const setC = container.querySelectorAll<HTMLInputElement>('input[name="track-edition-block"]')[2];
+    await act(async () => setC?.click());
+    const selectedMissing = container.querySelector(".internal-edition-track-row.is-kept .internal-scene-cell.is-missing");
+    expect(selectedMissing).toHaveTextContent("누락 · 행 보존");
+    expect(selectedMissing).toHaveAttribute("aria-label", "선택 세트 누락 · 이 행 보존");
+    await act(async () => preview?.click());
+    expect(onPlan.mock.calls[0]?.[0].selections).toHaveLength(4);
+    expect(onPlan.mock.calls[0]?.[0].selections).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ groupId: "edition-row-3" }),
+    ]));
+    await act(async () => root.unmount());
+    client.dispose();
+    container.remove();
+  });
+
+  it("keeps a six-track edition matrix at the fixed comparison size without restoring page radios", async () => {
+    const sixTrackReview: InternalDuplicateReview = {
+      ...review,
+      groups: Array.from({ length: 2 }, (_, sequenceIndex) => ({
+        ...review.groups[0]!,
+        groupId: `six-track-row-${sequenceIndex}`,
+        blockId: "six-track-block",
+        sequenceIndex,
+        recommendedKeepSourcePage: sequenceIndex + 1,
+        pages: Array.from({ length: 6 }, (_, track) => ({
+          sourcePage: track * 2 + sequenceIndex + 1,
+          exactSha256: track === 0,
+          visualSimilarity: track === 0 ? 1 : .92,
+          detailHashDistance: track === 0 ? 0 : 12,
+          lowInformation: false,
+          editionTrackId: `six-track-block-t${track}`,
+          editionTrackOrdinal: track,
+        })),
+      })),
+    };
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing" as const, reason: "test" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(
+      <InternalDuplicateDialog open={false} review={sixTrackReview} thumbnailClient={client} onClose={vi.fn()} onRetry={vi.fn()} onRescan={vi.fn()} onPlan={vi.fn()} onApply={vi.fn()} onUndo={vi.fn()} />,
+    ));
+
+    const matrix = container.querySelector<HTMLElement>(".internal-scene-matrix");
+    expect(matrix?.style.getPropertyValue("--internal-scene-count")).toBe("2");
+    expect(container.querySelector(".internal-track-selector")).toBeNull();
+    expect(container.querySelectorAll('.internal-edition-track-control input[type="radio"]')).toHaveLength(6);
+    expect(container.querySelectorAll(".internal-scene-matrix-row")).toHaveLength(7);
+    expect(container.querySelectorAll(".internal-edition-track-row")).toHaveLength(6);
+    expect(container.querySelectorAll(".internal-scene-cell")).toHaveLength(12);
+    expect(container.querySelectorAll(".internal-page-option")).toHaveLength(0);
+    expect(container.querySelectorAll('.internal-scene-cell input[type="radio"]')).toHaveLength(0);
+
     await act(async () => root.unmount());
     client.dispose();
     container.remove();

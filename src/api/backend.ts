@@ -38,6 +38,7 @@ import type {
   JobRef,
   InternalDuplicateReview,
   InternalDuplicateSnapshot,
+  InternalArtifactScanProgress,
   InternalRemovalApplyRequest,
   InternalRemovalPlan,
   InternalRemovalPlanRequest,
@@ -82,6 +83,7 @@ export type BackendEventMap = {
   "auto-find:changed": AutoFindRun;
   "duplicate:changed": DuplicateScanRun;
   "internal-duplicate:changed": InternalScanRun;
+  "internal-duplicate:artifact-progress": InternalArtifactScanProgress;
   "job:changed": JobEvent;
   "download:changed": DownloadChangedEvent;
   "thumbnail:ready": ThumbnailCompletionEvent;
@@ -121,6 +123,7 @@ export interface BackendClient {
   duplicateReviewGet(candidateId: string): Promise<ApiResult<DuplicateReview>>;
   duplicateDecisionApply(request: DuplicateDecisionRequest): Promise<ApiResult<DuplicateReview>>;
   internalDuplicateSnapshot(): Promise<ApiResult<InternalDuplicateSnapshot>>;
+  internalDuplicateActiveArtifact(): Promise<ApiResult<InternalArtifactScanProgress | null>>;
   internalDuplicateScanStart(request: InternalScanRequest): Promise<ApiResult<InternalScanRun>>;
   internalDuplicateScanCancel(): Promise<ApiResult<InternalScanRun>>;
   internalDuplicateReviewGet(entryId: string): Promise<ApiResult<InternalDuplicateReview>>;
@@ -504,6 +507,7 @@ const cloneDuplicateSnapshot = (snapshot: DuplicateSnapshot): DuplicateSnapshot 
 });
 
 const cloneInternalScanRun = (run: InternalScanRun): InternalScanRun => ({ ...run });
+const cloneInternalArtifactProgress = (progress: InternalArtifactScanProgress): InternalArtifactScanProgress => ({ ...progress });
 const cloneInternalReview = (review: InternalDuplicateReview): InternalDuplicateReview => ({
   ...review,
   groups: review.groups.map((group) => ({
@@ -550,6 +554,7 @@ class BrowserMockBackend implements BackendClient {
     "auto-find:changed": new Set(),
     "duplicate:changed": new Set(),
     "internal-duplicate:changed": new Set(),
+    "internal-duplicate:artifact-progress": new Set(),
     "job:changed": new Set(),
     "download:changed": new Set(),
     "thumbnail:ready": new Set(),
@@ -585,6 +590,7 @@ class BrowserMockBackend implements BackendClient {
   private internalGeneration = 0;
   private nextInternalRunId = 1;
   private internalActiveEntrySetKey: string | null = null;
+  private internalArtifactProgress: InternalArtifactScanProgress | null = null;
   private internalPlans = new Map<string, InternalRemovalPlan>();
   private nextInternalPlanId = 1;
   private maintenancePreviews = new Map<string, MaintenanceAction>();
@@ -1086,6 +1092,10 @@ class BrowserMockBackend implements BackendClient {
     return ok(cloneInternalSnapshot(this.internalSnapshotState));
   }
 
+  async internalDuplicateActiveArtifact(): Promise<ApiResult<InternalArtifactScanProgress | null>> {
+    return ok(this.internalArtifactProgress ? cloneInternalArtifactProgress(this.internalArtifactProgress) : null);
+  }
+
   async internalDuplicateScanStart(request: InternalScanRequest): Promise<ApiResult<InternalScanRun>> {
     if (!request.entryIds.length) return validationError("entryIds", "must not be empty");
     if (request.entryIds.length > 200) return validationError("entryIds", "must contain at most 200 entries");
@@ -1120,14 +1130,61 @@ class BrowserMockBackend implements BackendClient {
       totalPages: 24 * entryIds.length,
       comparedPairs: 0,
       groupsFound: 0,
-      algorithmVersion: 3,
+      algorithmVersion: 4,
       skippedArtifacts: 0,
       skippedPages: 0,
       startedAt: now,
       updatedAt: now,
     };
+    const mockArtifactProgress = (
+      entryId: string,
+      artifactIndex: number,
+      sequence: number,
+      stage: InternalArtifactScanProgress["stage"],
+    ): InternalArtifactScanProgress => ({
+      runId: run.runId,
+      sequence,
+      entryId,
+      galleryId: this.downloadEntries.get(entryId)?.galleryId ?? galleryId(4_051_038 + artifactIndex - 1),
+      artifactIndex,
+      totalArtifacts: entryIds.length,
+      processedPages: stage === "hashing" ? 0 : 24,
+      totalPages: 24,
+      comparedPairs: stage === "hashing" ? 0 : stage === "comparing" ? 138 : 276,
+      totalPairs: 276,
+      progressPercent: stage === "hashing" ? 0 : stage === "comparing" ? 65 : 99,
+      stage,
+    });
+    this.internalArtifactProgress = mockArtifactProgress(entryIds[0]!, 1, 1, "hashing");
     this.internalSnapshotState = { ...this.internalSnapshotState, run };
-    queueMicrotask(() => this.emit("internal-duplicate:changed", cloneInternalScanRun(run)));
+    queueMicrotask(() => {
+      this.emit("internal-duplicate:changed", cloneInternalScanRun(run));
+      if (this.internalArtifactProgress) {
+        this.emit("internal-duplicate:artifact-progress", cloneInternalArtifactProgress(this.internalArtifactProgress));
+      }
+    });
+    entryIds.forEach((entryId, entryIndex) => {
+      const artifactIndex = entryIndex + 1;
+      const baseSequence = entryIndex * 3 + 1;
+      const baseDelay = entryIndex * 80;
+      if (entryIndex > 0) {
+        window.setTimeout(() => {
+          if (generation !== this.internalGeneration || this.internalSnapshotState.run?.state !== "running") return;
+          this.internalArtifactProgress = mockArtifactProgress(entryId, artifactIndex, baseSequence, "hashing");
+          this.emit("internal-duplicate:artifact-progress", cloneInternalArtifactProgress(this.internalArtifactProgress));
+        }, baseDelay);
+      }
+      window.setTimeout(() => {
+        if (generation !== this.internalGeneration || this.internalSnapshotState.run?.state !== "running") return;
+        this.internalArtifactProgress = mockArtifactProgress(entryId, artifactIndex, baseSequence + 1, "comparing");
+        this.emit("internal-duplicate:artifact-progress", cloneInternalArtifactProgress(this.internalArtifactProgress));
+      }, baseDelay + 30);
+      window.setTimeout(() => {
+        if (generation !== this.internalGeneration || this.internalSnapshotState.run?.state !== "running") return;
+        this.internalArtifactProgress = mockArtifactProgress(entryId, artifactIndex, baseSequence + 2, "finalizing");
+        this.emit("internal-duplicate:artifact-progress", cloneInternalArtifactProgress(this.internalArtifactProgress));
+      }, baseDelay + 55);
+    });
     window.setTimeout(() => {
       if (generation !== this.internalGeneration || this.internalSnapshotState.run?.state !== "running") return;
       const finishedAt = new Date().toISOString();
@@ -1170,9 +1227,10 @@ class BrowserMockBackend implements BackendClient {
         finishedAt,
       };
       this.internalActiveEntrySetKey = null;
+      this.internalArtifactProgress = null;
       this.internalSnapshotState = { ...this.internalSnapshotState, run: finished, groups: [...preservedGroups, ...groups] };
       this.emit("internal-duplicate:changed", cloneInternalScanRun(finished));
-    }, 80);
+    }, entryIds.length * 80);
     return ok(cloneInternalScanRun(run));
   }
 
@@ -1183,6 +1241,7 @@ class BrowserMockBackend implements BackendClient {
     }
     this.internalGeneration += 1;
     this.internalActiveEntrySetKey = null;
+    this.internalArtifactProgress = null;
     const now = new Date().toISOString();
     const cancelled = { ...current, revision: current.revision + 1, state: "cancelled" as const, updatedAt: now, finishedAt: now };
     this.internalSnapshotState = { ...this.internalSnapshotState, run: cancelled };
@@ -2064,6 +2123,10 @@ class TauriBackend implements BackendClient {
 
   internalDuplicateSnapshot(): Promise<ApiResult<InternalDuplicateSnapshot>> {
     return invoke("internal_duplicate_snapshot");
+  }
+
+  internalDuplicateActiveArtifact(): Promise<ApiResult<InternalArtifactScanProgress | null>> {
+    return invoke("internal_duplicate_active_artifact");
   }
 
   internalDuplicateScanStart(request: InternalScanRequest): Promise<ApiResult<InternalScanRun>> {

@@ -56,6 +56,7 @@ type ApiError = {
 | `duplicate_review_get` | `{ candidateId }` | `DuplicateReview` | 예 |
 | `duplicate_decision_apply` | `{ request: DuplicateDecisionRequest }` | `DuplicateReview` | candidate revision CAS |
 | `internal_duplicate_snapshot` | 없음 | `InternalDuplicateSnapshot` | 예 |
+| `internal_duplicate_active_artifact` | 없음 | `InternalArtifactScanProgress \| null` | 실행 중인 artifact의 휘발성 진행 상태; DB·파일을 변경하지 않음 |
 | `internal_duplicate_scan_start` | `{ request: { entryIds: string[] } }` | `InternalScanRun` | 선택한 verified entry만 검사; 빈 배열 금지, 다른 선택 run은 `OPERATION_ACTIVE` |
 | `internal_duplicate_scan_cancel` | 없음 | `InternalScanRun` | 실행 중 run에 한 번 적용 |
 | `internal_duplicate_review_get` | `{ entryId }` | `InternalDuplicateReview` | 예 |
@@ -63,7 +64,9 @@ type ApiError = {
 | `internal_removal_apply` | `{ request: InternalRemovalApplyRequest }` | `InternalRemovalResult` | prepared plan 한 번 적용 |
 | `internal_removal_undo` | `{ request: InternalRemovalUndoRequest }` | `InternalRemovalResult` | quarantined record 한 번 복원 |
 
-`InternalDuplicateScanRequest.entryIds`는 Downloads에서 선택한 canonical download entry ID이며 1~200개 unique 값만 허용한다. 요청 대상 하나라도 verified complete artifact가 아니면 run을 만들기 전에 전체 요청을 실패시키며, 빈 배열을 전체 검사로 해석하지 않는다. 완료 시 과거 group 해제 범위도 실제 검사한 gallery로 한정해 선택하지 않은 앨범의 검토 결과를 보존한다. `InternalScanRun`은 `algorithmVersion`, `skippedArtifacts`, `skippedPages`를 포함한다. `InternalDuplicateSnapshot.skips`에는 page-limit으로 제외된 artifact의 entryId, galleryId, title, pageCount, reason(`page_limit`)이 들어간다. algorithm v3는 N-way monotonic scene rows와 optional `editionTrackId`/`editionTrackOrdinal`을 함께 반환한다. 다중 행 block은 track 전체를 선택해 기존 `InternalRemovalSelection[]`으로 변환하며, track page가 없는 row는 selection에서 제외한다. legacy/standalone exact row는 track field가 null/생략된 기존 개별 선택 계약을 유지한다. 500페이지 이상 artifact는 내부 검사에만 포함하지 않는다.
+`InternalDuplicateScanRequest.entryIds`는 Downloads에서 선택한 canonical download entry ID이며 1~200개 unique 값만 허용한다. 요청 대상 하나라도 verified complete artifact가 아니면 run을 만들기 전에 전체 요청을 실패시키며, 빈 배열을 전체 검사로 해석하지 않는다. 완료 시 과거 group 해제 범위도 실제 검사한 gallery로 한정해 선택하지 않은 앨범의 검토 결과를 보존한다. `InternalScanRun`은 `algorithmVersion`, `skippedArtifacts`, `skippedPages`를 포함한다. `InternalDuplicateSnapshot.skips`에는 page-limit으로 제외된 artifact의 entryId, galleryId, title, pageCount, reason(`page_limit`)이 들어간다. algorithm v4는 N-way monotonic scene rows와 optional `editionTrackId`/`editionTrackOrdinal`을 함께 반환한다. 다중 행 block은 track 전체를 선택해 기존 `InternalRemovalSelection[]`으로 변환하며, track page가 없는 row는 selection에서 제외한다. legacy/standalone exact row는 track field가 null/생략된 기존 개별 선택 계약을 유지한다. 500페이지 이상 artifact는 내부 검사에만 포함하지 않는다.
+
+`InternalArtifactScanProgress`는 `runId`, 단조 증가 `sequence`, 현재 `entryId`/`galleryId`, 1-based `artifactIndex`, 전체 artifact 수, page hash 진행, pair 비교 진행, `progressPercent`, `hashing | comparing | finalizing` stage를 제공한다. 이 값은 실행 worker가 가진 휘발성 상태이며 결과·schema에는 저장하지 않는다. Downloads는 `entryId`와 `galleryId`가 모두 같은 카드에만 표시하고, 완료·취소·실패 시 제거한다.
 | `download_queue_add` | `{ galleries: GalleryId[], requestId }` | `DownloadEntry[]` | requestId + active gallery 기반 |
 | `download_entries_list` | `DownloadListRequest` | `DownloadPage` | 예 |
 | `download_retry` | `{ entryIds }` | `JobRef[]` | 현재 active job 재사용 |
@@ -100,6 +103,7 @@ type ApiError = {
 | `auto-find:changed` | Auto Find run state, progress, candidate count와 revision |
 | `duplicate:changed` | 작품 중복 scan state, hash/pair progress, candidate count와 revision |
 | `internal-duplicate:changed` | 내부 페이지 scan state, artifact/page progress, group count와 revision |
+| `internal-duplicate:artifact-progress` | 현재 검사 중인 download entry와 해당 artifact의 hash/pair/finalize 진행률 |
 | `app:exit-requested` | `{ source: "window_close" \| "tray_menu" }`; 동일 종료 확인 dialog를 연다 |
 
 이벤트가 유실돼도 `list/get` command로 현재 상태를 다시 구성할 수 있어야 한다.

@@ -23,7 +23,10 @@ use application::{
     DownloadPipelineRepository, DownloadSourcePort, DownloadSupervisor, DuplicateRepository,
     DuplicateSupervisor, InternalDuplicateRepository, InternalDuplicateSupervisor, StateRepository,
 };
-use domain::{AutoFindRun, DownloadJobProjection, DuplicateScanRun, InternalScanRun};
+use domain::{
+    AutoFindRun, DownloadJobProjection, DuplicateScanRun, InternalArtifactScanProgress,
+    InternalScanRun,
+};
 use infrastructure::{
     CompositeThumbnailResolver, FilesystemArtifactStore, HitomiLiveAdapter, HitomiLiveConfig,
     SqliteRepository, WindowsFolderPicker,
@@ -534,13 +537,16 @@ pub fn run() -> tauri::Result<()> {
             let internal_artifact_repository: Arc<dyn ArtifactRepository> = repository.clone();
             let internal_settings: Arc<dyn StateRepository> = repository.clone();
             let (internal_event_tx, internal_event_rx) = mpsc::channel::<InternalScanRun>();
-            let internal_duplicates = InternalDuplicateSupervisor::new(
+            let (internal_progress_tx, internal_progress_rx) =
+                mpsc::channel::<InternalArtifactScanProgress>();
+            let internal_duplicates = InternalDuplicateSupervisor::new_with_progress_events(
                 internal_repository,
                 duplicate_repository,
                 internal_artifact_repository,
                 internal_settings,
                 Arc::clone(&artifact_store),
                 internal_event_tx,
+                internal_progress_tx,
             );
             let recovered_internal_runs = internal_duplicates.recover_interrupted()?;
             let reconciled_internal_pages = if download_root_configured {
@@ -569,6 +575,21 @@ pub fn run() -> tauri::Result<()> {
                             );
                         }
                         schedule_tray_work_status_refresh(&internal_app);
+                    }
+                })?;
+            let internal_progress_app = app.handle().clone();
+            thread::Builder::new()
+                .name("atsumi-internal-duplicate-progress-events".into())
+                .spawn(move || {
+                    while let Ok(progress) = internal_progress_rx.recv() {
+                        if let Err(error) = internal_progress_app
+                            .emit("internal-duplicate:artifact-progress", &progress)
+                        {
+                            tracing::warn!(
+                                error = %error,
+                                "could not emit internal-duplicate:artifact-progress"
+                            );
+                        }
                     }
                 })?;
             let download_repository: Arc<dyn DownloadPipelineRepository> = repository.clone();
@@ -700,6 +721,7 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::duplicate_review_get,
             interface::commands::duplicate_decision_apply,
             interface::commands::internal_duplicate_snapshot,
+            interface::commands::internal_duplicate_active_artifact,
             interface::commands::internal_duplicate_scan_start,
             interface::commands::internal_duplicate_scan_cancel,
             interface::commands::internal_duplicate_review_get,

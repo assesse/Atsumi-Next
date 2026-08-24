@@ -38,12 +38,13 @@ pub use duplicate::{
 };
 pub use gallery::{Gallery, GalleryId, GalleryMetadata, GalleryPageId, SourcePageNumber};
 pub use internal_duplicate::{
-    InternalDuplicateGroup, InternalDuplicateReview, InternalDuplicateSnapshot,
-    InternalGroupRecord, InternalMatchKind, InternalPageEvidence, InternalRemovalApplyRequest,
-    InternalRemovalPlan, InternalRemovalPlanRequest, InternalRemovalResult,
-    InternalRemovalSelection, InternalRemovalUndoRequest, InternalScanRequest, InternalScanRun,
-    InternalScanSkip, InternalScanState, PageQuarantineRecord, PageQuarantineSaga,
-    PageQuarantineState, INTERNAL_DUPLICATE_ALGORITHM_VERSION,
+    InternalArtifactScanProgress, InternalArtifactScanStage, InternalDuplicateGroup,
+    InternalDuplicateReview, InternalDuplicateSnapshot, InternalGroupRecord, InternalMatchKind,
+    InternalPageEvidence, InternalRemovalApplyRequest, InternalRemovalPlan,
+    InternalRemovalPlanRequest, InternalRemovalResult, InternalRemovalSelection,
+    InternalRemovalUndoRequest, InternalScanRequest, InternalScanRun, InternalScanSkip,
+    InternalScanState, PageQuarantineRecord, PageQuarantineSaga, PageQuarantineState,
+    INTERNAL_DUPLICATE_ALGORITHM_VERSION,
 };
 pub use job::{
     DownloadChangedEvent, DownloadJobDescriptor, DownloadJobProjection, FixtureDownloadJobStep,
