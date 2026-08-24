@@ -753,6 +753,14 @@ export default function App() {
     }
     return counts;
   }, [duplicateSnapshot?.candidates]);
+  const internalDuplicateResultCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const group of internalSnapshot.groups) {
+      const key = `${group.entryId}\u0000${group.galleryId}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [internalSnapshot.groups]);
   const autoFindCount = autoFindIds.length;
   const attentionCount = useMemo(
     () => allGalleries.filter((gallery) => ["failed", "interrupted", "review_required"].includes(gallery.download?.state ?? "")).length,
@@ -1640,6 +1648,9 @@ export default function App() {
           selectionContext={ui.selection.ids.size > 0}
           favoriteMetadata={favoriteMetadataForDisplay}
           duplicateCandidateCount={duplicateCandidateCounts.get(gallery.id) ?? 0}
+          internalDuplicateResultCount={gallery.download
+            ? internalDuplicateResultCounts.get(`${gallery.download.entryId}\u0000${gallery.id}`) ?? 0
+            : 0}
           internalDuplicateProgress={internalArtifactProgress
             && ui.view === "downloads"
             && gallery.download?.entryId === internalArtifactProgress.entryId
@@ -1650,6 +1661,7 @@ export default function App() {
           onOpenDetail={openDetail}
           onOpenArtifact={openArtifact}
           onOpenReview={openReview}
+          onOpenInternalReview={openInternalReview}
           onStatusDetail={openStatusDetail}
           onMetadataSearch={searchMetadata}
           onMetadataFavorite={toggleMetadataFavorite}

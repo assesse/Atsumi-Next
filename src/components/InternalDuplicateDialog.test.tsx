@@ -190,7 +190,7 @@ describe("InternalDuplicateDialog", () => {
     container.remove();
   });
 
-  it("selects an entire edition set, preserves a missing scene, and hides a stale plan", async () => {
+  it("keeps multiple edition sets, contains horizontal scrolling to the matrix, and preserves a fully missing scene", async () => {
     const editionReview: InternalDuplicateReview = {
       ...review,
       groups: Array.from({ length: 5 }, (_, sequenceIndex) => ({
@@ -220,8 +220,12 @@ describe("InternalDuplicateDialog", () => {
     await act(async () => root.render(
       <InternalDuplicateDialog open={false} review={editionReview} thumbnailClient={client} onClose={vi.fn()} onRetry={vi.fn()} onRescan={vi.fn()} onPlan={onPlan} onApply={vi.fn()} onUndo={vi.fn()} />,
     ));
-    expect(container.textContent).toContain("남길 판본 세트 선택");
-    expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(4);
+    expect(container.textContent).toContain("남길 판본 세트 선택 · 복수 선택 가능");
+    expect(container.querySelectorAll('.internal-edition-track-control input[type="checkbox"]')).toHaveLength(4);
+    expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(0);
+    expect(container.querySelector(".internal-review-scroll")).toHaveAttribute("data-scroll-axis", "vertical");
+    expect(container.querySelector(".internal-scene-matrix")).toHaveAttribute("data-scroll-axis", "horizontal");
+    expect(container.querySelector(".internal-scene-matrix")?.closest(".internal-review-scroll")).not.toBeNull();
     expect(container.querySelector(".internal-track-selector")).toBeNull();
     expect(container.querySelectorAll(".internal-scene-matrix-row")).toHaveLength(5);
     expect(container.querySelectorAll(".internal-edition-track-row")).toHaveLength(4);
@@ -234,31 +238,43 @@ describe("InternalDuplicateDialog", () => {
     expect([...trackRows[1]!.querySelectorAll(".internal-page-image > span")].map((page) => page.textContent)).toEqual(["6p", "7p", "8p", "9p", "10p"]);
     expect(trackRows[0]).toHaveClass("is-kept");
     expect(trackRows[1]).toHaveClass("is-quarantine");
-    const setB = container.querySelectorAll<HTMLInputElement>('input[name="track-edition-block"]')[1];
-    await act(async () => setB?.click());
-    expect(container.querySelectorAll(".internal-edition-track-row")[0]).toHaveClass("is-quarantine");
-    expect(container.querySelectorAll(".internal-edition-track-row")[1]).toHaveClass("is-kept");
+    const trackInputs = container.querySelectorAll<HTMLInputElement>('input[name="track-edition-block"]');
+    const setA = trackInputs[0];
+    const setC = trackInputs[2];
+    await act(async () => setC?.click());
+    expect(setA).toBeChecked();
+    expect(setC).toBeChecked();
+    expect(container.querySelectorAll(".internal-edition-track-row")[0]).toHaveClass("is-kept");
+    expect(container.querySelectorAll(".internal-edition-track-row")[2]).toHaveClass("is-kept");
+    expect(container.querySelectorAll(".internal-edition-track-row")[1]).toHaveClass("is-quarantine");
     const preview = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("격리 계획 미리보기"));
     await act(async () => preview?.click());
     expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
       selections: expect.arrayContaining([
-        expect.objectContaining({ groupId: "edition-row-1", keepSourcePage: 6, removeSourcePages: [1, 11, 16] }),
-        expect.objectContaining({ groupId: "edition-row-3", keepSourcePage: 8, removeSourcePages: [3, 18] }),
+        expect.objectContaining({ groupId: "edition-row-1", keepSourcePage: 1, removeSourcePages: [6, 16] }),
+        expect.objectContaining({ groupId: "edition-row-3", keepSourcePage: 3, removeSourcePages: [8, 18] }),
       ]),
     }));
     expect(onPlan.mock.calls[0]?.[0].selections).toHaveLength(5);
+    expect(onPlan.mock.calls[0]?.[0].selections.reduce(
+      (count: number, selection: { removeSourcePages: number[] }) => count + selection.removeSourcePages.length,
+      0,
+    )).toBe(10);
 
     onPlan.mockClear();
-    const setC = container.querySelectorAll<HTMLInputElement>('input[name="track-edition-block"]')[2];
-    await act(async () => setC?.click());
+    await act(async () => setA?.click());
+    expect(setA).not.toBeChecked();
+    expect(setC).toBeChecked();
     const selectedMissing = container.querySelector(".internal-edition-track-row.is-kept .internal-scene-cell.is-missing");
     expect(selectedMissing).toHaveTextContent("누락 · 행 보존");
-    expect(selectedMissing).toHaveAttribute("aria-label", "선택 세트 누락 · 이 행 보존");
+    expect(selectedMissing).toHaveAttribute("aria-label", "선택 세트 전체 누락 · 이 행 보존");
     await act(async () => preview?.click());
     expect(onPlan.mock.calls[0]?.[0].selections).toHaveLength(4);
     expect(onPlan.mock.calls[0]?.[0].selections).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ groupId: "edition-row-3" }),
     ]));
+    await act(async () => setC?.click());
+    expect(setC).toBeChecked();
     await act(async () => root.unmount());
     client.dispose();
     container.remove();
@@ -295,7 +311,8 @@ describe("InternalDuplicateDialog", () => {
     const matrix = container.querySelector<HTMLElement>(".internal-scene-matrix");
     expect(matrix?.style.getPropertyValue("--internal-scene-count")).toBe("2");
     expect(container.querySelector(".internal-track-selector")).toBeNull();
-    expect(container.querySelectorAll('.internal-edition-track-control input[type="radio"]')).toHaveLength(6);
+    expect(container.querySelectorAll('.internal-edition-track-control input[type="checkbox"]')).toHaveLength(6);
+    expect(container.querySelectorAll('.internal-edition-track-control input[type="radio"]')).toHaveLength(0);
     expect(container.querySelectorAll(".internal-scene-matrix-row")).toHaveLength(7);
     expect(container.querySelectorAll(".internal-edition-track-row")).toHaveLength(6);
     expect(container.querySelectorAll(".internal-scene-cell")).toHaveLength(12);

@@ -64,7 +64,7 @@ type ApiError = {
 | `internal_removal_apply` | `{ request: InternalRemovalApplyRequest }` | `InternalRemovalResult` | prepared plan 한 번 적용 |
 | `internal_removal_undo` | `{ request: InternalRemovalUndoRequest }` | `InternalRemovalResult` | quarantined record 한 번 복원 |
 
-`InternalDuplicateScanRequest.entryIds`는 Downloads에서 선택한 canonical download entry ID이며 1~200개 unique 값만 허용한다. 요청 대상 하나라도 verified complete artifact가 아니면 run을 만들기 전에 전체 요청을 실패시키며, 빈 배열을 전체 검사로 해석하지 않는다. 완료 시 과거 group 해제 범위도 실제 검사한 gallery로 한정해 선택하지 않은 앨범의 검토 결과를 보존한다. `InternalScanRun`은 `algorithmVersion`, `skippedArtifacts`, `skippedPages`를 포함한다. `InternalDuplicateSnapshot.skips`에는 page-limit으로 제외된 artifact의 entryId, galleryId, title, pageCount, reason(`page_limit`)이 들어간다. algorithm v4는 N-way monotonic scene rows와 optional `editionTrackId`/`editionTrackOrdinal`을 함께 반환한다. 다중 행 block은 track 전체를 선택해 기존 `InternalRemovalSelection[]`으로 변환하며, track page가 없는 row는 selection에서 제외한다. legacy/standalone exact row는 track field가 null/생략된 기존 개별 선택 계약을 유지한다. 500페이지 이상 artifact는 내부 검사에만 포함하지 않는다.
+`InternalDuplicateScanRequest.entryIds`는 Downloads에서 선택한 canonical download entry ID이며 1~200개 unique 값만 허용한다. 요청 대상 하나라도 verified complete artifact가 아니면 run을 만들기 전에 전체 요청을 실패시키며, 빈 배열을 전체 검사로 해석하지 않는다. 완료 시 과거 group 해제 범위도 실제 검사한 gallery로 한정해 선택하지 않은 앨범의 검토 결과를 보존한다. `InternalScanRun`은 `algorithmVersion`, `skippedArtifacts`, `skippedPages`를 포함한다. `InternalDuplicateSnapshot.skips`에는 page-limit으로 제외된 artifact의 entryId, galleryId, title, pageCount, reason(`page_limit`)이 들어간다. algorithm v4는 N-way monotonic scene rows와 optional `editionTrackId`/`editionTrackOrdinal`을 함께 반환한다. 다중 행 block은 하나 이상의 track을 선택해 기존 `InternalRemovalSelection[]`으로 변환한다. 각 row의 선택 track page는 모두 `removeSourcePages`에서 제외해 보존하고, 가장 작은 선택 page를 검증 anchor인 `keepSourcePage`로 사용한다. 선택 track이 모두 없는 row는 selection에서 제외한다. legacy/standalone exact row는 track field가 null/생략된 기존 개별 선택 계약을 유지한다. 500페이지 이상 artifact는 내부 검사에만 포함하지 않는다.
 
 `InternalArtifactScanProgress`는 `runId`, 단조 증가 `sequence`, 현재 `entryId`/`galleryId`, 1-based `artifactIndex`, 전체 artifact 수, page hash 진행, pair 비교 진행, `progressPercent`, `hashing | comparing | finalizing` stage를 제공한다. 이 값은 실행 worker가 가진 휘발성 상태이며 결과·schema에는 저장하지 않는다. Downloads는 `entryId`와 `galleryId`가 모두 같은 카드에만 표시하고, 완료·취소·실패 시 제거한다.
 | `download_queue_add` | `{ galleries: GalleryId[], requestId }` | `DownloadEntry[]` | requestId + active gallery 기반 |
@@ -386,7 +386,7 @@ type ThumbnailRequest = {
 
 - scan은 gallery별 최신 verified complete artifact의 non-excluded page를 사용하고 작품 중복 HashProfile cache를 공유한다. exact SHA 반복은 단일 행으로 허용하지만 perceptual match는 shared panel 오탐을 막기 위해 최소 2행의 단조 장면 블록이어야 한다.
 - `InternalDuplicateGroup.pages[].sourcePage`는 immutable source page number다. Review와 manifest, 격리·undo가 배열 index로 다시 번호를 매기지 않는다.
-- `internal_removal_plan`은 각 행의 `expectedRevision`, 유지할 한 page와 격리할 나머지 page를 검증하고 현재 파일 수·byte 합계와 15분 만료 시각을 SQLite에 고정한다.
+- `internal_removal_plan`은 각 행의 `expectedRevision`, 검증 anchor인 `keepSourcePage`, 실제 격리 대상인 `removeSourcePages` 부분집합을 검증하고 현재 파일 수·byte 합계와 15분 만료 시각을 SQLite에 고정한다. edition 복수 선택에서는 제거 목록에 없는 다른 선택 track page도 그대로 보존한다.
 - apply는 `prepared -> applying -> applied`, page record는 `pending_quarantine -> quarantined` saga다. 파일은 artifact 폴더의 `.atsumi-page-quarantine/<planId>/` 안에서만 이동한다.
 - undo는 `quarantined -> pending_restore -> restored`이며 원래 relative path와 source page number를 복원한다. 파일 move와 manifest/DB commit 사이에 종료되면 시작 시 pending saga를 재개한다.
 - 원본과 목적지가 모두 있거나 모두 없으면 overwrite/delete하지 않고 Review 오류로 중단한다. 영구 삭제 command는 없다.

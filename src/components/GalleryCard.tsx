@@ -31,11 +31,13 @@ type GalleryCardProps = {
   selectionContext: boolean;
   favoriteMetadata: ReadonlySet<string>;
   duplicateCandidateCount?: number;
+  internalDuplicateResultCount?: number;
   internalDuplicateProgress?: InternalArtifactScanProgress;
   onSelect: (id: GalleryId, modifiers: { ctrlKey: boolean; shiftKey: boolean }) => void;
   onOpenDetail: (id: GalleryId) => void;
   onOpenArtifact: (id: GalleryId) => void;
   onOpenReview: (id: GalleryId) => void;
+  onOpenInternalReview?: (entryId: string) => void;
   onStatusDetail: (id: GalleryId) => void;
   onMetadataSearch: (value: string) => void;
   onMetadataFavorite: (value: string) => void;
@@ -65,11 +67,13 @@ function GalleryCardComponent({
   selectionContext,
   favoriteMetadata,
   duplicateCandidateCount = 0,
+  internalDuplicateResultCount = 0,
   internalDuplicateProgress,
   onSelect,
   onOpenDetail,
   onOpenArtifact,
   onOpenReview,
+  onOpenInternalReview,
   onStatusDetail,
   onMetadataSearch,
   onMetadataFavorite,
@@ -103,6 +107,11 @@ function GalleryCardComponent({
   const overflowMeasureRefs = useRef<Array<HTMLSpanElement | null>>([]);
   const lastContentSize = useRef({ width: 0, height: 0 });
   const hasDuplicateCandidates = duplicateCandidateCount > 0;
+  const hasInternalDuplicateResult = view === "downloads"
+    && download?.state === "completed"
+    && internalDuplicateResultCount > 0
+    && Boolean(download.entryId)
+    && Boolean(onOpenInternalReview);
   const visibleInternalDuplicateProgress = view === "downloads" ? internalDuplicateProgress : undefined;
   const internalScanPercent = Math.min(100, Math.max(0, visibleInternalDuplicateProgress?.progressPercent ?? 0));
   const internalScanStage = visibleInternalDuplicateProgress?.stage === "hashing"
@@ -393,6 +402,22 @@ function GalleryCardComponent({
           ))}
         </div>
         <div className="meta-bottom">
+          {hasInternalDuplicateResult ? (
+            <button
+              type="button"
+              className="internal-result-badge"
+              aria-label={`${gallery.title}, 내부 중복 검토 결과 ${internalDuplicateResultCount}개 열기`}
+              title={`내부 중복 검토 결과 ${internalDuplicateResultCount}개 · 클릭하여 검토`}
+              onClick={(event) => {
+                if (selectFromInteractiveTarget(event)) return;
+                event.stopPropagation();
+                onOpenInternalReview?.(download.entryId!);
+              }}
+            >
+              <GalleryStatusIcon kind="warning" />
+              <span>내부 검토 {internalDuplicateResultCount}</span>
+            </button>
+          ) : null}
           <span>{gallery.pages}p</span>
           <span>#{gallery.id}</span>
         </div>

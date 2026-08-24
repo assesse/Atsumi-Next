@@ -22,6 +22,8 @@ export type InternalReviewBlock = {
   edition: boolean;
 };
 
+export type InternalTrackSelectionByBlock = Record<string, readonly string[]>;
+
 const trackLabel = (ordinal: number): string => ordinal < 26
   ? `세트 ${String.fromCharCode(65 + ordinal)}`
   : `세트 ${ordinal + 1}`;
@@ -91,9 +93,20 @@ export function buildInternalReviewBlocks(groups: InternalDuplicateGroup[]): Int
   });
 }
 
+export function selectedInternalEditionTracks(
+  block: InternalReviewBlock,
+  selectedTrackIdsByBlock: InternalTrackSelectionByBlock,
+): InternalEditionTrack[] {
+  if (!block.edition) return [];
+  const fallback = block.tracks[0] ? [block.tracks[0].id] : [];
+  const requested = new Set(selectedTrackIdsByBlock[block.blockId] ?? fallback);
+  const selected = block.tracks.filter((track) => requested.has(track.id));
+  return selected.length ? selected : block.tracks.slice(0, 1);
+}
+
 export function buildInternalRemovalSelections(
   blocks: InternalReviewBlock[],
-  selectedTrackByBlock: Record<string, string>,
+  selectedTrackIdsByBlock: InternalTrackSelectionByBlock,
   keepPages: Record<string, number>,
 ): InternalRemovalSelection[] {
   return blocks.flatMap((block) => {
@@ -112,19 +125,26 @@ export function buildInternalRemovalSelections(
         }] : [];
       });
     }
-    const selectedTrack = selectedTrackByBlock[block.blockId] ?? block.tracks[0]?.id;
-    if (!selectedTrack) return [];
+    const selectedTracks = selectedInternalEditionTracks(block, selectedTrackIdsByBlock);
+    const selectedTrackIds = new Set(selectedTracks.map((track) => track.id));
+    if (!selectedTrackIds.size) return [];
     return block.rows.flatMap((group) => {
-      const keep = group.pages.find((page) => page.editionTrackId === selectedTrack);
-      if (!keep) return [];
+      const keptPages = group.pages
+        .filter((page) => page.editionTrackId && selectedTrackIds.has(page.editionTrackId))
+        .sort((left, right) => left.sourcePage - right.sourcePage);
+      // If every selected edition is missing this scene, preserve the whole row.
+      if (!keptPages.length) return [];
       const removeSourcePages = group.pages
+        .filter((page) => !page.editionTrackId || !selectedTrackIds.has(page.editionTrackId))
         .map((page) => page.sourcePage)
-        .filter((page) => page !== keep.sourcePage)
         .sort((left, right) => left - right);
       return removeSourcePages.length ? [{
         groupId: group.groupId,
         expectedRevision: group.revision,
-        keepSourcePage: keep.sourcePage,
+        // The backend's existing plan contract needs one verified anchor page.
+        // Other selected-track pages are also preserved because they are omitted
+        // from removeSourcePages.
+        keepSourcePage: keptPages[0]!.sourcePage,
         removeSourcePages,
       }] : [];
     });

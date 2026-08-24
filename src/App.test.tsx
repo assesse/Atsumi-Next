@@ -742,6 +742,9 @@ describe("App Phase 3A backend flow", () => {
       const second = container.querySelector<HTMLElement>('[data-gallery-id="4050754"]');
       const unfinished = container.querySelector<HTMLElement>('[data-gallery-id="4051027"]');
       if (!first || !second || !unfinished) throw new Error("Download selection fixtures were not rendered");
+      expect(first.querySelector(".internal-result-badge")).toHaveTextContent("내부 검토 1");
+      expect(second.querySelector(".internal-result-badge")).toBeNull();
+      expect(unfinished.querySelector(".internal-result-badge")).toBeNull();
 
       await act(async () => {
         first.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));

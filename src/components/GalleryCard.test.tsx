@@ -17,6 +17,7 @@ const callbacks = {
   onOpenDetail: vi.fn(),
   onOpenArtifact: vi.fn(),
   onOpenReview: vi.fn(),
+  onOpenInternalReview: vi.fn(),
   onStatusDetail: vi.fn(),
   onMetadataSearch: vi.fn(),
   onMetadataFavorite: vi.fn(),
@@ -310,6 +311,75 @@ describe("GalleryCard event projection", () => {
     expect(article).not.toHaveTextContent(gallery.publishedAt.slice(2));
     expect(article).not.toHaveTextContent(String(gallery.score));
     expect(article).toHaveAccessibleName(expect.not.stringContaining(", ,"));
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("shows an internal duplicate result marker at the left of a completed Downloads footer", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery: Gallery = {
+      ...mockGalleries[0]!,
+      download: { entryId: "verified-entry", state: "completed", progress: 100 },
+    };
+
+    await act(async () => root.render(
+      <GalleryCard
+        gallery={gallery}
+        view="downloads"
+        selected={false}
+        selectionContext={false}
+        favoriteMetadata={new Set()}
+        internalDuplicateResultCount={5}
+        {...callbacks}
+      />,
+    ));
+
+    const footer = container.querySelector(".meta-bottom");
+    const marker = footer?.querySelector<HTMLButtonElement>(".internal-result-badge");
+    expect(footer?.firstElementChild).toBe(marker);
+    expect(marker).toHaveTextContent("내부 검토 5");
+    expect(marker).toHaveAccessibleName(`${gallery.title}, 내부 중복 검토 결과 5개 열기`);
+    expect(footer).toHaveTextContent(`${gallery.pages}p`);
+    expect(footer).toHaveTextContent(`#${gallery.id}`);
+
+    await act(async () => marker?.click());
+    expect(callbacks.onOpenInternalReview).toHaveBeenCalledWith("verified-entry");
+    expect(callbacks.onOpenArtifact).not.toHaveBeenCalled();
+    expect(callbacks.onOpenDetail).not.toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("does not show the internal result marker outside completed Downloads results", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery: Gallery = {
+      ...mockGalleries[0]!,
+      download: { entryId: "verified-entry", state: "completed", progress: 100 },
+    };
+    const render = (view: "explore" | "downloads", count: number, state: NonNullable<Gallery["download"]>["state"] = "completed") => root.render(
+      <GalleryCard
+        gallery={{ ...gallery, download: { ...gallery.download!, state } }}
+        view={view}
+        selected={false}
+        selectionContext={false}
+        favoriteMetadata={new Set()}
+        internalDuplicateResultCount={count}
+        {...callbacks}
+      />,
+    );
+
+    await act(async () => render("explore", 5));
+    expect(container.querySelector(".internal-result-badge")).toBeNull();
+    await act(async () => render("downloads", 0));
+    expect(container.querySelector(".internal-result-badge")).toBeNull();
+    await act(async () => render("downloads", 5, "downloading"));
+    expect(container.querySelector(".internal-result-badge")).toBeNull();
+
     await act(async () => root.unmount());
     container.remove();
   });

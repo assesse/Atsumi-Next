@@ -75,11 +75,11 @@ metadata target이 이벤트를 처리하면 card의 상세 열기와 선택은 
 | 상황 | 표시·입력 | 동작 | 상태 |
 |---|---|---|---|
 | 선택한 완료 앨범 scan 실행 중 | 해당 Downloads 카드에 `내부 검사 n/N`, 단계, artifact 진행률 | 실제 worker의 현재 `entryId`와 `galleryId`가 모두 일치하는 카드만 갱신 | 확정 |
-| N-way edition block 검토 | 행=판본 세트, 열=장면, 각 행 맨 왼쪽 radio | 선택한 세트 행 전체를 유지하고 다른 세트의 대응 page를 격리 예정으로 표시 | 확정 |
-| 선택 세트에 장면 누락 | 해당 cell에 `누락 · 행 보존` | 그 scene row를 plan에서 제외해 어느 page도 자동 격리하지 않음 | 확정 |
+| N-way edition block 검토 | 행=판본 세트, 열=장면, 각 행 맨 왼쪽 checkbox | 하나 이상의 세트를 복수 선택해 모두 유지하고 선택하지 않은 세트의 대응 page만 격리 예정으로 표시 | 확정 |
+| 모든 선택 세트에 장면 누락 | 해당 cell에 `누락 · 행 보존` | 그 scene row를 plan에서 제외해 어느 page도 자동 격리하지 않음 | 확정 |
 | standalone exact/legacy 결과 | 기존 page별 radio | track 정보가 없는 결과만 개별 keep 선택 유지 | 확정 |
 
-edition matrix의 page preview는 약 200px 비교 폭을 유지하고 장면 수가 많으면 dialog 내부에서 가로 스크롤한다. 검사 진행 상태는 휘발성이며 scan 결과나 다운로드 진행률을 덮어쓰지 않는다.
+edition matrix의 page preview는 약 200px 비교 폭을 유지한다. 검토 dialog 전체는 세로로만 스크롤하고, 장면 수가 많을 때는 edition matrix 내부만 가로 스크롤한다. 미해결 내부 결과가 있는 완료 Downloads 카드는 페이지 수·작품 코드와 같은 footer 행의 맨 왼쪽에 결과 바로가기를 표시한다. 검사 진행 상태는 휘발성이며 scan 결과나 다운로드 진행률을 덮어쓰지 않는다.
 
 ## Settings maintenance
 

@@ -10,6 +10,7 @@ import { GalleryThumbnail } from "./GalleryThumbnail";
 import {
   buildInternalRemovalSelections,
   buildInternalReviewBlocks,
+  selectedInternalEditionTracks,
   selectionsMatchPlan,
 } from "./internalDuplicateReviewModel";
 
@@ -60,7 +61,7 @@ export function InternalDuplicateDialog({
   const closeButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const [keepPages, setKeepPages] = useState<Record<string, number>>({});
-  const [selectedTrackByBlock, setSelectedTrackByBlock] = useState<Record<string, string>>({});
+  const [selectedTrackIdsByBlock, setSelectedTrackIdsByBlock] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
     if (!open) return;
@@ -89,18 +90,31 @@ export function InternalDuplicateDialog({
   useEffect(() => {
     if (!review) return;
     setKeepPages(Object.fromEntries(review.groups.map((group) => [group.groupId, group.recommendedKeepSourcePage])));
-    setSelectedTrackByBlock(Object.fromEntries(
+    setSelectedTrackIdsByBlock(Object.fromEntries(
       buildInternalReviewBlocks(review.groups)
         .filter((block) => block.edition)
-        .map((block) => [block.blockId, block.tracks[0]!.id]),
+        .map((block) => [block.blockId, [block.tracks[0]!.id]]),
     ));
   }, [review]);
 
   const selections = useMemo(
-    () => buildInternalRemovalSelections(blocks, selectedTrackByBlock, keepPages),
-    [blocks, keepPages, selectedTrackByBlock],
+    () => buildInternalRemovalSelections(blocks, selectedTrackIdsByBlock, keepPages),
+    [blocks, keepPages, selectedTrackIdsByBlock],
   );
   const activePlan = selectionsMatchPlan(selections, plan) ? plan ?? undefined : undefined;
+
+  const toggleEditionTrack = (blockId: string, fallbackTrackId: string, trackId: string) => {
+    setSelectedTrackIdsByBlock((current) => {
+      const selected = current[blockId] ?? [fallbackTrackId];
+      if (!selected.includes(trackId)) {
+        return { ...current, [blockId]: [...selected, trackId] };
+      }
+      // At least one edition must remain selected so a row can never become an
+      // accidental "remove everything" request.
+      if (selected.length === 1) return current;
+      return { ...current, [blockId]: selected.filter((id) => id !== trackId) };
+    });
+  };
 
   const preview = () => {
     if (!review) return;
@@ -142,7 +156,7 @@ export function InternalDuplicateDialog({
             <button type="button" className="text-button" onClick={onRetry}>다시 불러오기</button>
           </div>
         ) : review ? (
-          <div className="review-scroll internal-review-scroll">
+          <div className="review-scroll internal-review-scroll" data-scroll-axis="vertical">
             {error ? <div className="inline-error" role="alert"><span>{error}</span><button type="button" className="text-button" onClick={onRetry}>최신 내용 다시 불러오기</button></div> : null}
             <div className="review-summary">
               <span className="review-signal">{review.groups.length}개 동기화 행</span>
@@ -159,11 +173,12 @@ export function InternalDuplicateDialog({
                 {block.edition ? (
                   <>
                     <fieldset className="internal-edition-tracks">
-                      <legend>남길 판본 세트 선택</legend>
+                      <legend>남길 판본 세트 선택 · 복수 선택 가능</legend>
                       <div
                         className="internal-scene-matrix"
                         role="region"
                         aria-label={`장면 묶음 ${blockIndex + 1} 판본 행렬`}
+                        data-scroll-axis="horizontal"
                         style={{ "--internal-scene-count": block.rows.length } as CSSProperties}
                       >
                         <div className="internal-scene-matrix-row internal-scene-matrix-header">
@@ -171,7 +186,9 @@ export function InternalDuplicateDialog({
                           {block.rows.map((group) => <strong key={group.groupId}>장면 {group.sequenceIndex + 1}</strong>)}
                         </div>
                         {block.tracks.map((track) => {
-                          const selected = (selectedTrackByBlock[block.blockId] ?? block.tracks[0]?.id) === track.id;
+                          const selectedTracks = selectedInternalEditionTracks(block, selectedTrackIdsByBlock);
+                          const selectedTrackIds = new Set(selectedTracks.map((item) => item.id));
+                          const selected = selectedTrackIds.has(track.id);
                           return (
                             <div
                               className={`internal-scene-matrix-row internal-edition-track-row${selected ? " is-kept" : " is-quarantine"}`}
@@ -179,10 +196,11 @@ export function InternalDuplicateDialog({
                             >
                               <label className="internal-edition-track-control">
                                 <input
-                                  type="radio"
+                                  type="checkbox"
                                   name={`track-${block.blockId}`}
                                   checked={selected}
-                                  onChange={() => setSelectedTrackByBlock((current) => ({ ...current, [block.blockId]: track.id }))}
+                                  aria-label={`${track.label} 유지`}
+                                  onChange={() => toggleEditionTrack(block.blockId, block.tracks[0]!.id, track.id)}
                                 />
                                 <span>
                                   <strong>{track.label}</strong>
@@ -192,13 +210,19 @@ export function InternalDuplicateDialog({
                               </label>
                               {block.rows.map((group) => {
                                 const page = group.pages.find((candidate) => candidate.editionTrackId === track.id);
+                                const rowHasSelectedPage = group.pages.some((candidate) => (
+                                  candidate.editionTrackId !== undefined && selectedTrackIds.has(candidate.editionTrackId)
+                                ));
                                 if (!page) return <span
-                                  className={`internal-scene-cell is-missing${selected ? " is-kept" : ""}`}
+                                  className={`internal-scene-cell is-missing${selected ? rowHasSelectedPage ? " is-kept" : " is-preserved" : ""}`}
                                   key={group.groupId}
-                                  aria-label={selected ? "선택 세트 누락 · 이 행 보존" : `${track.label} 장면 누락`}
-                                  title={selected ? "선택 세트 누락 · 이 행 보존" : undefined}
-                                >{selected ? "누락 · 행 보존" : "—"}</span>;
-                                return <div className={`internal-scene-cell${selected ? " is-kept" : " is-quarantine"}`} key={group.groupId}>
+                                  aria-label={selected
+                                    ? rowHasSelectedPage ? `${track.label} 장면 누락` : "선택 세트 전체 누락 · 이 행 보존"
+                                    : `${track.label} 장면 누락`}
+                                  title={selected && !rowHasSelectedPage ? "선택 세트 전체 누락 · 이 행 보존" : undefined}
+                                >{selected ? rowHasSelectedPage ? "선택 세트 누락" : "누락 · 행 보존" : "—"}</span>;
+                                const preserved = !selected && !rowHasSelectedPage;
+                                return <div className={`internal-scene-cell${selected ? " is-kept" : preserved ? " is-preserved" : " is-quarantine"}`} key={group.groupId}>
                                   <GalleryThumbnail
                                     className="internal-page-image"
                                     thumbnailKey={artifactPageThumbnailKey(review.entryId, page.sourcePage, page.sourcePage - 1)}
@@ -207,7 +231,7 @@ export function InternalDuplicateDialog({
                                     client={thumbnailClient}
                                     alt={`${track.label} 원본 ${page.sourcePage}페이지`}
                                   ><span>{page.sourcePage}p</span></GalleryThumbnail>
-                                  <small>{selected ? "유지" : "격리 예정"}</small>
+                                  <small>{selected ? "유지" : preserved ? "행 보존" : "격리 예정"}</small>
                                 </div>;
                               })}
                             </div>
@@ -216,13 +240,17 @@ export function InternalDuplicateDialog({
                       </div>
                     </fieldset>
                     {(() => {
-                      const selectedId = selectedTrackByBlock[block.blockId] ?? block.tracks[0]?.id;
-                      const selectedTrack = block.tracks.find((track) => track.id === selectedId);
-                      const selectionCount = buildInternalRemovalSelections([block], selectedTrackByBlock, keepPages);
-                      const removals = selectionCount.reduce((count, selection) => count + selection.removeSourcePages.length, 0);
-                      return selectedTrack ? <p className="internal-selection-summary">
-                        선택 판본: <strong>{selectedTrack.label}</strong> · 유지 페이지: {selectedTrack.coveredRows}개 · 격리 예정: {removals}개
-                        {selectedTrack.missingRows ? ` · 선택한 세트에 없는 장면 ${selectedTrack.missingRows}행은 이번 작업에서 건드리지 않습니다.` : null}
+                      const selectedTracks = selectedInternalEditionTracks(block, selectedTrackIdsByBlock);
+                      const selectedTrackIds = new Set(selectedTracks.map((track) => track.id));
+                      const blockSelections = buildInternalRemovalSelections([block], selectedTrackIdsByBlock, keepPages);
+                      const removals = blockSelections.reduce((count, selection) => count + selection.removeSourcePages.length, 0);
+                      const keptPages = selectedTracks.reduce((count, track) => count + track.coveredRows, 0);
+                      const preservedRows = block.rows.filter((group) => !group.pages.some((page) => (
+                        page.editionTrackId !== undefined && selectedTrackIds.has(page.editionTrackId)
+                      ))).length;
+                      return selectedTracks.length ? <p className="internal-selection-summary">
+                        선택 판본: <strong>{selectedTracks.map((track) => track.label).join(", ")}</strong> · 유지 페이지: {keptPages}개 · 격리 예정: {removals}개
+                        {preservedRows ? ` · 선택한 세트들에 모두 없는 장면 ${preservedRows}행은 이번 작업에서 건드리지 않습니다.` : null}
                       </p> : null;
                     })()}
                   </>

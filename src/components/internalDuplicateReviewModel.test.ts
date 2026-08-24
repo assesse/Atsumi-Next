@@ -43,7 +43,7 @@ describe("internalDuplicateReviewModel", () => {
       { label: "세트 C", pages: [11, 12, 13, 14, 15], coveredRows: 5 },
       { label: "세트 D", pages: [16, 17, 18, 19, 20], coveredRows: 5 },
     ] });
-    const selections = buildInternalRemovalSelections(blocks, { "block-a3": "block-a3-t1" }, {});
+    const selections = buildInternalRemovalSelections(blocks, { "block-a3": ["block-a3-t1"] }, {});
     expect(selections).toHaveLength(5);
     expect(selections.map((selection) => selection.keepSourcePage)).toEqual([6, 7, 8, 9, 10]);
     expect(selections[0]?.removeSourcePages).toEqual([1, 11, 16]);
@@ -53,9 +53,35 @@ describe("internalDuplicateReviewModel", () => {
   it("preserves a missing scene instead of auto-selecting another set", () => {
     const blocks = buildInternalReviewBlocks(rows(true));
     expect(blocks[0]?.tracks[2]).toMatchObject({ coveredRows: 4, missingRows: 1 });
-    const selections = buildInternalRemovalSelections(blocks, { "block-a3": "block-a3-t2" }, {});
+    const selections = buildInternalRemovalSelections(blocks, { "block-a3": ["block-a3-t2"] }, {});
     expect(selections).toHaveLength(4);
     expect(selections.map((selection) => selection.groupId)).not.toContain("row-3");
+  });
+
+  it("keeps multiple selected edition tracks and removes only unselected counterparts", () => {
+    const blocks = buildInternalReviewBlocks(rows());
+    const selections = buildInternalRemovalSelections(blocks, {
+      "block-a3": ["block-a3-t0", "block-a3-t2"],
+    }, {});
+
+    expect(selections).toHaveLength(5);
+    expect(selections.map((selection) => selection.keepSourcePage)).toEqual([1, 2, 3, 4, 5]);
+    expect(selections[0]?.removeSourcePages).toEqual([6, 16]);
+    expect(selections.reduce((sum, selection) => sum + selection.removeSourcePages.length, 0)).toBe(10);
+  });
+
+  it("preserves only rows where every selected edition is missing", () => {
+    const source = rows(true).map((group, index) => index === 2 ? {
+      ...group,
+      pages: group.pages.filter((page) => page.editionTrackOrdinal !== 0),
+    } : group);
+    const blocks = buildInternalReviewBlocks(source);
+    const selections = buildInternalRemovalSelections(blocks, {
+      "block-a3": ["block-a3-t0", "block-a3-t2"],
+    }, {});
+
+    expect(selections.map((selection) => selection.groupId)).not.toContain("row-3");
+    expect(selections).toHaveLength(4);
   });
 
   it("keeps legacy and standalone rows on the existing individual-page path", () => {
@@ -73,9 +99,9 @@ describe("internalDuplicateReviewModel", () => {
 
   it("invalidates a stale plan when the selected track changes", () => {
     const blocks = buildInternalReviewBlocks(rows());
-    const selected = buildInternalRemovalSelections(blocks, { "block-a3": "block-a3-t0" }, {});
+    const selected = buildInternalRemovalSelections(blocks, { "block-a3": ["block-a3-t0"] }, {});
     const plan = { planId: "plan", entryId: "entry-1", selections: selected, filesToQuarantine: 15, bytesToQuarantine: 1, expiresAt: "later" };
     expect(selectionsMatchPlan(selected, plan)).toBe(true);
-    expect(selectionsMatchPlan(buildInternalRemovalSelections(blocks, { "block-a3": "block-a3-t1" }, {}), plan)).toBe(false);
+    expect(selectionsMatchPlan(buildInternalRemovalSelections(blocks, { "block-a3": ["block-a3-t0", "block-a3-t2"] }, {}), plan)).toBe(false);
   });
 });

@@ -1326,6 +1326,43 @@ h2 {
   content: "·";
 }
 
+.internal-result-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  margin-right: auto;
+  padding: 0;
+  overflow: hidden;
+  color: #23667a;
+  font: inherit;
+  font-weight: 700;
+  line-height: inherit;
+  text-align: left;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.internal-result-badge > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.internal-result-badge .gallery-status-icon {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+}
+
+.internal-result-badge:hover,
+.internal-result-badge:focus-visible {
+  color: var(--primary-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .status-pill {
   position: absolute;
   right: 8px;
@@ -2597,18 +2634,34 @@ dialog::backdrop {
 .internal-review-dialog {
   width: min(1380px, calc(100vw - 42px));
   height: min(900px, calc(100vh - 38px));
+  overflow: hidden;
 }
 
 .internal-review-scroll {
   display: grid;
   align-content: start;
   gap: 12px;
+  min-width: 0;
+  max-width: 100%;
   padding-bottom: 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-x: none;
+}
+
+.internal-review-scroll .review-summary > strong,
+.internal-review-scroll .review-summary > span,
+.internal-scene-block > header > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .internal-scene-block,
 .internal-plan-summary,
 .internal-quarantine-history {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: calc(100% - 28px);
   margin: 0 14px;
   padding: 12px;
   background: #f8fbfa;
@@ -2652,8 +2705,10 @@ dialog::backdrop {
 .internal-edition-tracks {
   min-width: 0;
   min-inline-size: 0;
+  max-width: 100%;
   margin: 12px 0 0;
   padding: 0;
+  overflow: hidden;
   border: 0;
 }
 
@@ -2721,12 +2776,16 @@ dialog::backdrop {
 }
 
 .internal-scene-matrix {
+  box-sizing: border-box;
   display: grid;
   gap: 2px;
   width: 100%;
   min-width: 0;
+  max-width: 100%;
   margin-top: 10px;
   overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
   border: 1px solid #dce8e6;
   border-radius: 6px;
 }
@@ -2779,6 +2838,12 @@ dialog::backdrop {
 
 .internal-scene-cell.is-quarantine {
   opacity: .78;
+}
+
+.internal-scene-cell.is-preserved {
+  background: var(--surface-soft);
+  border-color: var(--line-strong);
+  opacity: 1;
 }
 
 .internal-scene-cell.is-missing {
