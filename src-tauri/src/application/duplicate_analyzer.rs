@@ -518,6 +518,8 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, hint::black_box, time::Instant};
+
     use image::{
         codecs::jpeg::JpegEncoder, DynamicImage, ExtendedColorType, GrayImage, ImageFormat, Luma,
     };
@@ -734,6 +736,67 @@ mod tests {
             &HashProfile::current(),
         )
         .unwrap()
+    }
+
+    #[test]
+    #[ignore = "manual local CPU and storage-cache profile; production runs emit full DB timing"]
+    fn profile_duplicate_hash_and_compare_stages() {
+        const PAGES_PER_ARTIFACT: u32 = 48;
+        let bytes = png_bytes(scene_image(640, 960, false));
+        let temporary = tempfile::tempdir().unwrap();
+        let image_path = temporary.path().join("profile-page.png");
+        fs::write(&image_path, &bytes).unwrap();
+
+        let read_started = Instant::now();
+        for _ in 0..PAGES_PER_ARTIFACT * 2 {
+            let loaded = fs::read(&image_path).unwrap();
+            black_box(loaded.len());
+        }
+        let image_read = read_started.elapsed();
+
+        let artifact_sha = ArtifactSha256::new(format!("{:x}", Sha256::digest(&bytes))).unwrap();
+        let hash_started = Instant::now();
+        let mut artifact_pages = [Vec::new(), Vec::new()];
+        for gallery_id in 1..=2_i64 {
+            for source_page in 1..=PAGES_PER_ARTIFACT {
+                artifact_pages[(gallery_id - 1) as usize].push(
+                    compute_page_hash(
+                        &format!("profile-entry-{gallery_id}"),
+                        GalleryId::new(gallery_id).unwrap(),
+                        SourcePageNumber::new(source_page).unwrap(),
+                        artifact_sha.clone(),
+                        &bytes,
+                        &HashProfile::current(),
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        let hash_compute = hash_started.elapsed();
+
+        let left = HashedArtifact {
+            gallery: gallery(1, PAGES_PER_ARTIFACT),
+            pages: artifact_pages[0].clone(),
+        };
+        let right = HashedArtifact {
+            gallery: gallery(2, PAGES_PER_ARTIFACT),
+            pages: artifact_pages[1].clone(),
+        };
+        let compare_started = Instant::now();
+        let record =
+            analyze_artifact_pair("profile-run", &left, &right, &HashProfile::current(), None)
+                .expect("identical synthetic artifacts should produce a comparison record");
+        let hash_compare = compare_started.elapsed();
+        assert_eq!(record.candidate.matched_pages, PAGES_PER_ARTIFACT);
+
+        eprintln!(
+            "duplicate_stage_profile pages_per_artifact={} encoded_bytes={} image_read_us={} hash_compute_us={} hash_compare_us={}",
+            PAGES_PER_ARTIFACT,
+            bytes.len(),
+            image_read.as_micros(),
+            hash_compute.as_micros(),
+            hash_compare.as_micros(),
+        );
     }
 
     fn scene_image(width: u32, height: u32, overlay: bool) -> GrayImage {

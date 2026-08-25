@@ -34,6 +34,7 @@ schema v24 working tree와 이번 통합 검증을 기준으로 한다. `구현`
 |---|---|---|
 | queue·resume·reconcile | 구현 | 검증 page checkpoint부터 같은 entry/job attempt를 재개하고 manifest·DB·파일이 맞기 전에는 completed가 되지 않는다. 모호한 final/`.part`는 `.atsumi-recovery`에 보존하고 `RECOVERY_CONFLICT` 실패로 멈춰 명시적 재시도만 허용한다. |
 | 다운로드 검증 처리량 | 구현 | 새 normalized WebP는 메모리에서 decode 검증한 뒤 `.part` sync·SHA와 atomic rename을 거친다. 이후 resume/final bundle은 길이·WebP signature·streaming SHA를 canonical checkpoint와 비교해 동일 payload를 반복 decode하지 않는다. 실제 download가 speculative prefetch보다 높은 scheduler 순위를 갖는다. |
+| 완료 전 판본 겹침 gate | 구현 | 모든 incoming page 검증 뒤 manifest 전에 같은 작가의 verified artifact와 HashProfile 1 evidence를 비교한다. policy v1의 강한 exact/contains/translation/partial만 `review_required`로 멈추며, keep-both/후보별 오탐/새 다운로드 취소를 revision CAS와 fingerprint 재검증으로 적용한다. 승인 재개는 page를 다시 받지 않고 기존 보유 파일을 변경하지 않는다. |
 | 새 artifact 폴더 template | 구현 | 기본 `[{artist}] {title} [{group}] {id}`. `{id}` 필수, Windows reserved/control 문자·길이·root containment를 검증한다. |
 | 기존 artifact 자동 이름 변경 | 보류 | 구현하지 않았다. 기존 `relative_directory`와 `root_snapshot`은 DB trigger로 immutable이며 새 template은 새 artifact에만 적용된다. |
 | WebP/JPEG/PNG 입력 | 구현 | decode·검증 후 lossless WebP로 저장하고 SHA-256·manifest를 기록한다. |
@@ -47,7 +48,7 @@ schema v24 working tree와 이번 통합 검증을 기준으로 한다. `구현`
 
 | 기능 | 상태 | 현재 계약과 증거 |
 |---|---|---|
-| 작품 중복 Review | 구현 | verified artifact, versioned hash/evidence, monotonic alignment, revision CAS, hide/series/pair-exclude 이력. 자동 파일 삭제 없음. |
+| 작품 중복 Review | 구현 | 정규화된 전체 작가 목록이 겹치는 verified artifact pair만 비교, versioned hash/evidence, monotonic alignment, revision CAS, hide/series/pair-exclude 이력. 자동 파일 삭제 없음. |
 | 앨범 내부 페이지 Review | 구현 | 선택한 완료 앨범만 exact 또는 최소 2행 시각 블록으로 검사한다. 빈/혼합 선택은 거부하고 미선택 결과를 보존하며 immutable source page number, 계획 preview, quarantine/undo saga를 유지한다. |
 | 과거 데이터 이전 UI/API | 폐기 | active frontend/backend/runtime 경로를 제거했다. 기존 DB의 v14 migration과 역사적 table만 호환을 위해 보존한다. |
 | 미리보기 cache clear | 구현 | 완료된 재생성 가능 cache만 제거하고 active/visible request와 다운로드 artifact를 보존한다. |

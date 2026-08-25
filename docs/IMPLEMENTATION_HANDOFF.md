@@ -17,7 +17,7 @@
 | 영역 | 상태 | 현재 근거 |
 |---|---|---|
 | startup·single-instance | 완료 | 두 번째 실행은 기존 창을 복원하며, fatal startup은 non-zero exit·사용자 안내·로컬 오류 로그를 남긴다 |
-| DB·migration | 완료 | schema v18, v15 folder/path·v16 candidate/root·v17 Auto Find cutoff·v18 source identity additive migration, future-schema 무변경 거부, version backup, WAL·explicit startup recovery 검증 완료 |
+| DB·migration | 완료 | schema v26, migration 1~25 불변, v26 download overlap review/evidence/decision/fingerprint policy additive migration, future-schema 무변경 거부, version backup, WAL·explicit startup recovery 검증 완료 |
 | Hitomi search | 완료 | production live adapter, query serialization, bounded Explore cache·prefetch, requestId별 실제 cancellation과 paging/filter/popular fixture contract 검증 완료 |
 | detail·Related | 완료 | typed galleryinfo detail·Related 5개와 source-page identity를 저장 fixture 통합 테스트로 검증 |
 | thumbnail | 완료 | 전역 coordinator와 live resolver·viewport 구독·400ms orphan grace·120초/256 frontend retention·우선순위·실제 취소·memory/negative cache 검증 완료 |
@@ -33,6 +33,24 @@
 | Windows build·CI | 완료 | 최소 CSP·capability, 공용 `tools/verify.ps1`, Windows CI와 Tauri no-bundle release 검증 완료 |
 
 ## 3. Changes by subsystem
+
+### Latest UI refinement — flat/daily/artist gallery projection
+
+- `src/App.tsx`, `state/galleryGrouping.ts` and `styles.css`: Auto Find and Downloads expose the same left-aligned **전체 / 기간별 / 작가별** control followed by **전부 펼치기/접기** in the same context row. `전체` is a flat card grid and disables the accordion action; daily and artist projections keep the thin-line accordion. Auto Find groups by persisted candidate discovery day; Downloads groups by the entry's persisted latest activity time (with the existing gallery date only as a legacy fallback). Collapsed sections unmount their card grid, so hidden groups do not keep card thumbnails subscribed.
+- Auto Find's long cutoff/truncation evidence is collapsed to a single `검증 근거 N개` disclosure and opens as a bounded overlay. It no longer grows into the heading/context layout when several artists have evidence.
+- `settings` migration 25 (`gallery_group_accordion_state`) adds only `collapsed_group_keys_json`. The normalized group-key list is read and written through the ordinary settings revision/CAS path, so per-view, per-group accordion state survives restart without browser storage becoming the production source of truth. Existing migrations 1–24 remain unchanged.
+- The former Auto Find header batch-download action is replaced by the stateful `전부 접기` / `전부 펼치기` control. Individual/selection-based download actions remain unchanged.
+- Group headers now use a thin separator/accent-line treatment instead of a boxed panel. The title is deliberately compact (14–17px from the gallery preview preset), while the count pill and primary-colored line carry the visual grouping hierarchy; collapsed grids remain unmounted and persisted exactly as before.
+
+### Download Overlap Review Gate
+
+- `application/download_overlap.rs` reuses HashProfile 1 and the existing global artifact pair analyzer after every incoming page has passed filesystem verification, but before manifest writing and `completed`. Only exact normalized artist-key intersection is a v1 hard candidate rule; metadata title/group similarity never blocks completion.
+- A completed legacy artifact with no `owned_gallery_artists` rows falls back to its non-empty stored primary artist for candidate selection. This is deliberately conservative and prevents pre-projection downloads from being skipped before HashProfile comparison without introducing fuzzy artist matching.
+- Download policy v1 is precision-first: strong exact/near-equivalent, directional containment, translation/recompression and substantial partial overlap can pause. One or two common covers/ads, low-information-majority evidence and weak partial matches pass normally.
+- 전역 작품 중복 Review의 `contains` 후보는 양쪽 page count가 다를 때 긴 쪽을 `포괄 작품`, 완전히 포함된 짧은 쪽을 `귀속 작품`으로 표시하고 귀속 작품만 hide할 수 있다. repository도 반대 방향 hide를 거부한다. 현재 필요하지 않은 연작 분류 입력은 Review에서 숨겼지만 기존 series group/decision persistence와 과거 이력 표시는 그대로 유지한다.
+- same-artist finalization locks are acquired in stable normalized-key order and held from the latest candidate query through either review persistence or completion commit. A previously paused same-artist staging artifact is eligible, preventing simultaneous downloads from both slipping through.
+- migration 26 persists reviews, candidates, bounded source-page pairs, append-only decisions and canonical artifact-fingerprint pair approvals. `review_required` points to the typed `gallery_duplicate` review; a valid pending review survives restart and missing/corrupt targets fail safely instead of auto-completing.
+- `DownloadOverlapReviewDialog` labels the two sides as `기존 보유 앨범` and `새 다운로드`, supports multiple ranked candidates and exposes only `둘 다 보관`, candidate-scoped `오탐`, and `새 다운로드 취소`. Decisions use review revision CAS and reproduce incoming/existing fingerprints before any resume. Resume creates a new attempt but reuses verified page checkpoints, so it does not redownload source pages; no decision mutates an existing owned artifact.
 
 ### Milestone A — startup·DB·CI
 
@@ -71,13 +89,13 @@
 - `interface/commands.rs`와 `lib.rs`: favorite/history/snapshot/refresh/cancel/exclude command와 `auto-find:changed` event를 연결했다. startup은 남은 running run을 `AUTO_FIND_INTERRUPTED`, 정상 앱 종료는 active run을 `AUTO_FIND_APP_EXIT`로 안전 종결한다.
 - `domain/search.rs`, live/fixture source와 frontend projection: `GallerySummary`에 non-optional `series[]`, `characters[]`를 추가했다. 검색·상세·Related·Auto Find restore가 이를 보존하며, 여러 단어 값은 `series:rain_archives`, `character:mira_lane` token으로 각각의 Nozomi namespace endpoint에 직렬화한다.
 - `App.tsx`, `GalleryCard.tsx`, `DetailWorkspace.tsx`, `ViewHeader.tsx`와 typed frontend client: startup에서 favorite/history/Auto Find snapshot을 복원하고, 5개 namespace favorite state를 카드·상세·Related가 공유하는 projection으로 계산한다. 시리즈·캐릭터 chip의 좌클릭은 namespace 검색, 우클릭은 canonical spaced favorite toggle이다. 검색 suggestion은 text/tag/language/sort/page size를 포함한 영속 요청을 재생하며 입력 change는 local draft만 바꾼다.
-- Auto Find 화면은 명시적 갱신, running/completed/cancelled/failed 진행 상태, 취소와 부분 후보 보존, 다시 탐색, local 문자열·언어 filter, 전체/작가별 묶음, 현재 표시 후보 batch queue를 제공한다. toolbar와 Delete는 선택 후보를 영속 제외하고 다음 run에도 반영한다.
+- Auto Find 화면은 명시적 갱신, running/completed/cancelled/failed 진행 상태, 취소와 부분 후보 보존, 다시 탐색, local 문자열·언어 filter, 전체/기간별/작가별 projection, 전부 펼치기/접기를 제공한다. toolbar와 Delete는 선택 후보를 영속 제외하고 다음 run에도 반영한다.
 - 브라우저 검토 모드는 실제 원격 source를 호출하지 않는 fixture adapter 경계를 유지하면서 같은 lifecycle을 재현한다. 취소 generation 뒤 늦은 fixture 결과를 무시하고 download/exclusion을 후보에서 제거한다.
 - 데이터 호환성: DB schema는 11로 상승한다. v10은 새 automation table만 추가하고 v11은 Auto Find 후보의 visible namespace metadata만 additive column으로 확장한다. v1~v10의 기존 의미, download manifest schema와 HashProfile은 변경하지 않는다.
 
 ### Milestone E — gallery duplicate evidence·Review
 
-- `domain/duplicate.rs`, `application/duplicate_analyzer.rs`, `duplicate_supervisor.rs`: HashProfile 1/algorithm 1, exact SHA-256, 64-bit coarse dHash·pHash, 1024-bit detail dHash, luma/variance/non-uniform/edge gate와 monotonic one-to-one gap alignment를 typed domain으로 추가했다. title/artist/group/page count는 exhaustive pair worklist의 우선순위만 정한다.
+- `domain/duplicate.rs`, `application/duplicate_analyzer.rs`, `duplicate_supervisor.rs`: HashProfile 1/algorithm 1, exact SHA-256, 64-bit coarse dHash·pHash, 1024-bit detail dHash, luma/variance/non-uniform/edge gate와 monotonic one-to-one gap alignment를 typed domain으로 추가했다. supervisor는 전체 작가 목록을 공통 정규화한 역색인에서 같은-작가 pair만 결정론적으로 생성하고, 여러 작가를 공유하는 동일 pair는 중복 제거한다. pair에 참여하지 않는 artifact는 page hash 준비도 하지 않으며 run의 `totalArtifacts`/`totalPairs`는 실제 작업 집합을 나타낸다.
 - `migrations.rs`와 `sqlite_repository.rs`: migration 12로 hash profile/cache, scan run, candidate/evidence/page pair, hidden gallery, series group/member, pair exclusion과 append-only decision table을 추가했다. scan 상태·candidate replace·CAS decision side effect는 짧은 SQLite transaction이고 startup recovery는 남은 running scan만 안전하게 실패 처리한다.
 - `DuplicateSupervisor`: gallery별 최신 verified complete artifact 하나만 읽고 hash cache를 artifact SHA/profile로 검증한다. 동시에 한 worker만 허용하며 취소는 worker join 뒤에만 재시작할 수 있다. progress event는 bounded 신호이고 snapshot이 canonical state다.
 - `artifact_store.rs`, `artifact_thumbnail.rs`와 global thumbnail coordinator: Review는 정확한 `entryId/sourcePage`로 root-bound local WebP의 byte length·SHA를 다시 검사하고 1024px 이하 preview를 전달한다. source URL이나 local path는 frontend에 노출하지 않는다.
@@ -103,7 +121,7 @@
 
 ### Milestone H — production UI·diagnostics·delivery polish
 
-- `SettingsDialog.tsx`: 실제 동작하는 단일 설정 화면만 남겼다. cache clear, 화면·네트워크 draft 기본값, 탐색 데이터 초기화를 별도 control로 제공하고 다운로드 DB/artifact/files 보존 범위를 명시한다.
+- `SettingsDialog.tsx`: 실제 동작하는 단일 설정 화면만 남겼다. cache clear, 화면·네트워크 draft 기본값, 탐색 데이터 초기화를 별도 control로 제공하고 다운로드 DB/artifact/files 보존 범위를 명시한다. dialog/layout 자체는 scroll하지 않고 content section 하나만 세로 scroll을 소유한다. 최하단 정보 영역은 package version·제작·project를 표시하고 GitHub feedback 주소 또는 경로·앨범·DB 내용이 없는 최소 진단 요약만 사용자 명령으로 clipboard에 복사한다.
 - `DetailWorkspace.tsx`: source page를 누르면 전역 `ThumbnailCoordinator`의 같은 `sourcePage` key를 critical priority로 다시 사용하는 확대 dialog가 열린다. Esc·닫기와 opener focus 복원, page count 변경 시 안전한 자동 닫기를 검증했다.
 - `ThumbnailProvider.tsx`, `main.tsx`, `SideRail.tsx`: production composition root가 thumbnail client를 반드시 주입하며 context의 fixture fallback을 제거했다. 패키지 앱은 `Hitomi live`, 명시적 browser review mode만 `Browser fixture`로 표시한다.
 - Settings·page preview dialog는 열기 trigger와 close button focus를 관리한다. 기존 Review·내부 Review·종료 dialog의 focus 복원, reduced motion, keyboard/accessible label 계약을 유지한다.
@@ -222,6 +240,7 @@
 - `auto-find:changed`만으로 후보 목록을 구성하지 말고 revisioned run event 뒤 `auto_find_snapshot`을 다시 읽을 수 있게 유지한다.
 - 새 Auto Find run을 메모리에만 만들거나 기존 running run과 병렬 시작하지 않는다. SQLite의 단일 running invariant와 supervisor gate를 함께 보존한다.
 - 작품 중복 hash cache는 artifact SHA-256과 HashProfile version이 모두 맞을 때만 재사용한다. threshold나 feature를 바꾸면 새 profile/algorithm version과 migration·golden test를 함께 추가한다.
+- 작품 중복 scan 완료·취소·실패 시 info log의 `duplicate scan stage_profile` event가 cache read, image read, bounded hash pipeline wall time, hash worker CPU time, hash-cache write, pair compare, candidate/progress/finish DB write를 각각 microsecond 단위로 기록한다. `bottleneck`은 실제 wall-time 구간 중 가장 큰 단계를 가리키며 `total_us`에는 supervisor/취소 확인 등 계측 밖 비용도 포함된다. cache miss image bytes는 단일 reader가 읽고 최대 4개의 CPU worker가 decode/hash하며, 결과와 SQLite write는 source page 순서로 단일화한다.
 - `duplicate:changed` event로 후보나 판정 이력을 구성하지 않는다. 서로 다른 run의 늦은 snapshot이 최신 run을 덮지 않도록 startedAt/revision/token 경계를 유지한다.
 - Review에 live `galleryPage`를 사용하지 않는다. 판정 evidence는 반드시 root-bound verified `artifactPage(entryId, sourcePage)`와 immutable source page 번호를 사용한다.
 - 내부 visual duplicate를 한 page match만으로 생성하지 않는다. 최소 2행 monotonic scene block, plan revision/byte snapshot과 page quarantine saga를 함께 유지한다.

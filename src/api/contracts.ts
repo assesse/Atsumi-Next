@@ -75,6 +75,8 @@ export type SettingsSnapshot = {
   cacheLimitGb: number;
   concurrentImageRequests: number;
   requestStartIntervalMs: number;
+  /** Persisted accordion sections for Auto Find and Downloads. */
+  collapsedGroupKeys: string[];
 };
 
 export type SettingsPatch = Partial<Omit<SettingsSnapshot, "revision">>;
@@ -261,6 +263,8 @@ export type DownloadChangedEvent = {
   errorCode?: string;
   errorMessage?: string;
   errorRetryable?: boolean;
+  reviewKind?: "gallery_duplicate" | "internal_pages";
+  reviewId?: string;
 };
 
 export type SearchRequest = {
@@ -520,6 +524,80 @@ export type DuplicateReview = {
   seriesGroups: SeriesGroup[];
 };
 
+export type DownloadOverlapRelation =
+  | "near_equivalent"
+  | "incoming_contains_existing"
+  | "existing_contains_incoming"
+  | "partial_overlap"
+  | "translation_edition";
+
+export type DownloadOverlapGalleryRef = {
+  entryId: string;
+  galleryId: GalleryId;
+  title: string;
+  artists: string[];
+  pageCount: number;
+};
+
+export type DownloadOverlapPagePair = {
+  incomingSourcePage: number;
+  existingSourcePage: number;
+  exactSha256: boolean;
+  dHashDistance: number;
+  pHashDistance: number;
+  detailHashDistance: number;
+  edgeSimilarity: number;
+  visualSimilarity: number;
+  lowInformation: boolean;
+};
+
+export type DownloadOverlapCandidate = {
+  candidateId: string;
+  existing: DownloadOverlapGalleryRef;
+  existingFingerprint: string;
+  relation: DownloadOverlapRelation;
+  confidence: number;
+  matchedPages: number;
+  exactPages: number;
+  visualPages: number;
+  existingCoverage: number;
+  incomingCoverage: number;
+  existingUniquePages: number;
+  incomingUniquePages: number;
+  longestAlignedRun: number;
+  rank: number;
+  decision?: "keep_both" | "false_positive";
+  pagePairs: DownloadOverlapPagePair[];
+};
+
+export type DownloadOverlapReview = {
+  reviewId: string;
+  entryId: string;
+  incoming: DownloadOverlapGalleryRef;
+  revision: number;
+  state: "pending" | "resolved" | "cancelled" | "stale";
+  profileVersion: number;
+  policyVersion: number;
+  incomingFingerprint: string;
+  candidates: DownloadOverlapCandidate[];
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+};
+
+export type DownloadOverlapDecisionRequest = {
+  reviewId: string;
+  expectedRevision: number;
+  action: "continue_keep_both" | "false_positive_continue" | "cancel_incoming";
+  candidateId?: string;
+};
+
+export type DownloadOverlapDecisionResult = {
+  review: DownloadOverlapReview;
+  resumed: boolean;
+  cancelled: boolean;
+};
+
 export type DuplicateSnapshot = {
   profile: HashProfile;
   run?: DuplicateScanRun;
@@ -696,6 +774,9 @@ export type DownloadEntry = {
   errorRetryable?: boolean;
   reviewKind?: "gallery_duplicate" | "internal_pages";
   reviewId?: string;
+  /** Creation and latest activity timestamps are used for Downloads daily grouping. */
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type DownloadListRequest = {

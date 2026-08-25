@@ -41,11 +41,15 @@ DB schema v24 working tree를 기준으로 작성했다. 이 문서는 구현되
 - 실제 downgrade가 필요하면 migration 직전 자동 backup을 보존하고, 앱을 종료한 상태에서 해당 backup과 호환 binary를 함께 복원한다. 운영 DB에 수동 `ALTER`/trigger 제거를 적용하지 않는다.
 - 기존 artifact path는 rollback에서도 자동 재명명하지 않는다. artifact/manifest 불일치는 시작 시 전체 검사하지 않고 사용자 명시 `app_reconcile`과 typed Review에서 확인한다. 원본과 격리 위치가 모호하면 overwrite/delete하지 않는다.
 - 강제 종료 뒤 모호한 final/`.part`가 발견되면 자동 반복 재개하지 않는다. 파일은 `.atsumi-recovery/conflicts`에 보존하고 항목은 `RECOVERY_CONFLICT` 실패로 표시한다. 과거 build가 만든 대상 없는 `review_required` 행은 startup recovery가 오류 증거를 유지한 채 `failed`로 한 번만 정규화하며, 정상적인 gallery/internal review 판정은 건드리지 않는다.
+- 다운로드 완료 전 판본 겹침 gate는 policy v1에서 **정규화 뒤 정확히 같은 작가 key**를 공유한 artifact만 차단 후보로 삼는다. 작가 alias·오탈자·서로 다른 로마자 표기는 자동 병합하지 않으므로 별도 표기는 놓칠 수 있다. 반대로 같은 작가의 비슷한 그림체만으로 멈추지 않도록 기존 analyzer와 높은 coverage/최소 page 수를 함께 요구한다.
+- 판본 검토는 자동 대체 기능이 아니다. `둘 다 보관`과 `오탐`은 artifact fingerprint·HashProfile 1·policy version에 묶여 같은 payload의 반복 경고를 줄일 뿐이고, 파일이 바뀌거나 새 same-artist candidate가 생기면 완료 직전 다시 검사한다. `새 다운로드 취소`도 기존 보유본과 검증 staging file을 자동 영구 삭제하지 않는다.
 - 탐색 데이터 초기화는 다운로드·artifact rollback 수단이 아니다. favorites/history/Auto Find 데이터만 제거하며 download DB와 파일은 그대로 둔다.
 
 ## 종료 상태 확인
 
 - 창 X와 tray 종료는 다운로드, Auto Find, 작품 중복 검사, 내부 중복 검사의 active work set을 backend에서 확인한다. tray 최소화와 복원은 이 작업들을 취소하지 않는다.
+- 작품 간 중복 검사는 계산량을 제한하기 위해 정규화된 전체 작가 목록이 하나라도 겹치는 완료 앨범만 비교한다. 작가 metadata가 누락됐거나 서로 다른 이름·별칭으로 저장된 동일 판본은 전역 검사에서 놓칠 수 있으므로, 다운로드 완료 직전 overlap gate와 사용자 Review를 함께 유지한다.
+- 작품 간 중복 scan은 UI thread 밖에서 실행한다. cache miss 파일은 단일 reader가 한 번씩 읽고 최대 4개 worker가 decode/hash하며, hash 결과·pair comparison·DB progress/candidate write는 결정적인 단일 순서로 합친다. 최초 scan의 주 비용은 보통 image decode/hash이고 warm HashProfile cache에서는 pair comparison 비중이 커진다. `duplicate scan stage_profile`로 실제 corpus 병목을 계속 확인하며, pair comparison 병렬화는 O(P×Q) 작업별 메모리를 함께 늘리므로 별도 성능 변경으로 검증해야 한다.
 - snapshot을 읽지 못하면 앱은 자동 종료하지 않는다. 다시 확인해도 실패한 뒤 사용자가 `상태 확인 없이 종료`를 별도로 선택할 수 있으며, 이 경우에도 기존 supervisor graceful cancel/join을 거친다.
 - 종료 dialog가 열린 사이 진행률만 변하는 것은 재확인 사유가 아니다. 새 작업이 시작되거나 기존 작업이 끝나 identity 집합이 달라지면 backend가 stale fingerprint를 거부하고 최신 상태를 다시 표시한다.
 - 검색, thumbnail, Floating Detail 원본처럼 짧고 재생성 가능한 요청은 종료 경고에 포함하지 않는다. 이 요청은 process 종료 시 보존·재개되는 장기 작업으로 표현하지 않는다.

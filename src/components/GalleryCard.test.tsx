@@ -200,6 +200,51 @@ describe("GalleryCard event projection", () => {
     container.remove();
   });
 
+  it("prioritizes a typed download-overlap review over the global duplicate count", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery: Gallery = {
+      ...mockGalleries[0]!,
+      download: {
+        entryId: "entry-overlap-review",
+        state: "review_required",
+        progress: 100,
+        reviewKind: "gallery_duplicate",
+        reviewId: "overlap-review-1",
+      },
+    };
+
+    await act(async () => root.render(
+      <GalleryCard
+        gallery={gallery}
+        view="downloads"
+        selected={false}
+        selectionContext={false}
+        favoriteMetadata={new Set()}
+        duplicateCandidateCount={3}
+        {...callbacks}
+      />,
+    ));
+
+    const article = container.querySelector<HTMLElement>("article");
+    const warning = container.querySelector<HTMLButtonElement>(".status-pill.is-review_required");
+    expect(warning).not.toBeNull();
+    expect(warning).not.toHaveClass("has-duplicate-count");
+    expect(warning).toHaveAccessibleName(expect.stringContaining("다운로드 판본 중복"));
+    expect(warning).not.toHaveTextContent("3");
+
+    await act(async () => warning?.click());
+    expect(callbacks.onOpenReview).toHaveBeenCalledWith(gallery.id);
+
+    callbacks.onOpenReview.mockClear();
+    await act(async () => article?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })));
+    expect(callbacks.onOpenReview).toHaveBeenCalledWith(gallery.id);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("keeps metadata search available for a singly selected card and reserves selection for modifiers", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -549,6 +594,30 @@ describe("GalleryCard event projection", () => {
     expect(indicator).toHaveAttribute("aria-hidden", "true");
     expect(indicator?.querySelector("svg path")).not.toBeNull();
     expect(article).toHaveAccessibleName(expect.stringContaining("선택됨"));
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("does not render a selection indicator for a singly selected card", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const gallery = mockGalleries[0]!;
+
+    await act(async () => root.render(
+      <GalleryCard
+        gallery={gallery}
+        view="explore"
+        selected
+        selectionContext={false}
+        favoriteMetadata={new Set()}
+        {...callbacks}
+      />,
+    ));
+
+    const article = container.querySelector("article");
+    expect(article).toHaveAccessibleName(expect.stringContaining("선택됨"));
+    expect(article?.querySelector(".selection-indicator")).toBeNull();
     await act(async () => root.unmount());
     container.remove();
   });

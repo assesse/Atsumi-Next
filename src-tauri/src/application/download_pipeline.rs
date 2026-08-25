@@ -7,7 +7,9 @@ use crate::{
     domain::{
         ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
         ArtifactStorageFormat, DownloadEntryId, DownloadJobDescriptor, DownloadJobProjection,
-        Gallery, GalleryId, JobRef, JobState, PageArtifact, SourcePageNumber,
+        DownloadOverlapCandidateIdentity, DownloadOverlapDecisionApplyOutcome,
+        DownloadOverlapDecisionRequest, DownloadOverlapReview, DownloadOverlapReviewDraft,
+        DuplicatePageHash, Gallery, GalleryId, JobRef, JobState, PageArtifact, SourcePageNumber,
     },
     source::{SourceCandidateDiagnostic, SourceContractError},
     thumbnail::CancellationToken,
@@ -371,6 +373,55 @@ pub trait DownloadPipelineRepository: Send + Sync {
     fn pipeline_pending_quarantine_sagas(&self) -> Result<Vec<QuarantineSaga>, RepositoryError>;
 }
 
+pub trait DownloadOverlapRepository: DownloadPipelineRepository {
+    fn overlap_candidate_identities(
+        &self,
+        incoming_entry_id: &DownloadEntryId,
+    ) -> Result<Vec<DownloadOverlapCandidateIdentity>, RepositoryError>;
+
+    fn overlap_page_hash_get(
+        &self,
+        entry_id: &str,
+        source_page_number: SourcePageNumber,
+        profile_version: u32,
+        artifact_sha256: &str,
+    ) -> Result<Option<DuplicatePageHash>, RepositoryError>;
+
+    fn overlap_page_hash_upsert(&self, hash: &DuplicatePageHash) -> Result<(), RepositoryError>;
+
+    fn overlap_pair_policy_exists(
+        &self,
+        incoming_fingerprint: &str,
+        existing_fingerprint: &str,
+        profile_version: u32,
+        policy_version: u32,
+    ) -> Result<bool, RepositoryError>;
+
+    fn overlap_review_pause(
+        &self,
+        descriptor: &DownloadJobDescriptor,
+        draft: &DownloadOverlapReviewDraft,
+    ) -> Result<DownloadJobProjection, RepositoryError>;
+
+    fn overlap_review_get(
+        &self,
+        review_id: &str,
+    ) -> Result<Option<DownloadOverlapReview>, RepositoryError>;
+
+    fn overlap_decision_apply(
+        &self,
+        request: &DownloadOverlapDecisionRequest,
+        verified_incoming_fingerprint: &str,
+        verified_existing_fingerprints: &[(String, String)],
+    ) -> Result<DownloadOverlapDecisionApplyOutcome, RepositoryError>;
+
+    fn overlap_review_requeue_stale(
+        &self,
+        review_id: &str,
+        expected_revision: u64,
+    ) -> Result<DownloadOverlapDecisionApplyOutcome, RepositoryError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReconcileIssue {
@@ -405,6 +456,7 @@ pub enum DownloadPipelineErrorCode {
     WorkerUnavailable,
     QuarantineConflict,
     DestinationOccupied,
+    OverlapCheckFailed,
 }
 
 impl DownloadPipelineErrorCode {
@@ -424,6 +476,7 @@ impl DownloadPipelineErrorCode {
             Self::WorkerUnavailable => "DOWNLOAD_WORKER_UNAVAILABLE",
             Self::QuarantineConflict => "QUARANTINE_CONFLICT",
             Self::DestinationOccupied => "ARTIFACT_DESTINATION_OCCUPIED",
+            Self::OverlapCheckFailed => "DOWNLOAD_OVERLAP_CHECK_FAILED",
         }
     }
 }

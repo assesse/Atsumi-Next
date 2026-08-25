@@ -1,19 +1,26 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
+    panic::{catch_unwind, AssertUnwindSafe},
     path::PathBuf,
-    sync::{mpsc::Sender, Arc, Mutex},
+    sync::{
+        mpsc::{self, Receiver, Sender, SyncSender},
+        Arc, Mutex,
+    },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use crate::{
     domain::{
-        ArtifactBundle, DuplicateDecisionApplyOutcome, DuplicateDecisionRequest, DuplicateReview,
-        DuplicateScanRun, DuplicateScanState, DuplicateSnapshot, ExternalRelationEvidence,
-        HashProfile,
+        ArtifactBundle, ArtifactSha256, DuplicateDecisionApplyOutcome, DuplicateDecisionRequest,
+        DuplicatePageHash, DuplicateReview, DuplicateScanRun, DuplicateScanState,
+        DuplicateSnapshot, ExternalRelationEvidence, GalleryId, HashProfile, SourcePageNumber,
     },
     thumbnail::CancellationToken,
 };
 
 use super::{
+    download_overlap::normalized_artist_keys,
     duplicate_analyzer::{
         analyze_artifact_pair, compute_page_hash, gallery_ref, verified_scan_pages, HashedArtifact,
     },
@@ -22,6 +29,7 @@ use super::{
 };
 
 const PAIR_PROGRESS_EVENT_INTERVAL: u64 = 64;
+const MAX_DUPLICATE_HASH_WORKERS: usize = 4;
 
 #[derive(Debug, Default)]
 pub struct DisabledDuplicateRelationProvider;
@@ -64,6 +72,7 @@ struct ActiveRun {
 pub(crate) struct PreparedDuplicateScan {
     root: PathBuf,
     bundles: Vec<ArtifactBundle>,
+    candidate_pairs: Vec<CandidatePair>,
     total_artifacts: u32,
     total_pairs: u64,
     profile: HashProfile,
@@ -155,11 +164,13 @@ impl DuplicateSupervisor {
             .store
             .validate_download_root(&PathBuf::from(settings.download_root))?;
         let bundles = select_scan_bundles(self.inner.repository.duplicate_artifact_bundles()?);
+        let (bundles, candidate_pairs) = same_artist_scan_plan(bundles);
         let total_artifacts = u32::try_from(bundles.len()).unwrap_or(u32::MAX);
-        let total_pairs = pair_count(bundles.len());
+        let total_pairs = u64::try_from(candidate_pairs.len()).unwrap_or(u64::MAX);
         Ok(PreparedDuplicateScan {
             root,
             bundles,
+            candidate_pairs,
             total_artifacts,
             total_pairs,
             profile: HashProfile::current(),
@@ -181,6 +192,7 @@ impl DuplicateSupervisor {
         let PreparedDuplicateScan {
             root,
             bundles,
+            candidate_pairs,
             total_artifacts,
             total_pairs,
             profile,
@@ -207,6 +219,7 @@ impl DuplicateSupervisor {
                     worker_run_id,
                     root,
                     bundles,
+                    candidate_pairs,
                     profile,
                     worker_cancellation,
                 );
@@ -338,10 +351,19 @@ fn run_scan(
     run_id: String,
     root: PathBuf,
     bundles: Vec<crate::domain::ArtifactBundle>,
+    candidate_pairs: Vec<CandidatePair>,
     profile: HashProfile,
     cancellation: CancellationToken,
 ) {
-    let result = scan_inner(&inner, &run_id, &root, &bundles, &profile, &cancellation);
+    let result = scan_inner(
+        &inner,
+        &run_id,
+        &root,
+        &bundles,
+        &candidate_pairs,
+        &profile,
+        &cancellation,
+    );
     if let Err(error) = result {
         if !cancellation.is_cancelled()
             && inner
@@ -366,122 +388,430 @@ fn scan_inner(
     run_id: &str,
     root: &std::path::Path,
     bundles: &[crate::domain::ArtifactBundle],
+    candidate_pairs: &[CandidatePair],
     profile: &HashProfile,
     cancellation: &CancellationToken,
 ) -> Result<(), RepositoryError> {
+    let hash_pool = DuplicateHashPool::new(profile)?;
+    let mut timing = DuplicateScanTiming::new(run_id, hash_pool.worker_count());
     let mut artifacts = Vec::with_capacity(bundles.len());
     for (artifact_index, bundle) in bundles.iter().enumerate() {
         if cancelled(inner, run_id, cancellation)? {
+            timing.finish("cancelled");
             return Ok(());
         }
         let pages = verified_scan_pages(bundle).ok_or_else(|| {
             RepositoryError::Corrupt("artifact lost its verified scan eligibility".into())
         })?;
         let mut hashes = Vec::with_capacity(pages.len());
+        let mut pending_hashes = 0_usize;
+        let mut hash_pipeline_started = None;
         for page in pages {
             if cancelled(inner, run_id, cancellation)? {
+                timing.finish("cancelled");
                 return Ok(());
             }
             let sha = page
                 .sha256
                 .as_ref()
                 .expect("verified_scan_pages guarantees SHA-256");
-            let hash = if let Some(hash) = inner.repository.duplicate_page_hash_get(
-                bundle.artifact.entry_id.as_str(),
-                page.page_id.source_page_number,
-                profile.profile_version,
-                sha.as_str(),
-            )? {
+            let cached = measure(&mut timing.hash_cache_read, || {
+                inner.repository.duplicate_page_hash_get(
+                    bundle.artifact.entry_id.as_str(),
+                    page.page_id.source_page_number,
+                    profile.profile_version,
+                    sha.as_str(),
+                )
+            })?;
+            let hash = if let Some(hash) = cached {
+                timing.hash_cache_hits = timing.hash_cache_hits.saturating_add(1);
                 hash
             } else {
-                let bytes = inner
-                    .store
-                    .read_verified_page_bytes(root, page)
-                    .map_err(|error| RepositoryError::Other(error.to_string()))?;
-                let hash = compute_page_hash(
-                    bundle.artifact.entry_id.as_str(),
-                    bundle.gallery.id,
-                    page.page_id.source_page_number,
-                    sha.clone(),
-                    &bytes,
-                    profile,
-                )?;
-                inner.repository.duplicate_page_hash_upsert(&hash)?;
-                hash
+                timing.hash_cache_misses = timing.hash_cache_misses.saturating_add(1);
+                hash_pipeline_started.get_or_insert_with(Instant::now);
+                let bytes = measure(&mut timing.image_read, || {
+                    inner
+                        .store
+                        .read_verified_page_bytes(root, page)
+                        .map_err(|error| RepositoryError::Other(error.to_string()))
+                })?;
+                timing.image_bytes_read = timing
+                    .image_bytes_read
+                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                hash_pool.submit(DuplicateHashJob {
+                    entry_id: bundle.artifact.entry_id.to_string(),
+                    gallery_id: bundle.gallery.id,
+                    source_page_number: page.page_id.source_page_number,
+                    artifact_sha256: sha.clone(),
+                    bytes,
+                })?;
+                pending_hashes = pending_hashes.saturating_add(1);
+                continue;
             };
             hashes.push(hash);
         }
+
+        let mut computed_hashes = Vec::with_capacity(pending_hashes);
+        for _ in 0..pending_hashes {
+            let completed = hash_pool.receive()?;
+            timing.hash_compute = timing.hash_compute.saturating_add(completed.elapsed);
+            let hash = completed.result?;
+            timing.pages_hashed = timing.pages_hashed.saturating_add(1);
+            computed_hashes.push(hash);
+        }
+        if let Some(started) = hash_pipeline_started {
+            timing.hash_pipeline_wall = timing.hash_pipeline_wall.saturating_add(started.elapsed());
+        }
+        computed_hashes.sort_by_key(|hash| hash.source_page_number);
+        for hash in &computed_hashes {
+            measure(&mut timing.hash_cache_write, || {
+                inner.repository.duplicate_page_hash_upsert(hash)
+            })?;
+        }
+        hashes.extend(computed_hashes);
         hashes.sort_by_key(|hash| hash.source_page_number);
         artifacts.push(HashedArtifact {
             gallery: gallery_ref(bundle, hashes.len() as u32),
             pages: hashes,
         });
-        if let Some(run) = inner.repository.duplicate_scan_progress(
-            run_id,
-            u32::try_from(artifact_index + 1).unwrap_or(u32::MAX),
-            0,
-        )? {
+        let progress = measure(&mut timing.progress_write, || {
+            inner.repository.duplicate_scan_progress(
+                run_id,
+                u32::try_from(artifact_index + 1).unwrap_or(u32::MAX),
+                0,
+            )
+        })?;
+        if let Some(run) = progress {
             let _ = inner.events.send(run);
         }
     }
 
     let mut compared_pairs = 0_u64;
-    for candidate_pair in candidate_pairs(&artifacts) {
+    for candidate_pair in candidate_pairs {
         let parent_index = candidate_pair.parent_index;
         let candidate_index = candidate_pair.candidate_index;
         if cancelled(inner, run_id, cancellation)? {
+            timing.finish("cancelled");
             return Ok(());
         }
         let parent = &artifacts[parent_index];
         let candidate = &artifacts[candidate_index];
-        let preliminary = analyze_artifact_pair(run_id, parent, candidate, profile, None);
-        if preliminary.is_some() || candidate_pair.metadata_affinity > 0 {
-            let external = if inner.relations.enabled() {
+        let preliminary = measure(&mut timing.hash_compare, || {
+            analyze_artifact_pair(run_id, parent, candidate, profile, None)
+        });
+        let external = if inner.relations.enabled() {
+            measure(&mut timing.relation_lookup, || {
                 inner
                     .relations
-                    .relation(parent.gallery.gallery_id, candidate.gallery.gallery_id)?
-            } else {
-                None
-            };
-            let record = if external.is_some() {
+                    .relation(parent.gallery.gallery_id, candidate.gallery.gallery_id)
+            })?
+        } else {
+            None
+        };
+        let record = if external.is_some() {
+            measure(&mut timing.hash_compare, || {
                 analyze_artifact_pair(run_id, parent, candidate, profile, external)
-            } else {
-                preliminary
-            };
-            if let Some(record) = record {
-                let _ = inner.repository.duplicate_candidate_replace(&record)?;
-            }
+            })
+        } else {
+            preliminary
+        };
+        if let Some(record) = record {
+            let _ = measure(&mut timing.candidate_write, || {
+                inner.repository.duplicate_candidate_replace(&record)
+            })?;
+            timing.candidates_written = timing.candidates_written.saturating_add(1);
         }
         compared_pairs += 1;
+        timing.pairs_compared = compared_pairs;
         if compared_pairs.is_multiple_of(PAIR_PROGRESS_EVENT_INTERVAL) {
-            if let Some(run) = inner.repository.duplicate_scan_progress(
-                run_id,
-                artifacts.len() as u32,
-                compared_pairs,
-            )? {
+            let progress = measure(&mut timing.progress_write, || {
+                inner.repository.duplicate_scan_progress(
+                    run_id,
+                    artifacts.len() as u32,
+                    compared_pairs,
+                )
+            })?;
+            if let Some(run) = progress {
                 let _ = inner.events.send(run);
             }
         }
     }
 
     if cancelled(inner, run_id, cancellation)? {
+        timing.finish("cancelled");
         return Ok(());
     }
-    if let Some(run) =
+    let progress = measure(&mut timing.progress_write, || {
         inner
             .repository
-            .duplicate_scan_progress(run_id, artifacts.len() as u32, compared_pairs)?
-    {
+            .duplicate_scan_progress(run_id, artifacts.len() as u32, compared_pairs)
+    })?;
+    if let Some(run) = progress {
         let _ = inner.events.send(run);
     }
-    if let Some(run) =
+    let finished = measure(&mut timing.finish_write, || {
         inner
             .repository
-            .duplicate_scan_finish(run_id, DuplicateScanState::Completed, None, None)?
-    {
+            .duplicate_scan_finish(run_id, DuplicateScanState::Completed, None, None)
+    })?;
+    if let Some(run) = finished {
         let _ = inner.events.send(run);
     }
+    timing.finish("completed");
     Ok(())
+}
+
+struct DuplicateHashJob {
+    entry_id: String,
+    gallery_id: GalleryId,
+    source_page_number: SourcePageNumber,
+    artifact_sha256: ArtifactSha256,
+    bytes: Vec<u8>,
+}
+
+struct DuplicateHashResult {
+    elapsed: Duration,
+    result: Result<DuplicatePageHash, RepositoryError>,
+}
+
+struct DuplicateHashPool {
+    sender: Option<SyncSender<DuplicateHashJob>>,
+    results: Receiver<DuplicateHashResult>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl DuplicateHashPool {
+    fn new(profile: &HashProfile) -> Result<Self, RepositoryError> {
+        let worker_count = duplicate_hash_worker_count();
+        let (sender, jobs) = mpsc::sync_channel::<DuplicateHashJob>(worker_count);
+        let jobs = Arc::new(Mutex::new(jobs));
+        let (result_sender, results) = mpsc::channel();
+        let profile = Arc::new(profile.clone());
+        let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(worker_count);
+
+        for ordinal in 0..worker_count {
+            let jobs = Arc::clone(&jobs);
+            let result_sender = result_sender.clone();
+            let profile = Arc::clone(&profile);
+            let worker = match thread::Builder::new()
+                .name(format!("atsumi-duplicate-hash-{}", ordinal + 1))
+                .spawn(move || loop {
+                    let job = match jobs.lock() {
+                        Ok(receiver) => receiver.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok(job) = job else {
+                        return;
+                    };
+                    let started = Instant::now();
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        compute_page_hash(
+                            &job.entry_id,
+                            job.gallery_id,
+                            job.source_page_number,
+                            job.artifact_sha256,
+                            &job.bytes,
+                            &profile,
+                        )
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(RepositoryError::Other(
+                            "managed page hash worker stopped unexpectedly".into(),
+                        ))
+                    });
+                    if result_sender
+                        .send(DuplicateHashResult {
+                            elapsed: started.elapsed(),
+                            result,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }) {
+                Ok(worker) => worker,
+                Err(error) => {
+                    drop(sender);
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
+                    return Err(RepositoryError::Other(format!(
+                        "could not start duplicate hash worker: {error}"
+                    )));
+                }
+            };
+            workers.push(worker);
+        }
+        drop(result_sender);
+
+        Ok(Self {
+            sender: Some(sender),
+            results,
+            workers,
+        })
+    }
+
+    fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    fn submit(&self, job: DuplicateHashJob) -> Result<(), RepositoryError> {
+        self.sender
+            .as_ref()
+            .ok_or_else(|| RepositoryError::Other("duplicate hash workers are closed".into()))?
+            .send(job)
+            .map_err(|_| RepositoryError::Other("duplicate hash worker stopped".into()))
+    }
+
+    fn receive(&self) -> Result<DuplicateHashResult, RepositoryError> {
+        self.results
+            .recv()
+            .map_err(|_| RepositoryError::Other("duplicate hash result was unavailable".into()))
+    }
+
+    fn shutdown(&mut self) {
+        self.sender.take();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for DuplicateHashPool {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn duplicate_hash_worker_count() -> usize {
+    thread::available_parallelism()
+        .map_or(1, usize::from)
+        .clamp(1, MAX_DUPLICATE_HASH_WORKERS)
+}
+
+fn measure<T>(total: &mut Duration, operation: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = operation();
+    *total = total.saturating_add(started.elapsed());
+    result
+}
+
+struct DuplicateScanTiming<'a> {
+    run_id: &'a str,
+    started: Instant,
+    hash_cache_read: Duration,
+    image_read: Duration,
+    hash_pipeline_wall: Duration,
+    hash_compute: Duration,
+    hash_cache_write: Duration,
+    hash_compare: Duration,
+    relation_lookup: Duration,
+    candidate_write: Duration,
+    progress_write: Duration,
+    finish_write: Duration,
+    hash_cache_hits: u64,
+    hash_cache_misses: u64,
+    image_bytes_read: u64,
+    pages_hashed: u64,
+    pairs_compared: u64,
+    candidates_written: u64,
+    hash_worker_count: usize,
+    logged: bool,
+}
+
+impl<'a> DuplicateScanTiming<'a> {
+    fn new(run_id: &'a str, hash_worker_count: usize) -> Self {
+        Self {
+            run_id,
+            started: Instant::now(),
+            hash_cache_read: Duration::ZERO,
+            image_read: Duration::ZERO,
+            hash_pipeline_wall: Duration::ZERO,
+            hash_compute: Duration::ZERO,
+            hash_cache_write: Duration::ZERO,
+            hash_compare: Duration::ZERO,
+            relation_lookup: Duration::ZERO,
+            candidate_write: Duration::ZERO,
+            progress_write: Duration::ZERO,
+            finish_write: Duration::ZERO,
+            hash_cache_hits: 0,
+            hash_cache_misses: 0,
+            image_bytes_read: 0,
+            pages_hashed: 0,
+            pairs_compared: 0,
+            candidates_written: 0,
+            hash_worker_count,
+            logged: false,
+        }
+    }
+
+    fn database_write_time(&self) -> Duration {
+        self.hash_cache_write
+            .saturating_add(self.candidate_write)
+            .saturating_add(self.progress_write)
+            .saturating_add(self.finish_write)
+    }
+
+    fn image_pipeline_time(&self) -> Duration {
+        self.hash_pipeline_wall
+    }
+
+    fn bottleneck(&self) -> &'static str {
+        [
+            ("image_load_and_hash", self.image_pipeline_time()),
+            ("hash_compare", self.hash_compare),
+            ("database_write", self.database_write_time()),
+            ("hash_cache_read", self.hash_cache_read),
+        ]
+        .into_iter()
+        .max_by_key(|(_, elapsed)| *elapsed)
+        .map_or("none", |(stage, _)| stage)
+    }
+
+    fn finish(&mut self, outcome: &'static str) {
+        self.log(outcome);
+        self.logged = true;
+    }
+
+    fn log(&self, outcome: &'static str) {
+        tracing::info!(
+            run_id = self.run_id,
+            outcome,
+            bottleneck = self.bottleneck(),
+            total_us = duration_micros(self.started.elapsed()),
+            hash_cache_read_us = duration_micros(self.hash_cache_read),
+            image_read_us = duration_micros(self.image_read),
+            hash_pipeline_wall_us = duration_micros(self.hash_pipeline_wall),
+            hash_compute_cpu_us = duration_micros(self.hash_compute),
+            hash_cache_write_us = duration_micros(self.hash_cache_write),
+            hash_compare_us = duration_micros(self.hash_compare),
+            relation_lookup_us = duration_micros(self.relation_lookup),
+            candidate_write_us = duration_micros(self.candidate_write),
+            progress_write_us = duration_micros(self.progress_write),
+            finish_write_us = duration_micros(self.finish_write),
+            database_write_us = duration_micros(self.database_write_time()),
+            hash_cache_hits = self.hash_cache_hits,
+            hash_cache_misses = self.hash_cache_misses,
+            image_bytes_read = self.image_bytes_read,
+            pages_hashed = self.pages_hashed,
+            pairs_compared = self.pairs_compared,
+            candidates_written = self.candidates_written,
+            hash_worker_count = self.hash_worker_count,
+            "duplicate scan stage_profile"
+        );
+    }
+}
+
+impl Drop for DuplicateScanTiming<'_> {
+    fn drop(&mut self) {
+        if !self.logged {
+            self.log("failed");
+        }
+    }
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 fn cancelled(
@@ -529,84 +859,60 @@ fn validate_decision_request(request: &DuplicateDecisionRequest) -> Result<(), A
     Ok(())
 }
 
-fn pair_count(artifacts: usize) -> u64 {
-    let artifacts = artifacts as u128;
-    u64::try_from(artifacts.saturating_mul(artifacts.saturating_sub(1)) / 2).unwrap_or(u64::MAX)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CandidatePair {
     parent_index: usize,
     candidate_index: usize,
-    metadata_affinity: u8,
 }
 
-/// Builds a deterministic candidate worklist from title/artist/group/page
-/// metadata.  It deliberately retains zero-affinity pairs as an exhaustive
-/// fallback: metadata only prioritizes expensive local evidence work and can
-/// never suppress a real visual duplicate.
-fn candidate_pairs(artifacts: &[HashedArtifact]) -> Vec<CandidatePair> {
-    let mut pairs = Vec::with_capacity(pair_count(artifacts.len()) as usize);
-    for parent_index in 0..artifacts.len() {
-        for candidate_index in (parent_index + 1)..artifacts.len() {
-            pairs.push(CandidatePair {
-                parent_index,
-                candidate_index,
-                metadata_affinity: metadata_affinity(
-                    &artifacts[parent_index].gallery,
-                    &artifacts[candidate_index].gallery,
-                ),
-            });
+/// Builds the complete deterministic worklist within each normalized artist
+/// bucket. Albums without a shared artist are never hashed or compared by the
+/// global duplicate scan. A set deduplicates pairs for multi-artist albums.
+fn same_artist_scan_plan(
+    bundles: Vec<crate::domain::ArtifactBundle>,
+) -> (Vec<crate::domain::ArtifactBundle>, Vec<CandidatePair>) {
+    let mut artist_buckets = BTreeMap::<String, Vec<usize>>::new();
+    for (bundle_index, bundle) in bundles.iter().enumerate() {
+        let mut artists = bundle.gallery.metadata.artists.clone();
+        if let Some(primary_artist) = bundle.gallery.metadata.primary_artist.as_ref() {
+            artists.push(primary_artist.clone());
+        }
+        for artist in normalized_artist_keys(&artists) {
+            artist_buckets.entry(artist).or_default().push(bundle_index);
         }
     }
-    pairs.sort_by_key(|pair| {
-        (
-            std::cmp::Reverse(pair.metadata_affinity),
-            pair.parent_index,
-            pair.candidate_index,
-        )
-    });
-    pairs
-}
 
-fn metadata_affinity(
-    left: &crate::domain::DuplicateGalleryRef,
-    right: &crate::domain::DuplicateGalleryRef,
-) -> u8 {
-    let same_group = normalized_optional_metadata(left.group.as_deref())
-        .zip(normalized_optional_metadata(right.group.as_deref()))
-        .is_some_and(|(left, right)| left == right);
-    let same_artist = normalized_optional_metadata(left.artist.as_deref())
-        .zip(normalized_optional_metadata(right.artist.as_deref()))
-        .is_some_and(|(left, right)| left == right);
-    let left_title = metadata_title_tokens(&left.title);
-    let right_title = metadata_title_tokens(&right.title);
-    let title_overlap = left_title
+    let mut original_pairs = BTreeSet::<(usize, usize)>::new();
+    for bucket in artist_buckets.values() {
+        for left_position in 0..bucket.len() {
+            for right_position in (left_position + 1)..bucket.len() {
+                original_pairs.insert((bucket[left_position], bucket[right_position]));
+            }
+        }
+    }
+
+    let participating_indices = original_pairs
         .iter()
-        .filter(|token| right_title.contains(*token))
-        .count();
-    let page_delta = left.page_count.abs_diff(right.page_count);
-    let similar_length = page_delta <= left.page_count.max(right.page_count).div_ceil(10).max(1);
-    u8::from(same_group) * 4
-        + u8::from(same_artist) * 3
-        + u8::try_from(title_overlap.min(3)).unwrap_or(3)
-        + u8::from(similar_length)
-}
-
-fn normalized_optional_metadata(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_lowercase)
-}
-
-fn metadata_title_tokens(value: &str) -> std::collections::BTreeSet<String> {
-    value
-        .split(|character: char| !character.is_alphanumeric())
-        .map(str::trim)
-        .filter(|token| token.chars().count() >= 2)
-        .map(str::to_lowercase)
-        .collect()
+        .flat_map(|(left, right)| [*left, *right])
+        .collect::<BTreeSet<_>>();
+    let index_map = participating_indices
+        .iter()
+        .enumerate()
+        .map(|(new_index, old_index)| (*old_index, new_index))
+        .collect::<BTreeMap<_, _>>();
+    let candidate_pairs = original_pairs
+        .into_iter()
+        .map(|(parent_index, candidate_index)| CandidatePair {
+            parent_index: index_map[&parent_index],
+            candidate_index: index_map[&candidate_index],
+        })
+        .collect();
+    let bundles = bundles
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, bundle)| participating_indices.contains(&index).then_some(bundle))
+        .collect();
+    (bundles, candidate_pairs)
 }
 
 fn select_scan_bundles(
@@ -646,7 +952,11 @@ fn short_id(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{mpsc, Arc};
+    use std::{
+        hint::black_box,
+        sync::{mpsc, Arc},
+        time::{Duration, Instant},
+    };
 
     use crate::application::{ArtifactStore, DuplicateRepository, StateRepository};
     use crate::domain::{
@@ -659,8 +969,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        candidate_pairs, select_scan_bundles, ActiveRun, DisabledDuplicateRelationProvider,
-        DuplicateSupervisor, HashedArtifact,
+        duplicate_hash_worker_count, same_artist_scan_plan, select_scan_bundles, ActiveRun,
+        DisabledDuplicateRelationProvider, DuplicateHashJob, DuplicateHashPool,
+        DuplicateScanTiming, DuplicateSupervisor, MAX_DUPLICATE_HASH_WORKERS,
     };
 
     fn bundle(
@@ -731,26 +1042,169 @@ mod tests {
     }
 
     #[test]
-    fn metadata_prioritizes_candidate_generation_without_dropping_fallback_pairs() {
-        let related_left = bundle(1, "entry-related-left", 1, "2026-08-15T00:00:00.000Z");
-        let mut related_right = bundle(2, "entry-related-right", 1, "2026-08-15T00:00:00.000Z");
-        related_right.gallery.metadata.title = related_left.gallery.metadata.title.clone();
-        related_right.gallery.metadata.primary_artist = Some("shared artist".into());
-        let mut related_left = related_left;
-        related_left.gallery.metadata.primary_artist = Some("Shared Artist".into());
-        let unrelated = bundle(3, "entry-unrelated", 1, "2026-08-15T00:00:00.000Z");
-        let artifacts = [related_left, unrelated, related_right]
-            .into_iter()
-            .map(|bundle| HashedArtifact {
-                gallery: crate::application::duplicate_analyzer::gallery_ref(&bundle, 1),
-                pages: Vec::new(),
+    fn candidate_generation_keeps_only_normalized_same_artist_pairs() {
+        let mut first = bundle(1, "entry-first", 1, "2026-08-15T00:00:00.000Z");
+        first.gallery.metadata.artists = vec!["Shared_Artist".into(), "Co Author".into()];
+        let mut second = bundle(2, "entry-second", 1, "2026-08-15T00:00:00.000Z");
+        second.gallery.metadata.artists = vec![" shared artist ".into()];
+        let mut third = bundle(3, "entry-third", 1, "2026-08-15T00:00:00.000Z");
+        third.gallery.metadata.artists = vec!["CO  AUTHOR".into()];
+        let mut unrelated = bundle(4, "entry-unrelated", 1, "2026-08-15T00:00:00.000Z");
+        unrelated.gallery.metadata.artists = vec!["Different Artist".into()];
+        let missing = bundle(5, "entry-missing", 1, "2026-08-15T00:00:00.000Z");
+
+        let (bundles, pairs) =
+            same_artist_scan_plan(vec![first, unrelated, second, missing, third]);
+
+        assert_eq!(
+            bundles
+                .iter()
+                .map(|bundle| bundle.gallery.id.get())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "unrelated and missing-artist artifacts must not be hashed",
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .map(|pair| (pair.parent_index, pair.candidate_index))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (0, 2)],
+            "multi-artist overlap is deduplicated and different artists are excluded",
+        );
+    }
+
+    #[test]
+    fn primary_artist_fallback_participates_in_same_artist_plan() {
+        let mut first = bundle(1, "entry-first", 1, "2026-08-15T00:00:00.000Z");
+        first.gallery.metadata.primary_artist = Some("Serein".into());
+        let mut second = bundle(2, "entry-second", 1, "2026-08-15T00:00:00.000Z");
+        second.gallery.metadata.primary_artist = Some("serein".into());
+
+        let (bundles, pairs) = same_artist_scan_plan(vec![first, second]);
+
+        assert_eq!(bundles.len(), 2);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!((pairs[0].parent_index, pairs[0].candidate_index), (0, 1));
+    }
+
+    #[test]
+    fn stage_profile_identifies_the_largest_measured_cost_without_counting_total_wall_time() {
+        let mut timing = DuplicateScanTiming::new("run-profile", 2);
+        timing.image_read = Duration::from_millis(4);
+        timing.hash_pipeline_wall = Duration::from_millis(11);
+        timing.hash_compute = Duration::from_millis(7);
+        timing.hash_compare = Duration::from_millis(19);
+        timing.hash_cache_write = Duration::from_millis(3);
+        timing.candidate_write = Duration::from_millis(2);
+        timing.progress_write = Duration::from_millis(1);
+
+        assert_eq!(timing.image_pipeline_time(), Duration::from_millis(11));
+        assert_eq!(timing.database_write_time(), Duration::from_millis(6));
+        assert_eq!(timing.bottleneck(), "hash_compare");
+        timing.finish("test");
+    }
+
+    #[test]
+    fn duplicate_hash_workers_are_bounded_and_preserve_page_identity() {
+        let worker_count = duplicate_hash_worker_count();
+        assert!((1..=MAX_DUPLICATE_HASH_WORKERS).contains(&worker_count));
+
+        let bytes = {
+            use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
+            let mut rgba = vec![0_u8; 64 * 96 * 4];
+            for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+                let value = (index % 251) as u8;
+                pixel.copy_from_slice(&[value, value.rotate_left(2), 255 - value, 255]);
+            }
+            let mut encoded = Vec::new();
+            PngEncoder::new(&mut encoded)
+                .write_image(&rgba, 64, 96, ExtendedColorType::Rgba8)
+                .unwrap();
+            encoded
+        };
+        let pool = DuplicateHashPool::new(&crate::domain::HashProfile::current()).unwrap();
+        for source_page in [4_u32, 1, 3, 2] {
+            pool.submit(DuplicateHashJob {
+                entry_id: "entry-parallel".into(),
+                gallery_id: GalleryId::new(7).unwrap(),
+                source_page_number: SourcePageNumber::new(source_page).unwrap(),
+                artifact_sha256: ArtifactSha256::new(format!("{source_page:064x}")).unwrap(),
+                bytes: bytes.clone(),
+            })
+            .unwrap();
+        }
+        let mut pages = (0..4)
+            .map(|_| {
+                pool.receive()
+                    .unwrap()
+                    .result
+                    .unwrap()
+                    .source_page_number
+                    .get()
             })
             .collect::<Vec<_>>();
+        pages.sort_unstable();
+        assert_eq!(pages, vec![1, 2, 3, 4]);
+    }
 
-        let pairs = candidate_pairs(&artifacts);
-        assert_eq!(pairs.len(), 3, "the exhaustive fallback keeps every pair");
-        assert_eq!((pairs[0].parent_index, pairs[0].candidate_index), (0, 2));
-        assert!(pairs[0].metadata_affinity > pairs[1].metadata_affinity);
+    #[test]
+    #[ignore = "manual local bounded hash-worker throughput profile"]
+    fn profile_bounded_duplicate_hash_workers() {
+        use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
+
+        const PAGE_COUNT: u32 = 96;
+        let mut rgba = vec![0_u8; 640 * 960 * 4];
+        for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+            let value = (index % 251) as u8;
+            pixel.copy_from_slice(&[value, value.rotate_left(2), 255 - value, 255]);
+        }
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&rgba, 640, 960, ExtendedColorType::Rgba8)
+            .unwrap();
+        let profile = crate::domain::HashProfile::current();
+
+        let sequential_started = Instant::now();
+        for source_page in 1..=PAGE_COUNT {
+            let hash = super::compute_page_hash(
+                "entry-sequential-profile",
+                GalleryId::new(1).unwrap(),
+                SourcePageNumber::new(source_page).unwrap(),
+                ArtifactSha256::new(format!("{source_page:064x}")).unwrap(),
+                &bytes,
+                &profile,
+            )
+            .unwrap();
+            black_box(hash);
+        }
+        let sequential = sequential_started.elapsed();
+
+        let pool = DuplicateHashPool::new(&profile).unwrap();
+        let parallel_started = Instant::now();
+        for source_page in 1..=PAGE_COUNT {
+            pool.submit(DuplicateHashJob {
+                entry_id: "entry-parallel-profile".into(),
+                gallery_id: GalleryId::new(2).unwrap(),
+                source_page_number: SourcePageNumber::new(source_page).unwrap(),
+                artifact_sha256: ArtifactSha256::new(format!("{source_page:064x}")).unwrap(),
+                bytes: bytes.clone(),
+            })
+            .unwrap();
+        }
+        for _ in 0..PAGE_COUNT {
+            black_box(pool.receive().unwrap().result.unwrap());
+        }
+        let parallel = parallel_started.elapsed();
+
+        eprintln!(
+            "duplicate bounded hash profile: pages={} workers={} sequential_us={} parallel_us={} speedup={:.2}",
+            PAGE_COUNT,
+            pool.worker_count(),
+            sequential.as_micros(),
+            parallel.as_micros(),
+            sequential.as_secs_f64() / parallel.as_secs_f64(),
+        );
     }
 
     #[test]

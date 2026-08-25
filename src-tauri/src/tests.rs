@@ -94,7 +94,7 @@ fn primary_group_migration_preserves_existing_gallery_rows() {
     let report = MigrationRunner::run(&mut connection).expect("apply v4 migration");
     assert_eq!(
         report.applied_versions,
-        vec![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+        vec![4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
     );
     let stored: (String, Option<String>) = connection
         .query_row(
@@ -176,7 +176,7 @@ fn lifecycle_migration_preserves_v6_download_graph_and_enables_cancelled() {
     let report = MigrationRunner::run(&mut connection).expect("apply lifecycle migration");
     assert_eq!(
         report.applied_versions,
-        vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+        vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
     );
     let lifecycle: (i64, String, Option<String>, i64) = connection
         .query_row(
@@ -284,7 +284,7 @@ fn visible_metadata_migration_defaults_existing_auto_find_candidates() {
     let report = MigrationRunner::run(&mut connection).expect("apply visible metadata migration");
     assert_eq!(
         report.applied_versions,
-        vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+        vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
     );
     let metadata: (String, String) = connection
         .query_row(
@@ -345,7 +345,10 @@ fn settings_constraint_migration_clamps_legacy_values() {
     let report = MigrationRunner::run(&mut connection).expect("upgrade legacy schema");
     assert_eq!(
         report.applied_versions,
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+        vec![
+            2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+            26
+        ]
     );
     let tightened: (i64, i64, i64, i64, i64, i64, i64) = connection
         .query_row(
@@ -393,7 +396,8 @@ fn default_settings_match_the_approved_foundation_values() {
             "cacheLimitGb": 10,
             "concurrentImageRequests": 5,
             "requestStartIntervalMs": 25,
-            "autoFindHistoryMode": "include_all_history"
+            "autoFindHistoryMode": "include_all_history",
+            "collapsedGroupKeys": []
         })
     );
 }
@@ -538,6 +542,7 @@ fn settings_validation_matches_the_approved_ui_ranges() {
         concurrent_image_requests: 30,
         request_start_interval_ms: 5_000,
         auto_find_history_mode: AutoFindHistoryMode::IncludeAllHistory,
+        collapsed_group_keys: Vec::new(),
     };
     assert!(limits.validate().is_ok());
     for width in [160, 190, 220, 250, 280, 320, 360] {
@@ -1641,7 +1646,7 @@ fn targetless_legacy_artifact_review_recovers_as_a_listable_failure() {
             r#"
                 UPDATE download_entries
                 SET state = 'review_required',
-                    review_kind = 'gallery_duplicate',
+                    review_kind = 'internal_pages',
                     review_id = 'candidate-preserved'
                 WHERE entry_id = ?1
             "#,
@@ -1703,7 +1708,7 @@ fn targetless_legacy_artifact_review_recovers_as_a_listable_failure() {
     assert_eq!(preserved.state, JobState::ReviewRequired);
     assert_eq!(
         preserved.review_kind,
-        Some(crate::domain::DownloadReviewKind::GalleryDuplicate)
+        Some(crate::domain::DownloadReviewKind::InternalPages)
     );
     assert_eq!(preserved.review_id.as_deref(), Some("candidate-preserved"));
     assert_eq!(
@@ -1808,6 +1813,8 @@ fn download_command_payloads_and_results_match_typescript_contracts() {
         error_retryable: None,
         review_kind: None,
         review_id: None,
+        created_at: None,
+        updated_at: None,
     };
     assert_eq!(
         serde_json::to_value(ApiResult::success(vec![entry]))

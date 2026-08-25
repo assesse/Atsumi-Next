@@ -78,6 +78,29 @@ describe("browser backend settings contract", () => {
     expect(restored).toMatchObject({ ok: true, data: { privacyMode: current.data.privacyMode } });
   });
 
+  it("persists normalized accordion keys for the next browser session", async () => {
+    const current = await backend.settingsGet();
+    if (!current.ok) throw new Error(current.error.message);
+    const updated = await backend.settingsUpdate({
+      collapsedGroupKeys: ["downloads\u001fday\u001f2026-08-25", "auto-find\u001fartist\u001fmizuno", "auto-find\u001fartist\u001fmizuno"],
+    }, current.data.revision);
+    expect(updated).toMatchObject({
+      ok: true,
+      data: {
+        collapsedGroupKeys: ["auto-find\u001fartist\u001fmizuno", "downloads\u001fday\u001f2026-08-25"],
+      },
+    });
+    if (!updated.ok) return;
+    expect(JSON.parse(window.localStorage.getItem("atsumi.browser.settings.v1") ?? "{}"))
+      .toMatchObject({ collapsedGroupKeys: updated.data.collapsedGroupKeys });
+
+    const restored = await backend.settingsUpdate(
+      { collapsedGroupKeys: current.data.collapsedGroupKeys },
+      updated.data.revision,
+    );
+    expect(restored.ok).toBe(true);
+  });
+
   it("rejects unsafe folder templates and requires the gallery id token", async () => {
     const current = await backend.settingsGet();
     if (!current.ok) throw new Error(current.error.message);
@@ -1140,5 +1163,48 @@ describe("browser backend active-work exit contract", () => {
       state.duplicateSnapshotState = saved.duplicate;
       state.internalSnapshotState = saved.internal;
     }
+  });
+
+  it("keeps browser download-overlap review fixtures terminal and revision checked", async () => {
+    const review = await backend.downloadOverlapReviewGet("browser-overlap-contract");
+    expect(review).toMatchObject({
+      ok: true,
+      data: {
+        reviewId: "browser-overlap-contract",
+        revision: 0,
+        state: "pending",
+        candidates: [
+          { relation: "near_equivalent" },
+          { relation: "incoming_contains_existing" },
+          { relation: "existing_contains_incoming" },
+          { relation: "partial_overlap" },
+        ],
+      },
+    });
+    if (!review.ok) return;
+    const firstCandidate = review.data.candidates[0];
+    if (!firstCandidate) throw new Error("browser overlap fixture must include candidates");
+    await expect(backend.downloadOverlapDecisionApply({
+      reviewId: review.data.reviewId,
+      expectedRevision: 99,
+      action: "continue_keep_both",
+    })).resolves.toMatchObject({ ok: false, error: { code: "REVISION_CONFLICT" } });
+    await expect(backend.downloadOverlapDecisionApply({
+      reviewId: review.data.reviewId,
+      expectedRevision: 0,
+      action: "false_positive_continue",
+      candidateId: firstCandidate.candidateId,
+    })).resolves.toMatchObject({
+      ok: true,
+      data: { resumed: false, cancelled: false, review: { revision: 1, state: "pending" } },
+    });
+    await expect(backend.downloadOverlapDecisionApply({
+      reviewId: review.data.reviewId,
+      expectedRevision: 1,
+      action: "continue_keep_both",
+    })).resolves.toMatchObject({
+      ok: true,
+      data: { resumed: true, cancelled: false, review: { state: "resolved" } },
+    });
   });
 });

@@ -2,7 +2,7 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
-use super::GalleryId;
+use super::{DownloadReviewKind, GalleryId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,6 +182,10 @@ pub struct DownloadChangedEvent {
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_kind: Option<DownloadReviewKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

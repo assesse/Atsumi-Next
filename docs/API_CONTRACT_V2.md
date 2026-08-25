@@ -55,6 +55,8 @@ type ApiError = {
 | `duplicate_scan_cancel` | 없음 | `DuplicateScanRun` | 실행 중 run에 한 번 적용 |
 | `duplicate_review_get` | `{ candidateId }` | `DuplicateReview` | 예 |
 | `duplicate_decision_apply` | `{ request: DuplicateDecisionRequest }` | `DuplicateReview` | candidate revision CAS |
+| `download_overlap_review_get` | `{ reviewId }` | `DownloadOverlapReview` | 완료 직전 일시 정지된 판본 겹침 근거 조회 |
+| `download_overlap_decision_apply` | `{ request: DownloadOverlapDecisionRequest }` | `DownloadOverlapDecisionResult` | review revision CAS, fingerprint 재검증 뒤 재개/취소 |
 | `internal_duplicate_snapshot` | 없음 | `InternalDuplicateSnapshot` | 예 |
 | `internal_duplicate_active_artifact` | 없음 | `InternalArtifactScanProgress \| null` | 실행 중인 artifact의 휘발성 진행 상태; DB·파일을 변경하지 않음 |
 | `internal_duplicate_scan_start` | `{ request: { entryIds: string[] } }` | `InternalScanRun` | 선택한 verified entry만 검사; 빈 배열 금지, 다른 선택 run은 `OPERATION_ACTIVE` |
@@ -282,7 +284,7 @@ type AutoFindExclusionResult = {
 - production source는 Nozomi gallery ID를 교집합·중복 제거·내림차순 정렬한 뒤 `id > oldestOwnedGalleryId`를 metadata 요청 전에 적용한다. cutoff 뒤에도 50,000개를 넘으면 50,000개만 처리하고 `candidate_limit_after_cutoff` truncation을 snapshot에 기록한다.
 - 후보는 SQLite에 run별로 저장한다. 어떤 상태든 `download_entries`에 존재하는 gallery와 `auto_find_exclusions`에 존재하는 gallery는 추가·조회에서 제외한다. 명시적 제외는 최대 200개 양의 ID와 1~500 bytes 이유를 받는다.
 - 진행 중 앱이 닫히면 run은 `cancelled/AUTO_FIND_APP_EXIT`, startup에서 남은 `running` run은 `failed/AUTO_FIND_INTERRUPTED`로 바꾼다. source 실패는 `failed/AUTO_FIND_SOURCE_FAILED`로 저장하며 사용자는 명시적 갱신을 다시 실행해 retry한다.
-- `auto-find:changed`는 run projection 갱신 신호다. 후보마다 event를 만들지 않고 시작, 작가별 진행, 최종 상태에서만 보내며 UI는 event 뒤 snapshot을 다시 읽는다. 이벤트가 유실되거나 앱이 재시작되면 `auto_find_snapshot`으로 최신 run과 후보를 복원한다. 화면의 전체/작가 그룹, 결과 문자열 검색과 언어 filter는 영속 후보에 대한 local projection이며 키 입력마다 원격 요청하지 않는다.
+- `auto-find:changed`는 run projection 갱신 신호다. 후보마다 event를 만들지 않고 시작, 작가별 진행, 최종 상태에서만 보내며 UI는 event 뒤 snapshot을 다시 읽는다. 이벤트가 유실되거나 앱이 재시작되면 `auto_find_snapshot`으로 최신 run과 후보를 복원한다. 화면의 전체/기간별/작가별 projection, 결과 문자열 검색과 언어 filter는 영속 후보에 대한 local projection이며 키 입력마다 원격 요청하지 않는다.
 - 현재 구현은 다운로드 이력, Auto Find 명시적 제외, 작품 숨김과 resolved duplicate decision·pair 제외 기록을 후보 조건에 함께 반영한다.
 
 ## DownloadEntry 상태
@@ -317,6 +319,10 @@ type DownloadState =
 ```
 
 `review_required`는 `reviewKind`와 `reviewId`를 가진다. 오류 문자열은 Review target을 결정하지 않는다.
+
+`reviewKind="gallery_duplicate"`가 다운로드 완료 전 판본 겹침 gate를 가리키면 `reviewId`는 `DownloadOverlapReview`를 식별한다. incoming은 모든 page file 검증과 SHA 계산을 끝냈지만 완료 manifest를 쓰기 전이며, `existing`은 같은 정규화 작가 key를 하나 이상 공유하는 verified owned artifact 또는 먼저 멈춘 same-artist staging artifact다. HashProfile 1과 전역 작품 중복 analyzer의 page evidence를 재사용하되 download policy version 1의 precision-first exact/contains/translation/partial 조건만 blocking한다.
+
+`DownloadOverlapDecisionRequest.action`은 `continue_keep_both | false_positive_continue | cancel_incoming`이다. `continue_keep_both`는 현재 미해결 후보 전체, `false_positive_continue`는 지정 후보 하나의 canonical artifact fingerprint pair에 승인 policy를 기록한다. 모든 후보가 처리되면 entry를 새 attempt로 queue하되 검증 page checkpoint를 재사용하고, 완료 직전에 최신 same-artist candidate set과 fingerprint를 다시 검사한다. `cancel_incoming`은 incoming만 취소하고 staging 증거를 보존한다. 어느 action도 기존 보유 artifact를 삭제·격리·이름 변경하지 않는다. revision 또는 fingerprint가 바뀌면 과거 근거로 완료하지 않고 stale review를 닫아 재검사한다.
 
 ### Queue 멱등성과 조회
 
@@ -374,10 +380,13 @@ type ThumbnailRequest = {
 
 ## 작품 중복 계약
 
+- `duplicate_scan_start`는 gallery별 최신 verified complete artifact의 **정규화된 전체 작가 목록**으로 역색인을 만들고 공통 작가 key가 하나 이상 있는 artifact pair만 작업 집합에 포함한다. 여러 작가 key를 공유해도 pair는 한 번만 생성한다. 작가가 없거나 같은 작가의 다른 완료 앨범이 없는 artifact는 hash 준비와 pair 비교를 생략하며 `totalArtifacts`, `totalPairs`는 이 실제 작업 집합을 보고한다.
+
 - `HashProfile` 1은 algorithm 1, detail dHash 1024 bits, pHash 64 bits, visual threshold 0.80과 low-information threshold를 고정한다. 기존 profile 결과를 새 버전으로 재해석하지 않는다.
-- scan은 `completed` artifact의 present·verified·non-excluded page만 읽고, gallery마다 완료 시각/revision이 가장 최신인 artifact 하나를 결정론적으로 선택한다. title/artist/group/page count metadata로 작업 순서를 정하되 전수 pair fallback을 유지한다.
+- scan은 `completed` artifact의 present·verified·non-excluded page만 읽고, gallery마다 완료 시각/revision이 가장 최신인 artifact 하나를 결정론적으로 선택한다. 정규화된 전체 작가 목록의 공통 key로 pair를 제한하며 서로 다른 작가 사이의 전수 fallback은 만들지 않는다.
 - 후보는 `exact | contains | partial | translation_visual`과 confidence, coverage, typed evidence 및 원본 source page pair를 가진다. one-to-one monotonic alignment이므로 한 page를 여러 상대 page에 재사용하지 않는다.
 - `duplicate_decision_apply` action은 `hide_parent | hide_candidate | series_link | series_unlink | exclude_pair`다. hide와 pair 제외는 후보를 resolve하고 Auto Find에서도 제외한다. series link는 양쪽 gallery를 같은 group에 원자적으로 연결하되 후보를 자동 resolve하지 않는다.
+- `contains` 후보의 두 page count가 다르면 Review는 더 긴 gallery를 `포괄 작품`, 완전히 포함된 짧은 gallery를 `귀속 작품`으로 표시한다. repository는 포괄 작품을 보존하고 귀속 작품만 hide 대상으로 허용한다. page count가 같거나 방향이 확정되지 않은 관계는 `작품 A/B` 양쪽 선택을 유지한다. series action의 저장/API 호환성은 유지하지만 현재 Review UI에서는 연작 분류 입력을 노출하지 않는다.
 - scan event는 신호일 뿐이며 후보·Review·판정 이력의 canonical source는 SQLite다. UI는 event 유실·재시작·revision 충돌 때 snapshot/get을 다시 읽는다.
 - Review page preview는 `{ kind: "artifactPage", entryId, sourcePage }` key로 같은 전역 thumbnail coordinator를 사용한다. backend는 root 내부의 검증된 local WebP만 읽고 1024px 이하 preview로 전달한다.
 - E-Hentai relation provider는 명시적으로 제공된 적법 session이 없으면 비활성이다. session·cookie를 SQLite, manifest, 로그에 저장하지 않는다.

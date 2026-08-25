@@ -54,6 +54,10 @@ export type Gallery = {
     attempt?: number;
     errorCode?: string;
     errorMessage?: string;
+    reviewKind?: "gallery_duplicate" | "internal_pages";
+    reviewId?: string;
+    createdAt?: string;
+    updatedAt?: string;
   };
 };
 
@@ -90,7 +94,7 @@ export type UiState = {
   search: Record<ViewId, SearchUi>;
   exploreSort: SearchSort;
   downloadsFilter: DownloadFilter;
-  grouping: Record<"auto-find" | "downloads", "all" | "artist">;
+  grouping: Record<"auto-find" | "downloads", "all" | "day" | "artist">;
   selection: SelectionState;
   detail: DetailState;
   overlays: {

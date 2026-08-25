@@ -170,4 +170,47 @@ describe("gallery API projection", () => {
 
     expect(merged.get(current.id)).toBe(current);
   });
+
+  it("retains the download timeline when a newer event omits immutable list metadata", () => {
+    const current = projectGallerySummary(summary(6));
+    const first = mergeDownloadEntries(new Map([[current.id, current]]), [{
+      entryId: "entry-timeline",
+      galleryId: current.id,
+      revision: 1,
+      state: "queued",
+      progress: 0,
+      createdAt: "2026-08-20T10:00:00Z",
+      updatedAt: "2026-08-20T10:00:00Z",
+    }]);
+    const second = mergeDownloadEntries(first, [{
+      entryId: "entry-timeline",
+      galleryId: current.id,
+      revision: 2,
+      state: "downloading",
+      progress: 40,
+    }]);
+
+    expect(second.get(current.id)?.download).toMatchObject({
+      createdAt: "2026-08-20T10:00:00Z",
+      updatedAt: "2026-08-20T10:00:00Z",
+    });
+  });
+
+  it("preserves the typed download overlap review identity from list hydration", () => {
+    const current = projectGallerySummary(summary(7));
+    const merged = mergeDownloadEntries(new Map([[current.id, current]]), [{
+      entryId: "entry-overlap",
+      galleryId: current.id,
+      revision: 3,
+      state: "review_required",
+      progress: 100,
+      reviewKind: "gallery_duplicate",
+      reviewId: "review-overlap",
+    }]);
+    expect(merged.get(current.id)?.download).toMatchObject({
+      state: "review_required",
+      reviewKind: "gallery_duplicate",
+      reviewId: "review-overlap",
+    });
+  });
 });

@@ -19,6 +19,9 @@ const matchesQuery = (gallery: Gallery, query: string): boolean => {
       return (gallery.characters ?? []).some((item) => item.toLocaleLowerCase().includes(metadataValue));
     }
     if (namespace === "language") return gallery.language.includes(value);
+    if (namespace === "tag") {
+      return gallery.tags.some((tag) => tag.toLocaleLowerCase().replace(/^tag:/, "").includes(value));
+    }
     return gallery.tags.some((tag) => tag.toLocaleLowerCase().includes(needle));
   }
 

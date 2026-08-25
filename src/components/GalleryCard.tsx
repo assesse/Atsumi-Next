@@ -128,22 +128,26 @@ function GalleryCardComponent({
         ? `비교 ${visibleInternalDuplicateProgress.comparedPairs}/${visibleInternalDuplicateProgress.totalPairs}`
         : "페이지 비교"
       : visibleInternalDuplicateProgress ? "결과 정리" : "";
-  const iconOnlyStatus = hasDuplicateCandidates || download?.state === "downloading" || download?.state === "review_required";
+  const isDownloadOverlapReview = download?.state === "review_required" && download.reviewKind === "gallery_duplicate";
+  const showsGlobalDuplicate = hasDuplicateCandidates && !isDownloadOverlapReview;
+  const iconOnlyStatus = showsGlobalDuplicate || download?.state === "downloading" || download?.state === "review_required";
   const cardStatusClass = download?.state === "completed"
     ? " is-complete"
     : download?.state === "downloading"
       ? " is-downloading"
-      : hasDuplicateCandidates || ["review_required", "interrupted", "failed", "quarantined", "cancelled"].includes(download?.state ?? "")
+      : showsGlobalDuplicate || ["review_required", "interrupted", "failed", "quarantined", "cancelled"].includes(download?.state ?? "")
         ? " has-problem"
         : "";
   const statusLabel = selectionContext
     ? `${gallery.title}만 선택`
-    : hasDuplicateCandidates
+    : isDownloadOverlapReview
+      ? `${gallery.title}, 다운로드 판본 중복, 검토 열기`
+    : showsGlobalDuplicate
       ? `${gallery.title}, 중복 후보 ${duplicateCandidateCount}개, 검토 열기`
     : download?.state === "downloading"
     ? `${gallery.title}, 다운로드 중 ${progress}%, 작업 상태 열기`
     : download?.state === "review_required"
-      ? `${gallery.title}, 중복 의심, 검토 열기`
+      ? `${gallery.title}, ${isDownloadOverlapReview ? "다운로드 판본 중복" : "중복 의심"}, 검토 열기`
       : download ? `${gallery.title}, ${workLabel[download.state]}, 작업 상태 열기` : "";
 
   const invalidateTagLayout = useCallback(() => {
@@ -216,7 +220,7 @@ function GalleryCardComponent({
   const openStatus = (event: MouseEvent<HTMLButtonElement>) => {
     if (selectFromInteractiveTarget(event)) return;
     event.stopPropagation();
-    if (hasDuplicateCandidates || download?.state === "review_required") onOpenReview(gallery.id);
+    if (showsGlobalDuplicate || download?.state === "review_required") onOpenReview(gallery.id);
     else onStatusDetail(gallery.id);
   };
 
@@ -265,15 +269,17 @@ function GalleryCardComponent({
         if ((event.target as Element).closest("button")) return;
         event.preventDefault();
         event.currentTarget.focus();
-        if (view === "downloads" && hasDuplicateCandidates) onOpenReview(gallery.id);
+        if (view === "downloads" && (hasDuplicateCandidates || isDownloadOverlapReview)) onOpenReview(gallery.id);
         else onOpenDetail(gallery.id);
       }}
     >
-      <span className="selection-indicator" aria-hidden="true">
-        <svg viewBox="0 0 16 16" focusable="false">
-          <path d="m3.5 8.1 2.8 2.8 6.2-6.2" />
-        </svg>
-      </span>
+      {selectionContext ? (
+        <span className="selection-indicator" aria-hidden="true">
+          <svg viewBox="0 0 16 16" focusable="false">
+            <path d="m3.5 8.1 2.8 2.8 6.2-6.2" />
+          </svg>
+        </span>
+      ) : null}
       <GalleryThumbnail
         className="cover"
         thumbnailKey={thumbnailKey}
@@ -297,15 +303,15 @@ function GalleryCardComponent({
             <GalleryStatusIcon kind="complete" />
           </span>
         ) : null}
-        {hasDuplicateCandidates || (download && !["completed", "quarantined"].includes(download.state)) ? (
+        {showsGlobalDuplicate || (download && !["completed", "quarantined"].includes(download.state)) ? (
           <button
             type="button"
-            className={`status-pill${statusClass}${iconOnlyStatus ? ` icon-only is-${hasDuplicateCandidates ? "review_required" : download?.state}` : ""}${hasDuplicateCandidates ? " has-duplicate-count" : ""}`}
-            title={selectionContext ? `${gallery.title}만 선택` : hasDuplicateCandidates ? `중복 후보 ${duplicateCandidateCount}개 · 클릭하여 검토` : download?.state === "downloading" ? `다운로드 중 · ${progress}%` : download?.state === "review_required" ? "중복 의심 · 클릭하여 검토" : download ? workLabel[download.state] : "작업 상태"}
+            className={`status-pill${statusClass}${iconOnlyStatus ? ` icon-only is-${showsGlobalDuplicate ? "review_required" : download?.state}` : ""}${showsGlobalDuplicate ? " has-duplicate-count" : ""}`}
+            title={selectionContext ? `${gallery.title}만 선택` : showsGlobalDuplicate ? `중복 후보 ${duplicateCandidateCount}개 · 클릭하여 검토` : download?.state === "downloading" ? `다운로드 중 · ${progress}%` : download?.state === "review_required" ? `${isDownloadOverlapReview ? "다운로드 판본 중복" : "중복 의심"} · 클릭하여 검토` : download ? workLabel[download.state] : "작업 상태"}
             aria-label={statusLabel}
             onClick={openStatus}
           >
-            {hasDuplicateCandidates ? (
+            {showsGlobalDuplicate ? (
               <><GalleryStatusIcon kind="warning" /><span className="duplicate-count">{duplicateCandidateCount}</span></>
             ) : download?.state === "downloading" ? (
               <GalleryStatusIcon kind="downloading" />

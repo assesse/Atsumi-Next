@@ -22,16 +22,18 @@ use crate::{
     },
     domain::{
         AutoFindExclusionResult, AutoFindRun, AutoFindSnapshot, DownloadChangedEvent,
-        DownloadEntry, DownloadListRequest, DownloadPage, DuplicateDecisionRequest,
-        DuplicateReview, DuplicateScanRun, DuplicateSnapshot, ExplorationDataResetRequest,
-        ExplorationDataResetResult, FavoriteKey, FavoriteMutationResult, FavoriteRecord,
-        GalleryDetail, GalleryPage, InternalArtifactScanProgress, InternalDuplicateReview,
-        InternalDuplicateSnapshot, InternalRemovalApplyRequest, InternalRemovalPlan,
-        InternalRemovalPlanRequest, InternalRemovalResult, InternalRemovalUndoRequest,
-        InternalScanRequest, InternalScanRun, JobRef, MaintenanceAction, MaintenancePreview,
-        MaintenanceResult, SearchHistoryEntry, SearchRequest, SearchSubmission, SettingsPatch,
-        SettingsSnapshot, TagCatalogStatus, TagSuggestion, TagSuggestionRequest, ValidationError,
-        WindowPlacement, WindowPlacementSnapshot,
+        DownloadEntry, DownloadListRequest, DownloadOverlapDecisionRequest,
+        DownloadOverlapDecisionResult, DownloadOverlapReview, DownloadPage,
+        DuplicateDecisionRequest, DuplicateReview, DuplicateScanRun, DuplicateSnapshot,
+        ExplorationDataResetRequest, ExplorationDataResetResult, FavoriteKey,
+        FavoriteMutationResult, FavoriteRecord, GalleryDetail, GalleryPage,
+        InternalArtifactScanProgress, InternalDuplicateReview, InternalDuplicateSnapshot,
+        InternalRemovalApplyRequest, InternalRemovalPlan, InternalRemovalPlanRequest,
+        InternalRemovalResult, InternalRemovalUndoRequest, InternalScanRequest, InternalScanRun,
+        JobRef, MaintenanceAction, MaintenancePreview, MaintenanceResult, SearchHistoryEntry,
+        SearchRequest, SearchSubmission, SettingsPatch, SettingsSnapshot, TagCatalogStatus,
+        TagSuggestion, TagSuggestionRequest, ValidationError, WindowPlacement,
+        WindowPlacementSnapshot,
     },
     infrastructure::HitomiLiveAdapter,
     thumbnail::{
@@ -751,6 +753,36 @@ pub async fn duplicate_decision_apply(
     )
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub async fn download_overlap_review_get(
+    state: State<'_, AppState>,
+    review_id: String,
+) -> Result<ApiResult<DownloadOverlapReview>, ApiError> {
+    let downloads = state.downloads.clone();
+    Ok(
+        run_application_blocking("download_overlap_review_get", move || {
+            downloads
+                .overlap_review_get(&review_id)?
+                .ok_or(ApplicationError::DownloadOverlapReviewNotFound(review_id))
+        })
+        .await,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn download_overlap_decision_apply(
+    state: State<'_, AppState>,
+    request: DownloadOverlapDecisionRequest,
+) -> Result<ApiResult<DownloadOverlapDecisionResult>, ApiError> {
+    let downloads = state.downloads.clone();
+    Ok(
+        run_application_blocking("download_overlap_decision_apply", move || {
+            downloads.overlap_decision_apply(request)
+        })
+        .await,
+    )
+}
+
 #[tauri::command]
 pub async fn internal_duplicate_snapshot(
     state: State<'_, AppState>,
@@ -1068,6 +1100,8 @@ pub async fn download_cancel(
                     attempt: entry.attempt,
                     error_code: entry.error_code.clone(),
                     error_message: entry.error_message.clone(),
+                    review_kind: entry.review_kind,
+                    review_id: entry.review_id.clone(),
                 };
                 if let Err(error) = app.emit("download:changed", event) {
                     tracing::warn!(

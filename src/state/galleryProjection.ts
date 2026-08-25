@@ -157,6 +157,10 @@ export function mergeDownloadEntries(
         ...(entry.attempt !== undefined ? { attempt: entry.attempt } : {}),
         ...(entry.errorCode !== undefined ? { errorCode: entry.errorCode } : {}),
         ...(entry.errorMessage !== undefined ? { errorMessage: entry.errorMessage } : {}),
+        ...(entry.reviewKind !== undefined ? { reviewKind: entry.reviewKind } : {}),
+        ...(entry.reviewId !== undefined ? { reviewId: entry.reviewId } : {}),
+        ...(entry.createdAt !== undefined ? { createdAt: entry.createdAt } : current.download?.createdAt !== undefined ? { createdAt: current.download.createdAt } : {}),
+        ...(entry.updatedAt !== undefined ? { updatedAt: entry.updatedAt } : current.download?.updatedAt !== undefined ? { updatedAt: current.download.updatedAt } : {}),
       },
     });
   }

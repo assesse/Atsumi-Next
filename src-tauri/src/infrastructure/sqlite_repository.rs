@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
@@ -14,10 +15,11 @@ use uuid::Uuid;
 use crate::{
     application::{
         ArtifactRepository, AutomationRepository, DownloadArtifactPlan, DownloadCheckpoint,
-        DownloadMutationOutcome, DownloadPageAttempt, DownloadPageAttemptResult,
-        DownloadPipelineRepository, DownloadPrepared, DownloadQueueAddOutcome, DownloadQueueRecord,
-        DownloadRepository, DuplicateRepository, QuarantineSaga, QuarantineSagaState,
-        RepositoryError, StateRepository, StoredPage, TagCatalogRepository,
+        DownloadMutationOutcome, DownloadOverlapRepository, DownloadPageAttempt,
+        DownloadPageAttemptResult, DownloadPipelineRepository, DownloadPrepared,
+        DownloadQueueAddOutcome, DownloadQueueRecord, DownloadRepository, DuplicateRepository,
+        QuarantineSaga, QuarantineSagaState, RepositoryError, StateRepository, StoredPage,
+        TagCatalogRepository,
     },
     domain::{
         ArtifactBundle, ArtifactManifest, ArtifactRelativePath, ArtifactSha256,
@@ -25,17 +27,23 @@ use crate::{
         AutoFindExclusionResult, AutoFindHistoryMode, AutoFindRun, AutoFindRunState,
         AutoFindSnapshot, AutoFindTruncation, DownloadArtifact, DownloadArtifactState,
         DownloadChangedEvent, DownloadEntry, DownloadEntryId, DownloadJobDescriptor,
-        DownloadJobProjection, DownloadListRequest, DownloadPage, DownloadReviewKind,
-        DuplicateCandidate, DuplicateCandidateRecord, DuplicateDecisionAction,
-        DuplicateDecisionApplyOutcome, DuplicateDecisionHistory, DuplicateDecisionRequest,
-        DuplicateEvidence, DuplicateEvidenceKind, DuplicateGalleryRef, DuplicatePageHash,
-        DuplicatePagePair, DuplicateRelation, DuplicateReview, DuplicateScanRun,
+        DownloadJobProjection, DownloadListRequest, DownloadOverlapCandidate,
+        DownloadOverlapCandidateIdentity, DownloadOverlapDecisionAction,
+        DownloadOverlapDecisionApplied, DownloadOverlapDecisionApplyOutcome,
+        DownloadOverlapDecisionRequest, DownloadOverlapDecisionResult, DownloadOverlapGalleryRef,
+        DownloadOverlapPagePair, DownloadOverlapPairDecision, DownloadOverlapRelation,
+        DownloadOverlapReview, DownloadOverlapReviewDraft, DownloadOverlapReviewState,
+        DownloadPage, DownloadReviewKind, DuplicateCandidate, DuplicateCandidateRecord,
+        DuplicateDecisionAction, DuplicateDecisionApplyOutcome, DuplicateDecisionHistory,
+        DuplicateDecisionRequest, DuplicateEvidence, DuplicateEvidenceKind, DuplicateGalleryRef,
+        DuplicatePageHash, DuplicatePagePair, DuplicateRelation, DuplicateReview, DuplicateScanRun,
         DuplicateScanState, DuplicateSnapshot, ExplorationDataResetResult, FavoriteKey,
         FavoriteMutationResult, FavoriteNamespace, FavoriteRecord, FixtureDownloadJobStep, Gallery,
         GalleryId, GalleryMetadata, GallerySummary, HashProfile, JobEvent, JobRef, JobState,
         Language, PageArtifact, PageArtifactState, SearchHistoryEntry, SearchRequest, SearchSort,
         SeriesGroup, SettingsSnapshot, SourcePageNumber, TagCatalogEntry, TagCatalogStatus,
         TagNamespace, TagSuggestion, TagSuggestionRequest, WindowPlacementSnapshot,
+        DOWNLOAD_OVERLAP_MAX_STORED_PAGE_PAIRS,
     },
 };
 
@@ -262,8 +270,9 @@ impl StateRepository for SqliteRepository {
                         concurrent_image_requests = ?8,
                         request_start_interval_ms = ?9,
                         auto_find_history_mode = ?10,
-                        privacy_mode = ?11
-                    WHERE singleton = 1 AND revision = ?12
+                        privacy_mode = ?11,
+                        collapsed_group_keys_json = ?12
+                    WHERE singleton = 1 AND revision = ?13
                 "#,
                 params![
                     to_sql_integer(next.revision, "settings revision")?,
@@ -277,6 +286,7 @@ impl StateRepository for SqliteRepository {
                     to_sql_integer(next.request_start_interval_ms, "request start interval")?,
                     next.auto_find_history_mode.as_str(),
                     next.privacy_mode,
+                    serde_json::to_string(&next.collapsed_group_keys).map_err(domain_corruption)?,
                     to_sql_integer(expected_revision, "expected settings revision")?,
                 ],
             )
@@ -1126,7 +1136,7 @@ impl DownloadRepository for SqliteRepository {
                         d.entry_id, d.gallery_id, d.revision, d.state, d.progress,
                         d.review_kind, d.review_id,
                         j.attempt, j.last_error_code, j.last_error_message,
-                        j.last_error_retryable
+                        j.last_error_retryable, d.created_at, d.updated_at
                     FROM download_entries d
                     JOIN download_jobs j
                       ON j.entry_id = d.entry_id AND j.gallery_id = d.gallery_id
@@ -1630,6 +1640,8 @@ impl DownloadRepository for SqliteRepository {
                 attempt: Some(worker_attempt),
                 error_code: last_error_code.map(str::to_owned),
                 error_message: last_error_message.map(str::to_owned),
+                review_kind: None,
+                review_id: None,
             },
         })
     }
@@ -2076,6 +2088,21 @@ impl DownloadPipelineRepository for SqliteRepository {
                 ],
             )
             .map_err(map_sqlite_error)?;
+
+        transaction
+            .execute(
+                "DELETE FROM owned_gallery_artists WHERE gallery_id = ?1",
+                [plan.gallery.id.get()],
+            )
+            .map_err(map_sqlite_error)?;
+        for artist in &plan.gallery.metadata.artists {
+            transaction
+                .execute(
+                    "INSERT INTO owned_gallery_artists (gallery_id, artist) VALUES (?1, ?2)",
+                    params![plan.gallery.id.get(), artist],
+                )
+                .map_err(map_sqlite_error)?;
+        }
 
         let previous_artifact = transaction
             .query_row(
@@ -3226,6 +3253,578 @@ impl DownloadPipelineRepository for SqliteRepository {
             });
         }
         Ok(sagas)
+    }
+}
+
+impl DownloadOverlapRepository for SqliteRepository {
+    fn overlap_candidate_identities(
+        &self,
+        incoming_entry_id: &DownloadEntryId,
+    ) -> Result<Vec<DownloadOverlapCandidateIdentity>, RepositoryError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                r#"
+                    SELECT entry.entry_id, entry.gallery_id
+                    FROM download_entries entry
+                    JOIN download_artifacts artifact
+                      ON artifact.entry_id = entry.entry_id
+                     AND artifact.gallery_id = entry.gallery_id
+                    WHERE entry.entry_id != ?1
+                      AND (
+                        (
+                          entry.state = 'completed'
+                          AND artifact.state = 'complete'
+                          AND artifact.manifest_relative_path IS NOT NULL
+                          AND artifact.manifest_schema_version IS NOT NULL
+                          AND artifact.writer_version IS NOT NULL
+                          AND artifact.completed_at IS NOT NULL
+                        )
+                        OR (
+                          entry.state = 'review_required'
+                          AND entry.review_kind = 'gallery_duplicate'
+                          AND artifact.state = 'incomplete'
+                        )
+                      )
+                      AND (
+                        SELECT COUNT(*) FROM download_pages page
+                        WHERE page.entry_id = artifact.entry_id
+                      ) = artifact.expected_page_count
+                      AND NOT EXISTS (
+                        SELECT 1 FROM download_pages page
+                        WHERE page.entry_id = artifact.entry_id
+                          AND (
+                            page.excluded != 0
+                            OR page.state != 'present'
+                            OR page.byte_length IS NULL
+                            OR page.sha256 IS NULL
+                            OR page.storage_format IS NULL
+                            OR page.source_revision IS NULL
+                            OR page.verified_at IS NULL
+                          )
+                      )
+                    ORDER BY entry.entry_id ASC
+                "#,
+            )
+            .map_err(map_sqlite_error)?;
+        let rows = statement
+            .query_map([incoming_entry_id.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(map_sqlite_error)?;
+        let mut stored = Vec::new();
+        for row in rows {
+            stored.push(row.map_err(map_sqlite_error)?);
+        }
+        drop(statement);
+        let mut result = Vec::with_capacity(stored.len());
+        for (entry_id, gallery_id) in stored {
+            let gallery_id = GalleryId::new(gallery_id).map_err(domain_corruption)?;
+            result.push(DownloadOverlapCandidateIdentity {
+                entry_id: DownloadEntryId::new(entry_id).map_err(domain_corruption)?,
+                artists: read_owned_gallery_artists(&connection, gallery_id)?,
+            });
+        }
+        Ok(result)
+    }
+
+    fn overlap_page_hash_get(
+        &self,
+        entry_id: &str,
+        source_page_number: SourcePageNumber,
+        profile_version: u32,
+        artifact_sha256: &str,
+    ) -> Result<Option<DuplicatePageHash>, RepositoryError> {
+        <Self as DuplicateRepository>::duplicate_page_hash_get(
+            self,
+            entry_id,
+            source_page_number,
+            profile_version,
+            artifact_sha256,
+        )
+    }
+
+    fn overlap_page_hash_upsert(&self, hash: &DuplicatePageHash) -> Result<(), RepositoryError> {
+        <Self as DuplicateRepository>::duplicate_page_hash_upsert(self, hash)
+    }
+
+    fn overlap_pair_policy_exists(
+        &self,
+        incoming_fingerprint: &str,
+        existing_fingerprint: &str,
+        profile_version: u32,
+        policy_version: u32,
+    ) -> Result<bool, RepositoryError> {
+        let (left, right) =
+            canonical_overlap_fingerprints(incoming_fingerprint, existing_fingerprint)?;
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                r#"
+                    SELECT EXISTS (
+                        SELECT 1 FROM download_overlap_pair_policies
+                        WHERE left_fingerprint = ?1 AND right_fingerprint = ?2
+                          AND profile_version = ?3 AND policy_version = ?4
+                    )
+                "#,
+                params![
+                    left,
+                    right,
+                    i64::from(profile_version),
+                    i64::from(policy_version)
+                ],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite_error)
+    }
+
+    fn overlap_review_pause(
+        &self,
+        descriptor: &DownloadJobDescriptor,
+        draft: &DownloadOverlapReviewDraft,
+    ) -> Result<DownloadJobProjection, RepositoryError> {
+        if draft.entry_id.as_str() != descriptor.entry_id
+            || draft.incoming.entry_id != descriptor.entry_id
+            || draft.incoming.gallery_id != descriptor.gallery_id
+            || draft.candidates.is_empty()
+            || draft.incoming_fingerprint.len() != 64
+        {
+            return Err(RepositoryError::Other(
+                "download overlap review draft does not match its pipeline target".into(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let target = read_pipeline_target(&transaction, descriptor)?;
+        if target.state != JobState::Hashing {
+            return Err(invalid_pipeline_state(&target, "pause for overlap review"));
+        }
+        transaction
+            .execute(
+                r#"
+                    INSERT INTO download_overlap_reviews (
+                        review_id, entry_id, incoming_gallery_id, revision, state,
+                        profile_version, policy_version, incoming_fingerprint,
+                        created_at, updated_at
+                    ) VALUES (
+                        ?1, ?2, ?3, 0, 'pending', ?4, ?5, ?6,
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    )
+                "#,
+                params![
+                    draft.review_id,
+                    draft.entry_id.as_str(),
+                    draft.incoming.gallery_id.get(),
+                    i64::from(draft.profile_version),
+                    i64::from(draft.policy_version),
+                    draft.incoming_fingerprint,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        for candidate in &draft.candidates {
+            if candidate.rank == 0
+                || candidate.existing_fingerprint.len() != 64
+                || candidate.page_pairs.is_empty()
+            {
+                return Err(RepositoryError::Other(
+                    "download overlap candidate evidence is incomplete".into(),
+                ));
+            }
+            transaction
+                .execute(
+                    r#"
+                        INSERT INTO download_overlap_candidates (
+                            candidate_id, review_id, existing_entry_id,
+                            existing_gallery_id, existing_fingerprint, relation,
+                            confidence, matched_pages, exact_pages, visual_pages,
+                            existing_coverage, incoming_coverage,
+                            existing_unique_pages, incoming_unique_pages,
+                            longest_aligned_run, rank, decision
+                        ) VALUES (
+                            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                            ?11, ?12, ?13, ?14, ?15, ?16, NULL
+                        )
+                    "#,
+                    params![
+                        candidate.candidate_id,
+                        draft.review_id,
+                        candidate.existing.entry_id,
+                        candidate.existing.gallery_id.get(),
+                        candidate.existing_fingerprint,
+                        candidate.relation.as_str(),
+                        candidate.confidence,
+                        i64::from(candidate.matched_pages),
+                        i64::from(candidate.exact_pages),
+                        i64::from(candidate.visual_pages),
+                        candidate.existing_coverage,
+                        candidate.incoming_coverage,
+                        i64::from(candidate.existing_unique_pages),
+                        i64::from(candidate.incoming_unique_pages),
+                        i64::from(candidate.longest_aligned_run),
+                        i64::from(candidate.rank),
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
+            for (index, pair) in candidate
+                .page_pairs
+                .iter()
+                .take(DOWNLOAD_OVERLAP_MAX_STORED_PAGE_PAIRS)
+                .enumerate()
+            {
+                transaction
+                    .execute(
+                        r#"
+                            INSERT INTO download_overlap_page_pairs (
+                                candidate_id, pair_index, incoming_source_page,
+                                existing_source_page, exact_sha256,
+                                d_hash_distance, p_hash_distance, detail_hash_distance,
+                                edge_similarity, visual_similarity, low_information
+                            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                        "#,
+                        params![
+                            candidate.candidate_id,
+                            to_sql_integer(index as u64, "overlap pair index")?,
+                            i64::from(pair.incoming_source_page),
+                            i64::from(pair.existing_source_page),
+                            i64::from(u8::from(pair.exact_sha256)),
+                            i64::from(pair.d_hash_distance),
+                            i64::from(pair.p_hash_distance),
+                            i64::from(pair.detail_hash_distance),
+                            pair.edge_similarity,
+                            pair.visual_similarity,
+                            i64::from(u8::from(pair.low_information)),
+                        ],
+                    )
+                    .map_err(map_sqlite_error)?;
+            }
+        }
+        let mut projection = transition_pipeline_target(
+            &transaction,
+            target,
+            JobState::ReviewRequired,
+            None,
+            None,
+            None,
+            None,
+            "Download paused for edition overlap review",
+        )?;
+        let review_target_changed = transaction
+            .execute(
+                r#"
+                    UPDATE download_entries
+                    SET review_kind = 'gallery_duplicate', review_id = ?1
+                    WHERE entry_id = ?2 AND state = 'review_required'
+                "#,
+                params![draft.review_id, draft.entry_id.as_str()],
+            )
+            .map_err(map_sqlite_error)?;
+        if review_target_changed != 1 {
+            return Err(RepositoryError::Other(
+                "download overlap review target changed concurrently".into(),
+            ));
+        }
+        projection.download.review_kind = Some(DownloadReviewKind::GalleryDuplicate);
+        projection.download.review_id = Some(draft.review_id.clone());
+        transaction
+            .execute(
+                r#"
+                    UPDATE download_attempts
+                    SET finished_at = COALESCE(
+                            finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        ),
+                        outcome_state = 'review_required',
+                        error_code = NULL, error_message = NULL
+                    WHERE job_id = ?1 AND attempt = ?2
+                "#,
+                params![
+                    descriptor.job_id,
+                    to_sql_integer(descriptor.worker_attempt, "download attempt")?,
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        transaction.commit().map_err(map_sqlite_error)?;
+        Ok(projection)
+    }
+
+    fn overlap_review_get(
+        &self,
+        review_id: &str,
+    ) -> Result<Option<DownloadOverlapReview>, RepositoryError> {
+        let connection = self.connection()?;
+        read_download_overlap_review(&connection, review_id)
+    }
+
+    fn overlap_decision_apply(
+        &self,
+        request: &DownloadOverlapDecisionRequest,
+        verified_incoming_fingerprint: &str,
+        verified_existing_fingerprints: &[(String, String)],
+    ) -> Result<DownloadOverlapDecisionApplyOutcome, RepositoryError> {
+        let verified_existing = verified_existing_fingerprints
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
+        let (projection, resume, resumed, cancelled) = {
+            let mut connection = self.connection()?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(map_sqlite_error)?;
+            let stored = transaction
+                .query_row(
+                    r#"
+                        SELECT entry_id, revision, state, incoming_fingerprint,
+                               profile_version, policy_version
+                        FROM download_overlap_reviews WHERE review_id = ?1
+                    "#,
+                    [request.review_id.as_str()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(map_sqlite_error)?;
+            let Some((entry_id, revision, state, incoming_fingerprint, profile, policy)) = stored
+            else {
+                return Ok(DownloadOverlapDecisionApplyOutcome::ReviewNotFound);
+            };
+            let actual_revision = stored_u64(revision, "download overlap review revision")?;
+            if actual_revision != request.expected_revision {
+                return Ok(DownloadOverlapDecisionApplyOutcome::RevisionConflict {
+                    actual_revision,
+                });
+            }
+            if state != "pending" {
+                return Ok(DownloadOverlapDecisionApplyOutcome::InvalidCandidate);
+            }
+            if incoming_fingerprint != verified_incoming_fingerprint {
+                return Err(RepositoryError::Other(
+                    "download overlap incoming fingerprint changed before decision".into(),
+                ));
+            }
+            let pending = read_pending_overlap_candidates(&transaction, &request.review_id)?;
+            if pending.is_empty()
+                || pending.iter().any(|(candidate_id, fingerprint)| {
+                    verified_existing.get(candidate_id) != Some(fingerprint)
+                })
+            {
+                return Err(RepositoryError::Other(
+                    "download overlap candidate fingerprint changed before decision".into(),
+                ));
+            }
+            let profile = stored_u32(profile, "download overlap profile version")?;
+            let policy = stored_u32(policy, "download overlap policy version")?;
+            let decision_id = format!("overlap-decision-{}", Uuid::new_v4());
+            let mut projection = None;
+            let mut resume = None;
+            let mut resumed = false;
+            let mut cancelled = false;
+
+            match request.action {
+                DownloadOverlapDecisionAction::ContinueKeepBoth => {
+                    for (candidate_id, existing_fingerprint) in &pending {
+                        insert_overlap_pair_policy(
+                            &transaction,
+                            verified_incoming_fingerprint,
+                            existing_fingerprint,
+                            profile,
+                            policy,
+                            DownloadOverlapPairDecision::KeepBoth,
+                        )?;
+                        transaction
+                            .execute(
+                                "UPDATE download_overlap_candidates SET decision='keep_both' WHERE candidate_id=?1 AND decision IS NULL",
+                                [candidate_id],
+                            )
+                            .map_err(map_sqlite_error)?;
+                    }
+                    finish_overlap_review(&transaction, &request.review_id, "resolved")?;
+                    let (next_projection, next_descriptor) =
+                        requeue_overlap_target(&transaction, &entry_id)?;
+                    projection = Some(next_projection);
+                    resume = Some(next_descriptor);
+                    resumed = true;
+                }
+                DownloadOverlapDecisionAction::FalsePositiveContinue => {
+                    let candidate_id = match (request.candidate_id.as_deref(), pending.as_slice()) {
+                        (Some(candidate_id), _)
+                            if pending.iter().any(|item| item.0 == candidate_id) =>
+                        {
+                            candidate_id
+                        }
+                        (None, [(candidate_id, _)]) => candidate_id,
+                        _ => return Ok(DownloadOverlapDecisionApplyOutcome::InvalidCandidate),
+                    };
+                    let existing_fingerprint = pending
+                        .iter()
+                        .find(|item| item.0 == candidate_id)
+                        .map(|item| item.1.as_str())
+                        .ok_or_else(|| {
+                            RepositoryError::Corrupt("overlap candidate disappeared".into())
+                        })?;
+                    insert_overlap_pair_policy(
+                        &transaction,
+                        verified_incoming_fingerprint,
+                        existing_fingerprint,
+                        profile,
+                        policy,
+                        DownloadOverlapPairDecision::FalsePositive,
+                    )?;
+                    transaction
+                        .execute(
+                            "UPDATE download_overlap_candidates SET decision='false_positive' WHERE candidate_id=?1 AND decision IS NULL",
+                            [candidate_id],
+                        )
+                        .map_err(map_sqlite_error)?;
+                    let remaining: i64 = transaction
+                        .query_row(
+                            "SELECT COUNT(*) FROM download_overlap_candidates WHERE review_id=?1 AND decision IS NULL",
+                            [request.review_id.as_str()],
+                            |row| row.get(0),
+                        )
+                        .map_err(map_sqlite_error)?;
+                    if remaining == 0 {
+                        finish_overlap_review(&transaction, &request.review_id, "resolved")?;
+                        let (next_projection, next_descriptor) =
+                            requeue_overlap_target(&transaction, &entry_id)?;
+                        projection = Some(next_projection);
+                        resume = Some(next_descriptor);
+                        resumed = true;
+                    } else {
+                        bump_pending_overlap_review(&transaction, &request.review_id)?;
+                    }
+                }
+                DownloadOverlapDecisionAction::CancelIncoming => {
+                    finish_overlap_review(&transaction, &request.review_id, "cancelled")?;
+                    let entry_id =
+                        DownloadEntryId::new(entry_id.clone()).map_err(domain_corruption)?;
+                    let target =
+                        read_download_target(&transaction, &entry_id)?.ok_or_else(|| {
+                            RepositoryError::Corrupt("overlap download target disappeared".into())
+                        })?;
+                    let descriptor = DownloadJobDescriptor {
+                        job_id: target.job_id.clone(),
+                        entry_id: target.entry_id.to_string(),
+                        gallery_id: GalleryId::new(target.gallery_id).map_err(domain_corruption)?,
+                        worker_attempt: stored_u64(target.attempt, "download attempt")?,
+                    };
+                    let pipeline_target = read_pipeline_target(&transaction, &descriptor)?;
+                    projection = Some(transition_pipeline_target(
+                        &transaction,
+                        pipeline_target,
+                        JobState::Cancelled,
+                        None,
+                        None,
+                        None,
+                        None,
+                        "Incoming download was cancelled after overlap review",
+                    )?);
+                    transaction
+                        .execute(
+                            "UPDATE download_attempts SET finished_at=COALESCE(finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), outcome_state='cancelled' WHERE job_id=?1 AND attempt=?2",
+                            params![descriptor.job_id, to_sql_integer(descriptor.worker_attempt, "download attempt")?],
+                        )
+                        .map_err(map_sqlite_error)?;
+                    cancelled = true;
+                }
+            }
+            transaction
+                .execute(
+                    r#"
+                        INSERT INTO download_overlap_decisions (
+                            decision_id, review_id, review_revision,
+                            candidate_id, action, created_at
+                        ) VALUES (
+                            ?1, ?2, ?3, ?4, ?5,
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    "#,
+                    params![
+                        decision_id,
+                        request.review_id,
+                        to_sql_integer(request.expected_revision, "overlap review revision")?,
+                        request.candidate_id,
+                        request.action.as_str(),
+                    ],
+                )
+                .map_err(map_sqlite_error)?;
+            transaction.commit().map_err(map_sqlite_error)?;
+            (projection, resume, resumed, cancelled)
+        };
+        let review = self
+            .overlap_review_get(&request.review_id)?
+            .ok_or_else(|| RepositoryError::Corrupt("applied overlap review disappeared".into()))?;
+        Ok(DownloadOverlapDecisionApplyOutcome::Applied(Box::new(
+            DownloadOverlapDecisionApplied {
+                result: DownloadOverlapDecisionResult {
+                    review,
+                    resumed,
+                    cancelled,
+                },
+                projection,
+                resume,
+            },
+        )))
+    }
+
+    fn overlap_review_requeue_stale(
+        &self,
+        review_id: &str,
+        expected_revision: u64,
+    ) -> Result<DownloadOverlapDecisionApplyOutcome, RepositoryError> {
+        let (projection, resume) = {
+            let mut connection = self.connection()?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(map_sqlite_error)?;
+            let stored = transaction
+                .query_row(
+                    "SELECT entry_id, revision, state FROM download_overlap_reviews WHERE review_id=?1",
+                    [review_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
+                )
+                .optional()
+                .map_err(map_sqlite_error)?;
+            let Some((entry_id, revision, state)) = stored else {
+                return Ok(DownloadOverlapDecisionApplyOutcome::ReviewNotFound);
+            };
+            let actual_revision = stored_u64(revision, "download overlap review revision")?;
+            if actual_revision != expected_revision {
+                return Ok(DownloadOverlapDecisionApplyOutcome::RevisionConflict {
+                    actual_revision,
+                });
+            }
+            if state != "pending" {
+                return Ok(DownloadOverlapDecisionApplyOutcome::InvalidCandidate);
+            }
+            finish_overlap_review(&transaction, review_id, "stale")?;
+            let (projection, resume) = requeue_overlap_target(&transaction, &entry_id)?;
+            transaction.commit().map_err(map_sqlite_error)?;
+            (projection, resume)
+        };
+        let review = self
+            .overlap_review_get(review_id)?
+            .ok_or_else(|| RepositoryError::Corrupt("stale overlap review disappeared".into()))?;
+        Ok(DownloadOverlapDecisionApplyOutcome::Applied(Box::new(
+            DownloadOverlapDecisionApplied {
+                result: DownloadOverlapDecisionResult {
+                    review,
+                    resumed: true,
+                    cancelled: false,
+                },
+                projection: Some(projection),
+                resume: Some(resume),
+            },
+        )))
     }
 }
 
@@ -4563,6 +5162,21 @@ fn apply_duplicate_decision_side_effect(
                     "hide decisions do not accept series fields".into(),
                 ));
             }
+            if candidate.relation == DuplicateRelation::Contains
+                && candidate.parent.page_count != candidate.candidate.page_count
+            {
+                let required_action =
+                    if candidate.parent.page_count > candidate.candidate.page_count {
+                        DuplicateDecisionAction::HideCandidate
+                    } else {
+                        DuplicateDecisionAction::HideParent
+                    };
+                if request.action != required_action {
+                    return Err(RepositoryError::Other(
+                        "contains decisions must keep the gallery with more pages".into(),
+                    ));
+                }
+            }
             let required = if request.action == DuplicateDecisionAction::HideParent {
                 candidate.parent.gallery_id
             } else {
@@ -4769,6 +5383,8 @@ impl StoredPipelineTarget {
                 attempt: Some(stored_u64(self.attempt, "download attempt")?),
                 error_code: self.error_code,
                 error_message: self.error_message,
+                review_kind: None,
+                review_id: None,
             },
         })
     }
@@ -5077,6 +5693,8 @@ impl StoredDownloadTarget {
             error_retryable: None,
             review_kind,
             review_id: self.review_id,
+            created_at: None,
+            updated_at: None,
         })
     }
 }
@@ -5240,6 +5858,16 @@ fn recover_volatile_downloads(connection: &mut Connection) -> Result<usize, Repo
                       AND (
                         NULLIF(trim(d.review_kind), '') IS NULL
                         OR NULLIF(trim(d.review_id), '') IS NULL
+                        OR (
+                          d.review_kind = 'gallery_duplicate'
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM download_overlap_reviews overlap_review
+                            WHERE overlap_review.review_id = d.review_id
+                              AND overlap_review.entry_id = d.entry_id
+                              AND overlap_review.state = 'pending'
+                          )
+                        )
                       )
                   )
             "#,
@@ -5274,6 +5902,16 @@ fn recover_volatile_downloads(connection: &mut Connection) -> Result<usize, Repo
                       AND (
                         NULLIF(trim(d.review_kind), '') IS NULL
                         OR NULLIF(trim(d.review_id), '') IS NULL
+                        OR (
+                          d.review_kind = 'gallery_duplicate'
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM download_overlap_reviews overlap_review
+                            WHERE overlap_review.review_id = d.review_id
+                              AND overlap_review.entry_id = d.entry_id
+                              AND overlap_review.state = 'pending'
+                          )
+                        )
                       )
                   )
             "#,
@@ -5293,6 +5931,16 @@ fn recover_volatile_downloads(connection: &mut Connection) -> Result<usize, Repo
                   AND (
                     NULLIF(trim(review_kind), '') IS NULL
                     OR NULLIF(trim(review_id), '') IS NULL
+                    OR (
+                      review_kind = 'gallery_duplicate'
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM download_overlap_reviews overlap_review
+                        WHERE overlap_review.review_id = download_entries.review_id
+                          AND overlap_review.entry_id = download_entries.entry_id
+                          AND overlap_review.state = 'pending'
+                      )
+                    )
                   )
                   AND EXISTS (
                     SELECT 1
@@ -5387,9 +6035,13 @@ fn read_request_entries(
                     request_entry.response_review_id,
                     NULL AS attempt,
                     NULL AS error_code,
-                    NULL AS error_message
-                    , NULL AS error_retryable
+                    NULL AS error_message,
+                    NULL AS error_retryable,
+                    download.created_at,
+                    download.updated_at
                 FROM download_queue_request_entries request_entry
+                LEFT JOIN download_entries download
+                  ON download.entry_id = request_entry.entry_id
                 WHERE request_entry.request_id = ?1
                 ORDER BY request_entry.position ASC
             "#,
@@ -5417,6 +6069,8 @@ struct StoredDownloadEntry {
     error_code: Option<String>,
     error_message: Option<String>,
     error_retryable: Option<i64>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
 }
 
 impl StoredDownloadEntry {
@@ -5446,6 +6100,8 @@ impl StoredDownloadEntry {
             error_retryable: self.error_retryable.map(|value| value != 0),
             review_kind,
             review_id: self.review_id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
         })
     }
 }
@@ -5477,7 +6133,424 @@ fn stored_download_entry(row: &Row<'_>) -> rusqlite::Result<StoredDownloadEntry>
         error_code: row.get(8)?,
         error_message: row.get(9)?,
         error_retryable: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
+}
+
+fn canonical_overlap_fingerprints<'a>(
+    left: &'a str,
+    right: &'a str,
+) -> Result<(&'a str, &'a str), RepositoryError> {
+    if left.len() != 64 || right.len() != 64 {
+        return Err(RepositoryError::Other(
+            "download overlap fingerprint must contain 64 hexadecimal characters".into(),
+        ));
+    }
+    Ok(if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    })
+}
+
+fn read_pending_overlap_candidates(
+    transaction: &Transaction<'_>,
+    review_id: &str,
+) -> Result<Vec<(String, String)>, RepositoryError> {
+    let mut statement = transaction
+        .prepare(
+            r#"
+                SELECT candidate_id, existing_fingerprint
+                FROM download_overlap_candidates
+                WHERE review_id = ?1 AND decision IS NULL
+                ORDER BY rank ASC, candidate_id ASC
+            "#,
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([review_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(map_sqlite_error)?;
+    rows.map(|row| row.map_err(map_sqlite_error)).collect()
+}
+
+fn insert_overlap_pair_policy(
+    transaction: &Transaction<'_>,
+    incoming_fingerprint: &str,
+    existing_fingerprint: &str,
+    profile_version: u32,
+    policy_version: u32,
+    decision: DownloadOverlapPairDecision,
+) -> Result<(), RepositoryError> {
+    let (left, right) = canonical_overlap_fingerprints(incoming_fingerprint, existing_fingerprint)?;
+    transaction
+        .execute(
+            r#"
+                INSERT INTO download_overlap_pair_policies (
+                    left_fingerprint, right_fingerprint,
+                    profile_version, policy_version, decision, created_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5,
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                )
+                ON CONFLICT (
+                    left_fingerprint, right_fingerprint,
+                    profile_version, policy_version
+                ) DO UPDATE SET decision=excluded.decision, created_at=excluded.created_at
+            "#,
+            params![
+                left,
+                right,
+                i64::from(profile_version),
+                i64::from(policy_version),
+                decision.as_str(),
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    Ok(())
+}
+
+fn finish_overlap_review(
+    transaction: &Transaction<'_>,
+    review_id: &str,
+    state: &str,
+) -> Result<(), RepositoryError> {
+    if !matches!(state, "resolved" | "cancelled" | "stale") {
+        return Err(RepositoryError::Other(
+            "download overlap review has an unsupported terminal state".into(),
+        ));
+    }
+    let changed = transaction
+        .execute(
+            r#"
+                UPDATE download_overlap_reviews
+                SET revision = revision + 1, state = ?1,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE review_id = ?2 AND state = 'pending'
+            "#,
+            params![state, review_id],
+        )
+        .map_err(map_sqlite_error)?;
+    if changed != 1 {
+        return Err(RepositoryError::Other(
+            "download overlap review changed concurrently".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn bump_pending_overlap_review(
+    transaction: &Transaction<'_>,
+    review_id: &str,
+) -> Result<(), RepositoryError> {
+    let changed = transaction
+        .execute(
+            r#"
+                UPDATE download_overlap_reviews
+                SET revision = revision + 1,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE review_id = ?1 AND state = 'pending'
+            "#,
+            [review_id],
+        )
+        .map_err(map_sqlite_error)?;
+    if changed != 1 {
+        return Err(RepositoryError::Other(
+            "download overlap review changed concurrently".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn requeue_overlap_target(
+    transaction: &Transaction<'_>,
+    entry_id: &str,
+) -> Result<(DownloadJobProjection, DownloadJobDescriptor), RepositoryError> {
+    let entry_id = DownloadEntryId::new(entry_id.to_owned()).map_err(domain_corruption)?;
+    let target = read_download_target(transaction, &entry_id)?
+        .ok_or_else(|| RepositoryError::Corrupt("overlap download target disappeared".into()))?;
+    if target.state != JobState::ReviewRequired {
+        return Err(RepositoryError::Other(format!(
+            "download overlap target cannot resume from {}",
+            target.state
+        )));
+    }
+    let job_revision = next_stored_revision(target.job_revision, "job revision")?;
+    let entry_revision = next_stored_revision(target.entry_revision, "download revision")?;
+    let attempt = next_stored_revision(target.attempt, "download attempt")?;
+    let changed_jobs = transaction
+        .execute(
+            r#"
+                UPDATE download_jobs
+                SET revision=?1, state='queued', attempt=?2,
+                    completed_units=0, total_units=1,
+                    last_error_code=NULL, last_error_message=NULL,
+                    last_error_retryable=NULL,
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    started_at=NULL, finished_at=NULL
+                WHERE job_id=?3 AND revision=?4 AND state='review_required'
+            "#,
+            params![job_revision, attempt, target.job_id, target.job_revision],
+        )
+        .map_err(map_sqlite_error)?;
+    let changed_entries = transaction
+        .execute(
+            r#"
+                UPDATE download_entries
+                SET revision=?1, state='queued', progress=0,
+                    review_kind=NULL, review_id=NULL,
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE entry_id=?2 AND revision=?3 AND state='review_required'
+            "#,
+            params![
+                entry_revision,
+                target.entry_id.as_str(),
+                target.entry_revision
+            ],
+        )
+        .map_err(map_sqlite_error)?;
+    if changed_jobs != 1 || changed_entries != 1 {
+        return Err(RepositoryError::Other(
+            "download overlap target changed while resuming".into(),
+        ));
+    }
+    transaction
+        .execute(
+            r#"
+                INSERT INTO download_attempts (job_id, attempt, started_at)
+                VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            "#,
+            params![target.job_id, attempt],
+        )
+        .map_err(map_sqlite_error)?;
+    let descriptor = DownloadJobDescriptor {
+        job_id: target.job_id,
+        entry_id: target.entry_id.to_string(),
+        gallery_id: GalleryId::new(target.gallery_id).map_err(domain_corruption)?,
+        worker_attempt: attempt,
+    };
+    let projection = read_pipeline_target(transaction, &descriptor)?.into_projection(Some(
+        "Overlap review completed; resuming verified staging pages",
+    ))?;
+    Ok((projection, descriptor))
+}
+
+fn read_download_overlap_review(
+    connection: &Connection,
+    review_id: &str,
+) -> Result<Option<DownloadOverlapReview>, RepositoryError> {
+    let stored = connection
+        .query_row(
+            r#"
+                SELECT r.review_id, r.entry_id, r.incoming_gallery_id,
+                       r.revision, r.state, r.profile_version, r.policy_version,
+                       r.incoming_fingerprint, r.created_at, r.updated_at, r.resolved_at,
+                       gallery.title, artifact.expected_page_count
+                FROM download_overlap_reviews r
+                JOIN galleries gallery ON gallery.gallery_id = r.incoming_gallery_id
+                JOIN download_artifacts artifact
+                  ON artifact.entry_id = r.entry_id
+                 AND artifact.gallery_id = r.incoming_gallery_id
+                WHERE r.review_id = ?1
+            "#,
+            [review_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, i64>(12)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    let Some((
+        review_id,
+        entry_id,
+        incoming_gallery_id,
+        revision,
+        state,
+        profile_version,
+        policy_version,
+        incoming_fingerprint,
+        created_at,
+        updated_at,
+        resolved_at,
+        incoming_title,
+        incoming_page_count,
+    )) = stored
+    else {
+        return Ok(None);
+    };
+    let incoming_gallery_id = GalleryId::new(incoming_gallery_id).map_err(domain_corruption)?;
+    let incoming = DownloadOverlapGalleryRef {
+        entry_id: entry_id.clone(),
+        gallery_id: incoming_gallery_id,
+        title: incoming_title,
+        artists: read_owned_gallery_artists(connection, incoming_gallery_id)?,
+        page_count: stored_u32(incoming_page_count, "overlap incoming page count")?,
+    };
+    let mut statement = connection
+        .prepare(
+            r#"
+                SELECT candidate.candidate_id, candidate.existing_entry_id,
+                       candidate.existing_gallery_id, candidate.existing_fingerprint,
+                       candidate.relation, candidate.confidence,
+                       candidate.matched_pages, candidate.exact_pages,
+                       candidate.visual_pages, candidate.existing_coverage,
+                       candidate.incoming_coverage, candidate.existing_unique_pages,
+                       candidate.incoming_unique_pages, candidate.longest_aligned_run,
+                       candidate.rank, candidate.decision,
+                       gallery.title, artifact.expected_page_count
+                FROM download_overlap_candidates candidate
+                JOIN galleries gallery
+                  ON gallery.gallery_id = candidate.existing_gallery_id
+                JOIN download_artifacts artifact
+                  ON artifact.entry_id = candidate.existing_entry_id
+                 AND artifact.gallery_id = candidate.existing_gallery_id
+                WHERE candidate.review_id = ?1
+                ORDER BY candidate.rank ASC, candidate.candidate_id ASC
+            "#,
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = statement
+        .query_map([review_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, f64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, f64>(9)?,
+                row.get::<_, f64>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, i64>(13)?,
+                row.get::<_, i64>(14)?,
+                row.get::<_, Option<String>>(15)?,
+                row.get::<_, String>(16)?,
+                row.get::<_, i64>(17)?,
+            ))
+        })
+        .map_err(map_sqlite_error)?;
+    let mut stored_candidates = Vec::new();
+    for row in rows {
+        stored_candidates.push(row.map_err(map_sqlite_error)?);
+    }
+    drop(statement);
+    let mut candidates = Vec::with_capacity(stored_candidates.len());
+    for candidate in stored_candidates {
+        let existing_gallery_id = GalleryId::new(candidate.2).map_err(domain_corruption)?;
+        let mut pair_statement = connection
+            .prepare(
+                r#"
+                    SELECT incoming_source_page, existing_source_page, exact_sha256,
+                           d_hash_distance, p_hash_distance, detail_hash_distance,
+                           edge_similarity, visual_similarity, low_information
+                    FROM download_overlap_page_pairs
+                    WHERE candidate_id = ?1 ORDER BY pair_index ASC
+                "#,
+            )
+            .map_err(map_sqlite_error)?;
+        let pair_rows = pair_statement
+            .query_map([candidate.0.as_str()], |row| {
+                Ok(DownloadOverlapPagePair {
+                    incoming_source_page: u32::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                    existing_source_page: u32::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    exact_sha256: row.get::<_, bool>(2)?,
+                    d_hash_distance: u32::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                    p_hash_distance: u32::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                    detail_hash_distance: u32::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
+                    edge_similarity: row.get(6)?,
+                    visual_similarity: row.get(7)?,
+                    low_information: row.get(8)?,
+                })
+            })
+            .map_err(map_sqlite_error)?;
+        let mut page_pairs = Vec::new();
+        for pair in pair_rows {
+            let pair = pair.map_err(map_sqlite_error)?;
+            if pair.incoming_source_page == 0 || pair.existing_source_page == 0 {
+                return Err(RepositoryError::Corrupt(
+                    "download overlap page pair contains a zero source page".into(),
+                ));
+            }
+            page_pairs.push(pair);
+        }
+        candidates.push(DownloadOverlapCandidate {
+            candidate_id: candidate.0,
+            existing: DownloadOverlapGalleryRef {
+                entry_id: candidate.1,
+                gallery_id: existing_gallery_id,
+                title: candidate.16,
+                artists: read_owned_gallery_artists(connection, existing_gallery_id)?,
+                page_count: stored_u32(candidate.17, "overlap existing page count")?,
+            },
+            existing_fingerprint: candidate.3,
+            relation: DownloadOverlapRelation::from_database(&candidate.4).ok_or_else(|| {
+                RepositoryError::Corrupt(format!(
+                    "download overlap relation {:?} is unsupported",
+                    candidate.4
+                ))
+            })?,
+            confidence: candidate.5,
+            matched_pages: stored_u32(candidate.6, "overlap matched pages")?,
+            exact_pages: stored_u32(candidate.7, "overlap exact pages")?,
+            visual_pages: stored_u32(candidate.8, "overlap visual pages")?,
+            existing_coverage: candidate.9,
+            incoming_coverage: candidate.10,
+            existing_unique_pages: stored_u32(candidate.11, "overlap existing unique pages")?,
+            incoming_unique_pages: stored_u32(candidate.12, "overlap incoming unique pages")?,
+            longest_aligned_run: stored_u32(candidate.13, "overlap aligned run")?,
+            rank: stored_u32(candidate.14, "overlap candidate rank")?,
+            decision: candidate
+                .15
+                .map(|decision| {
+                    DownloadOverlapPairDecision::from_database(&decision).ok_or_else(|| {
+                        RepositoryError::Corrupt(format!(
+                            "download overlap decision {decision:?} is unsupported"
+                        ))
+                    })
+                })
+                .transpose()?,
+            page_pairs,
+        });
+    }
+    Ok(Some(DownloadOverlapReview {
+        review_id,
+        entry_id,
+        incoming,
+        revision: stored_u64(revision, "download overlap review revision")?,
+        state: DownloadOverlapReviewState::from_database(&state).ok_or_else(|| {
+            RepositoryError::Corrupt(format!(
+                "download overlap review state {state:?} is unsupported"
+            ))
+        })?,
+        profile_version: stored_u32(profile_version, "download overlap profile version")?,
+        policy_version: stored_u32(policy_version, "download overlap policy version")?,
+        incoming_fingerprint,
+        candidates,
+        created_at,
+        updated_at,
+        resolved_at,
+    }))
 }
 
 struct StoredArtifactBundle {
@@ -6012,7 +7085,24 @@ fn read_owned_gallery_artists(
     let rows = statement
         .query_map([gallery_id.get()], |row| row.get::<_, String>(0))
         .map_err(map_sqlite_error)?;
-    rows.map(|row| row.map_err(map_sqlite_error)).collect()
+    let mut artists = rows
+        .map(|row| row.map_err(map_sqlite_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    if artists.is_empty() {
+        let primary_artist = connection
+            .query_row(
+                "SELECT primary_artist FROM galleries WHERE gallery_id = ?1",
+                [gallery_id.get()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(map_sqlite_error)?
+            .flatten()
+            .map(|artist| artist.trim().to_owned())
+            .filter(|artist| !artist.is_empty());
+        artists.extend(primary_artist);
+    }
+    Ok(artists)
 }
 
 fn read_auto_find_cutoff_evidence(
@@ -6175,7 +7265,8 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
                 SELECT revision, download_root, folder_name_template, max_columns, preview_width,
                        related_preview_width,
                        cache_limit_gb, concurrent_image_requests,
-                       request_start_interval_ms, auto_find_history_mode, privacy_mode
+                       request_start_interval_ms, auto_find_history_mode, privacy_mode,
+                       collapsed_group_keys_json
                 FROM settings
                 WHERE singleton = 1
             "#,
@@ -6193,6 +7284,7 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
                     row.get::<_, i64>(8)?,
                     row.get::<_, String>(9)?,
                     row.get::<_, bool>(10)?,
+                    row.get::<_, String>(11)?,
                 ))
             },
         )
@@ -6218,6 +7310,10 @@ fn read_settings(connection: &Connection) -> Result<SettingsSnapshot, Repository
             ))
         })?,
         privacy_mode: values.10,
+        collapsed_group_keys: crate::domain::normalize_collapsed_group_keys(
+            serde_json::from_str(&values.11).map_err(domain_corruption)?,
+        )
+        .map_err(domain_corruption)?,
     })
 }
 
@@ -6826,6 +7922,233 @@ mod duplicate_repository_tests {
     }
 
     #[test]
+    fn contains_decision_keeps_the_gallery_with_more_pages() {
+        for (parent_pages, candidate_pages, rejected_action, accepted_action) in [
+            (
+                20_u32,
+                16_u32,
+                DuplicateDecisionAction::HideParent,
+                DuplicateDecisionAction::HideCandidate,
+            ),
+            (
+                16_u32,
+                20_u32,
+                DuplicateDecisionAction::HideCandidate,
+                DuplicateDecisionAction::HideParent,
+            ),
+        ] {
+            let repository = SqliteRepository::open_in_memory().expect("open repository");
+            seed_verified_gallery(&repository, 1, "entry-1");
+            seed_verified_gallery(&repository, 2, "entry-2");
+            {
+                let connection = repository.connection().expect("lock repository");
+                for (gallery_id, entry_id, page_count) in [
+                    (1_i64, "entry-1", parent_pages),
+                    (2_i64, "entry-2", candidate_pages),
+                ] {
+                    connection
+                        .execute(
+                            "UPDATE galleries SET source_page_count=?1 WHERE gallery_id=?2",
+                            params![i64::from(page_count), gallery_id],
+                        )
+                        .expect("update gallery page count");
+                    connection
+                        .execute(
+                            "UPDATE download_artifacts SET expected_page_count=?1 WHERE entry_id=?2",
+                            params![i64::from(page_count), entry_id],
+                        )
+                        .expect("update artifact page count");
+                }
+            }
+            let run = repository
+                .duplicate_scan_start(1, 2, 1)
+                .expect("start scan");
+            let mut record = candidate_record(&run.run_id);
+            record.candidate.relation = DuplicateRelation::Contains;
+            record.candidate.parent.page_count = parent_pages;
+            record.candidate.candidate.page_count = candidate_pages;
+            repository
+                .duplicate_candidate_replace(&record)
+                .expect("store contains candidate")
+                .expect("candidate changes run");
+
+            let rejected = repository
+                .duplicate_decision_apply(&DuplicateDecisionRequest {
+                    candidate_id: "candidate-1-2".into(),
+                    expected_revision: 0,
+                    action: rejected_action,
+                    target_gallery_id: None,
+                    series_group_id: None,
+                    series_name: None,
+                })
+                .expect_err("hiding the longer gallery must be rejected");
+            assert!(rejected
+                .to_string()
+                .contains("must keep the gallery with more pages"));
+            assert_eq!(
+                repository
+                    .duplicate_review_get("candidate-1-2")
+                    .expect("reload review")
+                    .expect("candidate remains")
+                    .candidate
+                    .revision,
+                0
+            );
+
+            assert!(matches!(
+                repository
+                    .duplicate_decision_apply(&DuplicateDecisionRequest {
+                        candidate_id: "candidate-1-2".into(),
+                        expected_revision: 0,
+                        action: accepted_action,
+                        target_gallery_id: None,
+                        series_group_id: None,
+                        series_name: None,
+                    })
+                    .expect("hide shorter gallery"),
+                DuplicateDecisionApplyOutcome::Applied(_)
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "local duplicate-scan storage profiler"]
+    fn profile_duplicate_database_write_stages() {
+        const PAGES_PER_ARTIFACT: u32 = 48;
+        const PROGRESS_WRITES: u32 = 24;
+
+        let temporary = tempfile::tempdir().expect("create profiler directory");
+        let database_path = temporary.path().join("duplicate-profile.sqlite3");
+        let repository = SqliteRepository::open(&database_path).expect("open profiler repository");
+        seed_verified_gallery(&repository, 1, "entry-1");
+        seed_verified_gallery(&repository, 2, "entry-2");
+
+        {
+            let connection = repository.connection().expect("lock profiler repository");
+            for (gallery_id, entry_id) in [(1_i64, "entry-1"), (2_i64, "entry-2")] {
+                connection
+                    .execute(
+                        "UPDATE galleries SET source_page_count = ?1 WHERE gallery_id = ?2",
+                        params![PAGES_PER_ARTIFACT, gallery_id],
+                    )
+                    .expect("update profiler gallery page count");
+                connection
+                    .execute(
+                        "UPDATE download_artifacts SET expected_page_count = ?1 WHERE entry_id = ?2",
+                        params![PAGES_PER_ARTIFACT, entry_id],
+                    )
+                    .expect("update profiler artifact page count");
+                for source_page in 2..=PAGES_PER_ARTIFACT {
+                    connection
+                        .execute(
+                            r#"
+                                INSERT INTO download_pages (
+                                    entry_id, gallery_id, source_page_number, relative_path,
+                                    state, byte_length, sha256, storage_format,
+                                    source_revision, verified_at, excluded
+                                ) VALUES (
+                                    ?1, ?2, ?3, ?4, 'present', 128, ?5, 'webp',
+                                    'source-v1', ?6, 0
+                                )
+                            "#,
+                            params![
+                                entry_id,
+                                gallery_id,
+                                source_page,
+                                format!("gallery-{gallery_id}/page-{source_page}.webp"),
+                                format!("{gallery_id:016x}{source_page:048x}"),
+                                "2026-08-15T00:00:00.000Z",
+                            ],
+                        )
+                        .expect("insert profiler page");
+                }
+            }
+        }
+
+        let hash_write_started = Instant::now();
+        for (gallery_id, entry_id) in [(1_i64, "entry-1"), (2_i64, "entry-2")] {
+            for source_page in 1..=PAGES_PER_ARTIFACT {
+                let page_hash = DuplicatePageHash {
+                    entry_id: entry_id.into(),
+                    gallery_id: GalleryId::new(gallery_id).unwrap(),
+                    source_page_number: SourcePageNumber::new(source_page).unwrap(),
+                    profile_version: 1,
+                    artifact_sha256: ArtifactSha256::new(format!(
+                        "{gallery_id:016x}{source_page:048x}"
+                    ))
+                    .unwrap(),
+                    coarse_d_hash: u64::from(source_page),
+                    detail_d_hash_hex: format!("{:02x}", source_page % 256).repeat(128),
+                    p_hash: u64::from(source_page).rotate_left(17),
+                    mean_luma: 127.0,
+                    std_dev: 48.0,
+                    non_uniform_ratio: 0.9,
+                    edge_density: 0.4,
+                    width: 640,
+                    height: 960,
+                    low_information: false,
+                };
+                repository
+                    .duplicate_page_hash_upsert(&page_hash)
+                    .expect("write profiler page hash");
+            }
+        }
+        let hash_cache_write = hash_write_started.elapsed();
+
+        let run = repository
+            .duplicate_scan_start(1, 2, 1_378)
+            .expect("start profiler scan");
+        let progress_write_started = Instant::now();
+        for step in 0..PROGRESS_WRITES {
+            repository
+                .duplicate_scan_progress(
+                    &run.run_id,
+                    if step == 0 { 1 } else { 2 },
+                    u64::from(step).saturating_mul(64).min(1_378),
+                )
+                .expect("write profiler progress");
+        }
+        let progress_write = progress_write_started.elapsed();
+
+        let candidate_write_started = Instant::now();
+        repository
+            .duplicate_candidate_replace(&candidate_record(&run.run_id))
+            .expect("write profiler candidate");
+        let candidate_write = candidate_write_started.elapsed();
+
+        let finish_write_started = Instant::now();
+        repository
+            .duplicate_scan_finish(&run.run_id, DuplicateScanState::Completed, None, None)
+            .expect("finish profiler scan");
+        let finish_write = finish_write_started.elapsed();
+
+        let total_write = hash_cache_write
+            .saturating_add(progress_write)
+            .saturating_add(candidate_write)
+            .saturating_add(finish_write);
+        eprintln!(
+            "duplicate database profile: hash_rows={} hash_cache_write_us={} progress_writes={} progress_write_us={} candidate_write_us={} finish_write_us={} total_write_us={}",
+            PAGES_PER_ARTIFACT * 2,
+            hash_cache_write.as_micros(),
+            PROGRESS_WRITES,
+            progress_write.as_micros(),
+            candidate_write.as_micros(),
+            finish_write.as_micros(),
+            total_write.as_micros(),
+        );
+
+        assert_eq!(
+            repository
+                .duplicate_snapshot()
+                .expect("read profiler snapshot")
+                .run
+                .expect("profiler run")
+                .state,
+            DuplicateScanState::Completed
+        );
+    }
+
+    #[test]
     fn duplicate_recovery_is_idempotent_and_only_fails_running_scans() {
         let repository = SqliteRepository::open_in_memory().expect("open repository");
         let run = repository
@@ -7042,6 +8365,14 @@ mod duplicate_repository_tests {
         let bytes = patterned_webp();
         materialize_verified_page(&repository, &root, 1, "entry-1", &bytes);
         materialize_verified_page(&repository, &root, 2, "entry-2", &bytes);
+        repository
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE galleries SET primary_artist = 'shared artist' WHERE gallery_id IN (1, 2)",
+                [],
+            )
+            .unwrap();
         repository
             .connection()
             .unwrap()

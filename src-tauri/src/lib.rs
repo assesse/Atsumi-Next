@@ -20,7 +20,7 @@ use std::{
 use application::{
     ApplicationService, ArtifactRepository, ArtifactStore, AutoFindSource, AutoFindSupervisor,
     AutomationRepository, DetailOriginalSupervisor, DisabledDuplicateRelationProvider,
-    DownloadPipelineRepository, DownloadSourcePort, DownloadSupervisor, DuplicateRepository,
+    DownloadOverlapRepository, DownloadSourcePort, DownloadSupervisor, DuplicateRepository,
     DuplicateSupervisor, InternalDuplicateRepository, InternalDuplicateSupervisor, StateRepository,
 };
 use domain::{
@@ -592,7 +592,7 @@ pub fn run() -> tauri::Result<()> {
                         }
                     }
                 })?;
-            let download_repository: Arc<dyn DownloadPipelineRepository> = repository.clone();
+            let download_repository: Arc<dyn DownloadOverlapRepository> = repository.clone();
             let settings_repository: Arc<dyn StateRepository> = repository.clone();
             let download_source: Arc<dyn DownloadSourcePort> = live_source.clone();
             let (download_event_tx, download_event_rx) =
@@ -720,6 +720,8 @@ pub fn run() -> tauri::Result<()> {
             interface::commands::duplicate_scan_cancel,
             interface::commands::duplicate_review_get,
             interface::commands::duplicate_decision_apply,
+            interface::commands::download_overlap_review_get,
+            interface::commands::download_overlap_decision_apply,
             interface::commands::internal_duplicate_snapshot,
             interface::commands::internal_duplicate_active_artifact,
             interface::commands::internal_duplicate_scan_start,

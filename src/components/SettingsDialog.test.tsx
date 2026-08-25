@@ -16,16 +16,23 @@ const settings: SettingsSnapshot = {
   cacheLimitGb: 5,
   concurrentImageRequests: 5,
   requestStartIntervalMs: 25,
+  collapsedGroupKeys: [],
 };
 
 describe("SettingsDialog operational boundaries", () => {
   it("exposes preset sizing and only safe, implemented reset operations", async () => {
     const previousShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+    const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const writeText = vi.fn<(value: string) => Promise<void>>(async (_value) => undefined);
     Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
       configurable: true,
       value: vi.fn(function (this: HTMLDialogElement) {
         this.setAttribute("open", "");
       }),
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
     });
     const container = document.createElement("div");
     document.body.append(container);
@@ -61,6 +68,18 @@ describe("SettingsDialog operational boundaries", () => {
 
       expect(container.querySelector(".settings-nav")).toBeNull();
       expect(container.textContent).not.toContain("다음 단계");
+      expect(container.querySelectorAll('[data-settings-scroll-root="true"]')).toHaveLength(1);
+      expect(container.querySelector(".settings-dialog > .settings-form")).not.toBeNull();
+      const about = container.querySelector<HTMLElement>(".settings-about-panel");
+      expect(about).toHaveTextContent("Atsumi Next");
+      expect(about).toHaveTextContent("assesse · Atsumi Next contributors");
+      expect(about).toHaveTextContent("앨범 제목, 태그, 파일 경로, 데이터베이스 내용이 포함되지 않습니다");
+      const aboutButtons = [...about?.querySelectorAll<HTMLButtonElement>("button") ?? []];
+      await act(async () => aboutButtons.find((button) => button.textContent === "피드백 주소 복사")?.click());
+      expect(writeText).toHaveBeenLastCalledWith("https://github.com/assesse/Atsumi-Next/issues/new/choose");
+      await act(async () => aboutButtons.find((button) => button.textContent === "진단 정보 복사")?.click());
+      expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("privateDataIncluded=false"));
+      expect(writeText.mock.calls.at(-1)?.[0]).not.toMatch(/C:\\|앨범|tag=/i);
 
       expect(container.querySelector(".settings-reset-row")).not.toBeNull();
       expect(container.querySelector(".maintenance-panel .settings-reset-row")).toBeNull();
@@ -150,6 +169,11 @@ describe("SettingsDialog operational boundaries", () => {
         Object.defineProperty(HTMLDialogElement.prototype, "showModal", previousShowModal);
       } else {
         Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
+      }
+      if (previousClipboard) {
+        Object.defineProperty(navigator, "clipboard", previousClipboard);
+      } else {
+        Reflect.deleteProperty(navigator, "clipboard");
       }
       confirm.mockRestore();
     }

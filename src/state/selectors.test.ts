@@ -39,6 +39,21 @@ describe("gallery selectors", () => {
     ]);
   });
 
+  it("matches neutral tags after the display-only tag namespace is added", () => {
+    const searched = uiReducer(initialUiState, {
+      type: "search.commit",
+      view: "explore",
+      value: "tag:full_color",
+    });
+
+    expect(visibleGalleries(searched, mockGalleries).map((gallery) => gallery.title)).toEqual([
+      "Archive of Rain",
+      "Summer Pool Notes",
+      "Platform 19",
+      "Festival Letter",
+    ]);
+  });
+
   it.each([
     ["series:rain_archives", ["Archive of Rain", "The Last Tram"]],
     ["character:aoi_mizuno", ["Summer Pool Notes", "Blue Lane"]],

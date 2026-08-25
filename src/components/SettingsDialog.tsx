@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import packageMetadata from "../../package.json";
 import type {
   ApiError,
   ApiResult,
@@ -26,6 +27,25 @@ type SettingsDialogProps = {
 };
 
 const DEFAULT_FOLDER_NAME_TEMPLATE = "[{artist}] {title} [{group}] {id}";
+const PROJECT_URL = "https://github.com/assesse/Atsumi-Next";
+const FEEDBACK_URL = `${PROJECT_URL}/issues/new/choose`;
+
+const copyText = async (value: string) => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("clipboard unavailable");
+};
 
 export function SettingsDialog({ open, settings, loading, error, onClose, onSave, onPreviewLayout, onPreviewFolderName, onMaintenance }: SettingsDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -40,6 +60,7 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
   const folderPreviewRequest = useRef(0);
   const [maintenanceBusy, setMaintenanceBusy] = useState<MaintenanceAction["kind"] | null>(null);
   const [maintenanceMessage, setMaintenanceMessage] = useState("");
+  const [informationMessage, setInformationMessage] = useState("");
   const [rebuildOptions, setRebuildOptions] = useState({ thumbnail: true, duplicate: false, internal: false, autoFind: false });
 
   useEffect(() => {
@@ -124,6 +145,24 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
     setMaintenanceMessage(result.ok ? result.data.completedSteps.join(" · ") : result.error.message);
   };
 
+  const copyInformation = async (kind: "feedback" | "diagnostics") => {
+    const value = kind === "feedback"
+      ? FEEDBACK_URL
+      : [
+          "Atsumi Next diagnostic summary",
+          `version=${packageMetadata.version}`,
+          `runtime=${"__TAURI_INTERNALS__" in window ? "desktop" : "browser-preview"}`,
+          `project=${PROJECT_URL}`,
+          "privateDataIncluded=false",
+        ].join("\n");
+    try {
+      await copyText(value);
+      setInformationMessage(kind === "feedback" ? "피드백 접수 주소를 복사했습니다." : "개인정보가 제외된 진단 정보를 복사했습니다.");
+    } catch {
+      setInformationMessage("클립보드에 복사하지 못했습니다.");
+    }
+  };
+
   const save = async () => {
     setSaving(true);
     const success = await onSave({
@@ -175,7 +214,7 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
           </div>
         </header>
         <div className="settings-layout settings-layout-single">
-          <section className="settings-content">
+          <section className="settings-content" data-settings-scroll-root="true">
               <>
                 {error ? <div className="inline-error" role="alert">{error.message}</div> : null}
                 <div className="setting-row">
@@ -299,6 +338,26 @@ export function SettingsDialog({ open, settings, loading, error, onClose, onSave
                       <button type="button" className="text-button danger-button" disabled={maintenanceBusy !== null} onClick={() => void runMaintenance({ kind: "factoryReset", confirmation: "RESET_ALL_APP_DATA" })}>{maintenanceBusy === "factoryReset" ? "초기화 준비 중" : "앱 데이터 완전 초기화"}</button>
                     </article>
                   </div>
+                </section>
+                <section className="settings-about-panel" aria-labelledby="settings-about-title">
+                  <header>
+                    <div>
+                      <span className="eyebrow">ABOUT &amp; FEEDBACK</span>
+                      <strong id="settings-about-title">프로그램 정보</strong>
+                    </div>
+                    <span className="settings-about-version">v{packageMetadata.version}</span>
+                  </header>
+                  <dl className="settings-about-details">
+                    <div><dt>프로그램</dt><dd>Atsumi Next</dd></div>
+                    <div><dt>제작</dt><dd>assesse · Atsumi Next contributors</dd></div>
+                    <div><dt>프로젝트</dt><dd>github.com/assesse/Atsumi-Next</dd></div>
+                  </dl>
+                  <p>버그와 기능 제안은 GitHub Issues에서 받습니다. 복사되는 진단 정보에는 앨범 제목, 태그, 파일 경로, 데이터베이스 내용이 포함되지 않습니다.</p>
+                  <div className="settings-about-actions">
+                    <button type="button" className="text-button" onClick={() => void copyInformation("feedback")}>피드백 주소 복사</button>
+                    <button type="button" className="text-button" onClick={() => void copyInformation("diagnostics")}>진단 정보 복사</button>
+                  </div>
+                  <p className="settings-about-message" role="status" aria-live="polite">{informationMessage}</p>
                 </section>
               </>
           </section>

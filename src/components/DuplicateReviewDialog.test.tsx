@@ -68,11 +68,6 @@ const reviewFixture = (patch: Partial<DuplicateReview> = {}): DuplicateReview =>
   ...patch,
 });
 
-const setInput = (input: HTMLInputElement, value: string) => {
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
-  input.dispatchEvent(new Event("input", { bubbles: true }));
-};
-
 describe("DuplicateReviewDialog backend evidence", () => {
   it("renders persisted confidence and exact artifact source-page pairs without placeholder values", async () => {
     const resolve = vi.fn((_request: ThumbnailRequest) => ({
@@ -121,7 +116,7 @@ describe("DuplicateReviewDialog backend evidence", () => {
     container.remove();
   });
 
-  it("submits every decision with the current candidate revision and required series targets", async () => {
+  it("keeps both hide choices for non-containment reviews and hides series classification controls", async () => {
     const onDecision = vi.fn();
     const client = new ThumbnailClient({
       resolve: () => ({ kind: "missing", reason: "test fixture" }),
@@ -129,8 +124,53 @@ describe("DuplicateReviewDialog backend evidence", () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const base = reviewFixture();
-    const render = (review: DuplicateReview) => root.render(
+    await act(async () => root.render(
+      <DuplicateReviewDialog
+        open={false}
+        review={reviewFixture()}
+        thumbnailClient={client}
+        onClose={vi.fn()}
+        onRetry={vi.fn()}
+        onRescan={vi.fn()}
+        onDecision={onDecision}
+      />,
+    ));
+
+    const click = async (label: string) => {
+      const button = [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((item) => item.textContent?.includes(label));
+      if (!button) throw new Error(`${label} button missing`);
+      await act(async () => button.click());
+    };
+    await click("작품 A 숨기기");
+    await click("작품 B 숨기기");
+    await click("이 작품 쌍 제외");
+
+    expect(onDecision).toHaveBeenCalledWith({
+      candidateId: "candidate-real-evidence",
+      expectedRevision: 7,
+      action: "hide_parent",
+    });
+    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ action: "hide_candidate", expectedRevision: 7 }));
+    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ action: "exclude_pair", expectedRevision: 7 }));
+    expect(container.querySelector(".series-decision")).toBeNull();
+    expect(container.textContent).not.toContain("연작 관계");
+
+    await act(async () => root.unmount());
+    client.dispose();
+    container.remove();
+  });
+
+  it("forces a contains decision to keep the longer parent and hide only the shorter candidate", async () => {
+    const onDecision = vi.fn();
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing", reason: "test fixture" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const review = reviewFixture();
+    review.candidate.relation = "contains";
+
+    await act(async () => root.render(
       <DuplicateReviewDialog
         open={false}
         review={review}
@@ -140,60 +180,82 @@ describe("DuplicateReviewDialog backend evidence", () => {
         onRescan={vi.fn()}
         onDecision={onDecision}
       />,
-    );
-    await act(async () => render(base));
+    ));
 
-    const click = async (label: string) => {
-      const button = [...container.querySelectorAll<HTMLButtonElement>("button")]
-        .find((item) => item.textContent?.includes(label));
-      if (!button) throw new Error(`${label} button missing`);
-      await act(async () => button.click());
-    };
-    await click("부모 숨기기");
-    await click("후보 숨기기");
-    await click("이 작품 쌍 제외");
-    const name = container.querySelector<HTMLInputElement>('input[aria-label="새 연작 이름"]');
-    if (!name) throw new Error("Series name input missing");
-    await act(async () => setInput(name, "Rain sequence"));
-    await click("연작으로 묶기");
-
+    expect(container.querySelector(".containment-policy")).toHaveTextContent("20p 포괄 작품을 남깁니다");
+    expect(container.querySelectorAll(".review-card h3")[0]).toHaveTextContent("포괄 작품");
+    expect(container.querySelectorAll(".review-card h3")[1]).toHaveTextContent("귀속 작품");
+    expect(container.textContent).not.toContain("작품 A 숨기기");
+    expect(container.textContent).not.toContain("작품 B 숨기기");
+    const action = container.querySelector<HTMLButtonElement>(".containment-keep-action");
+    expect(action).toHaveTextContent("20p 포괄 작품 유지 · 16p 귀속 작품 숨기기");
+    await act(async () => action?.click());
     expect(onDecision).toHaveBeenCalledWith({
       candidateId: "candidate-real-evidence",
       expectedRevision: 7,
-      action: "hide_parent",
+      action: "hide_candidate",
     });
-    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ action: "hide_candidate", expectedRevision: 7 }));
-    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ action: "exclude_pair", expectedRevision: 7 }));
-    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
-      action: "series_link",
-      seriesName: "Rain sequence",
-      expectedRevision: 7,
-    }));
 
-    const withGroup: DuplicateReview = {
-      ...base,
-      seriesGroups: [{
-        seriesGroupId: "series-rain",
-        name: "Rain sequence",
-        revision: 1,
-        members: [base.candidate.parent, base.candidate.candidate],
-        createdAt: "2026-08-15T00:00:00.000Z",
-        updatedAt: "2026-08-15T00:00:00.000Z",
-      }],
-    };
-    await act(async () => render(withGroup));
-    await click("부모 묶음 풀기");
-    await click("후보 묶음 풀기");
-    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
-      action: "series_unlink",
-      targetGalleryId: galleryId(101),
-      seriesGroupId: "series-rain",
-    }));
-    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
-      action: "series_unlink",
-      targetGalleryId: galleryId(202),
-      seriesGroupId: "series-rain",
-    }));
+    await act(async () => root.unmount());
+    client.dispose();
+    container.remove();
+  });
+
+  it("forces the inverse contains decision to keep a longer candidate", async () => {
+    const onDecision = vi.fn();
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing", reason: "test fixture" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const review = reviewFixture();
+    review.candidate.relation = "contains";
+    review.candidate.parent.pageCount = 16;
+    review.candidate.candidate.pageCount = 20;
+
+    await act(async () => root.render(
+      <DuplicateReviewDialog
+        open={false}
+        review={review}
+        thumbnailClient={client}
+        onClose={vi.fn()}
+        onRetry={vi.fn()}
+        onRescan={vi.fn()}
+        onDecision={onDecision}
+      />,
+    ));
+
+    await act(async () => container.querySelector<HTMLButtonElement>(".containment-keep-action")?.click());
+    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ action: "hide_parent" }));
+
+    await act(async () => root.unmount());
+    client.dispose();
+    container.remove();
+  });
+
+  it("retains the safe two-sided choice when contains page counts are equal", async () => {
+    const client = new ThumbnailClient({ resolve: () => ({ kind: "missing", reason: "test fixture" }) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const review = reviewFixture();
+    review.candidate.relation = "contains";
+    review.candidate.candidate.pageCount = 20;
+
+    await act(async () => root.render(
+      <DuplicateReviewDialog
+        open={false}
+        review={review}
+        thumbnailClient={client}
+        onClose={vi.fn()}
+        onRetry={vi.fn()}
+        onRescan={vi.fn()}
+        onDecision={vi.fn()}
+      />,
+    ));
+
+    expect(container.querySelector(".containment-policy")).toBeNull();
+    expect(container.textContent).toContain("작품 A 숨기기");
+    expect(container.textContent).toContain("작품 B 숨기기");
 
     await act(async () => root.unmount());
     client.dispose();

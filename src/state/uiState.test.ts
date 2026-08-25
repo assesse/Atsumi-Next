@@ -132,6 +132,24 @@ describe("uiReducer selection", () => {
   });
 });
 
+describe("uiReducer gallery grouping", () => {
+  it("supports flat, daily, and artist projections independently in both library views", () => {
+    const autoFindFlat = uiReducer(initialUiState, {
+      type: "grouping.set",
+      view: "auto-find",
+      grouping: "all",
+    });
+    expect(autoFindFlat.grouping).toEqual({ "auto-find": "all", downloads: "day" });
+
+    const downloadsArtist = uiReducer(autoFindFlat, {
+      type: "grouping.set",
+      view: "downloads",
+      grouping: "artist",
+    });
+    expect(downloadsArtist.grouping).toEqual({ "auto-find": "all", downloads: "artist" });
+  });
+});
+
 describe("uiReducer detail tabs", () => {
   it("inserts a child immediately after its parent and deduplicates tabs", () => {
     const first = uiReducer(initialUiState, { type: "detail.open", id: ids[0]! });

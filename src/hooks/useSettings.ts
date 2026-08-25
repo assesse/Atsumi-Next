@@ -14,6 +14,7 @@ const fallback: SettingsSnapshot = {
   cacheLimitGb: 10,
   concurrentImageRequests: 5,
   requestStartIntervalMs: 25,
+  collapsedGroupKeys: [],
 };
 
 const runtimeError = (operation: string): ApiError => ({

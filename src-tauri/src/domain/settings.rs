@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::{collections::BTreeSet, sync::LazyLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +12,8 @@ pub const DEFAULT_RELATED_PREVIEW_WIDTH: u32 = 240;
 pub const DEFAULT_CACHE_LIMIT_GB: u32 = 10;
 pub const DEFAULT_CONCURRENT_IMAGE_REQUESTS: u32 = 5;
 pub const DEFAULT_REQUEST_START_INTERVAL_MS: u64 = 25;
+pub const MAX_COLLAPSED_GROUP_KEYS: usize = 2_048;
+pub const MAX_COLLAPSED_GROUP_KEY_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -149,6 +151,7 @@ pub struct SettingsSnapshot {
     pub concurrent_image_requests: u32,
     pub request_start_interval_ms: u64,
     pub auto_find_history_mode: AutoFindHistoryMode,
+    pub collapsed_group_keys: Vec<String>,
 }
 
 impl Default for SettingsSnapshot {
@@ -165,6 +168,7 @@ impl Default for SettingsSnapshot {
             concurrent_image_requests: DEFAULT_CONCURRENT_IMAGE_REQUESTS,
             request_start_interval_ms: DEFAULT_REQUEST_START_INTERVAL_MS,
             auto_find_history_mode: AutoFindHistoryMode::default(),
+            collapsed_group_keys: Vec::new(),
         }
     }
 }
@@ -182,6 +186,28 @@ pub struct SettingsPatch {
     pub concurrent_image_requests: Option<u32>,
     pub request_start_interval_ms: Option<u64>,
     pub auto_find_history_mode: Option<AutoFindHistoryMode>,
+    pub collapsed_group_keys: Option<Vec<String>>,
+}
+
+pub fn normalize_collapsed_group_keys(values: Vec<String>) -> Result<Vec<String>, ValidationError> {
+    if values.len() > MAX_COLLAPSED_GROUP_KEYS {
+        return Err(ValidationError::new(
+            "collapsedGroupKeys",
+            "must contain at most 2048 group keys",
+        ));
+    }
+    let mut normalized = BTreeSet::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() || value.len() > MAX_COLLAPSED_GROUP_KEY_BYTES {
+            return Err(ValidationError::new(
+                "collapsedGroupKeys",
+                "each group key must be between 1 and 256 bytes",
+            ));
+        }
+        normalized.insert(value.to_owned());
+    }
+    Ok(normalized.into_iter().collect())
 }
 
 impl SettingsSnapshot {
@@ -217,6 +243,9 @@ impl SettingsSnapshot {
         }
         if let Some(value) = patch.auto_find_history_mode {
             next.auto_find_history_mode = value;
+        }
+        if let Some(value) = patch.collapsed_group_keys {
+            next.collapsed_group_keys = normalize_collapsed_group_keys(value)?;
         }
 
         // Windows canonicalization is still used at filesystem boundaries,
@@ -267,6 +296,14 @@ impl SettingsSnapshot {
             return Err(ValidationError::new(
                 "requestStartIntervalMs",
                 "must be at most 5000",
+            ));
+        }
+        if normalize_collapsed_group_keys(self.collapsed_group_keys.clone())?
+            != self.collapsed_group_keys
+        {
+            return Err(ValidationError::new(
+                "collapsedGroupKeys",
+                "must be normalized, unique and sorted",
             ));
         }
         Ok(())
@@ -321,5 +358,22 @@ mod tests {
         assert_eq!(normalize_gallery_preview_width(236), 250);
         assert_eq!(normalize_gallery_preview_width(305), 280);
         assert_eq!(normalize_gallery_preview_width(306), 320);
+    }
+
+    #[test]
+    fn accordion_group_keys_are_normalized_before_they_are_persisted() {
+        assert_eq!(
+            normalize_collapsed_group_keys(vec![
+                " downloads\u{1f}day\u{1f}2026-08-25 ".into(),
+                "auto-find\u{1f}artist\u{1f}mizuno".into(),
+                "auto-find\u{1f}artist\u{1f}mizuno".into(),
+            ])
+            .expect("valid keys"),
+            vec![
+                "auto-find\u{1f}artist\u{1f}mizuno".to_owned(),
+                "downloads\u{1f}day\u{1f}2026-08-25".to_owned(),
+            ]
+        );
+        assert!(normalize_collapsed_group_keys(vec![" ".into()]).is_err());
     }
 }

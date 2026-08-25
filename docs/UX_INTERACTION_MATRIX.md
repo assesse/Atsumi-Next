@@ -29,7 +29,7 @@
 
 metadata target이 이벤트를 처리하면 card의 상세 열기와 선택은 발생하지 않는다.
 
-단, Ctrl/Shift가 눌렸거나 선택 항목이 하나 이상이면 별도 toggle state 없이 선택 문맥으로 파생한다. 이 문맥에서는 metadata, 상태, 상세 button을 포함한 카드 내부의 모든 좌클릭이 카드 선택 규칙을 우선하며 내부 action은 실행하지 않는다. 일반 좌클릭은 toggle이 아니라 대상 하나로 교체한다.
+단, Ctrl/Shift가 눌렸거나 선택 항목이 두 개 이상이면 별도 toggle state 없이 다중 선택 문맥으로 파생한다. 이 문맥에서는 metadata, 상태, 상세 button을 포함한 카드 내부의 모든 좌클릭이 카드 선택 규칙을 우선하며 내부 action은 실행하지 않는다. 일반 좌클릭은 toggle이 아니라 대상 하나로 교체한다.
 
 ## Keyboard
 
@@ -52,6 +52,32 @@ metadata target이 이벤트를 처리하면 card의 상세 열기와 선택은 
 - 검색 버튼도 같은 submit action을 사용한다.
 - 비어 있는 input에 focus하면 최근 검색 7개를 표시한다.
 - Auto Find와 Downloads 검색은 현재 탭 데이터만 filter한다.
+
+## Auto Find·Downloads grouping projection
+
+- 두 탭 모두 context row 왼쪽에 `전체 / 기간별 / 작가별`과 `전부 펼치기/전부 접기`를 같은 순서로 둔다. `전체`는 평면 card grid이며 펼침/접기 action은 위치를 유지한 채 비활성화한다.
+- 기간별/작가별 그룹은 카드 panel을 다시 감싸지 않고, 얇은 primary accent와 하단 구분선으로 시작점을 표시한다. 제목은 현재 preview preset에 맞춘 14~17px compact 크기이고 개수 pill·chevron이 펼침 상태를 보조한다.
+- header 전체가 하나의 button이며 `aria-expanded`, focus-visible outline과 reduced-motion chevron을 제공한다. 접힌 grid는 DOM에서 제거해 보이지 않는 thumbnail 구독을 유지하지 않는다.
+- 그룹별 접힘과 전부 펼치기/접기 상태는 SQLite settings CAS를 통해 재시작 뒤 복원한다.
+
+## 다운로드 완료 전 판본 겹침 검토
+
+| 상황 | 표시·입력 | 동작 | 상태 |
+|---|---|---|---|
+| 강한 same-artist overlap | Downloads 카드 warning | `reviewKind=gallery_duplicate`의 전용 검토 dialog를 열고 global duplicate 후보 lookup을 사용하지 않음 | 확정 |
+| 후보 여러 개 | 상단 후보 tab | severity/confidence 순서로 기존 보유본을 전환하고 각 source-page evidence 확인 | 확정 |
+| 모두 의도한 판본 | 둘 다 보관하고 완료 | 모든 미해결 fingerprint pair를 승인하고 최신 후보 재검사 뒤 checkpoint로 재개 | 확정 |
+| 현재 후보가 오탐 | 이 후보는 오탐 | 후보 하나만 승인하고 다른 미해결 후보는 계속 검토 | 확정 |
+| 새 다운로드가 불필요 | 새 다운로드 취소 | incoming job만 취소; 기존 보유본은 변경하지 않고 자동 영구 삭제하지 않음 | 확정 |
+| 아직 결정하지 않음 | 나중에 검토 / dialog X | `review_required`와 검증 staging을 보존하며 자동 재개하지 않음 | 확정 |
+
+## 작품 중복 검토
+
+| 상황 | 표시·입력 | 동작 | 상태 |
+|---|---|---|---|
+| `contains`, page count 상이 | `포괄 작품` / `귀속 작품`과 단일 확정 button | 더 긴 포괄 작품을 고정 보존하고 완전히 포함된 귀속 작품만 hide; backend도 반대 요청 거부 | 확정 |
+| `contains`, page count 동일 또는 기타 관계 | `작품 A/B` hide 선택과 오탐 제외 | 방향을 추측하지 않고 사용자가 안전하게 선택 | 확정 |
+| 연작 이력 | 판정 이력에서 기존 기록 표시 | 연작 분류 입력 UI는 숨기되 저장된 group·decision/API는 삭제하지 않음 | 확정 |
 
 ## Detail tab
 

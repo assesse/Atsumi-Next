@@ -232,12 +232,15 @@ describe("App Phase 3A backend flow", () => {
       firstCard.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
     });
     expect(firstCard).toHaveClass("is-selected");
+    expect(firstCard.querySelector(".selection-indicator")).toBeNull();
     expect(container.querySelector(".selection-toolbar")).not.toHaveClass("is-visible");
     await act(async () => {
       secondCard.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true }));
     });
     const queueButton = container.querySelector<HTMLButtonElement>(".selection-toolbar .primary");
     expect(container.querySelector(".selection-toolbar")).toHaveClass("is-visible");
+    expect(firstCard.querySelector(".selection-indicator")).not.toBeNull();
+    expect(secondCard.querySelector(".selection-indicator")).not.toBeNull();
     await act(async () => {
       queueButton?.click();
       await settle();
@@ -277,6 +280,7 @@ describe("App Phase 3A backend flow", () => {
       expect(toolbar).not.toHaveTextContent("1개 선택됨");
       expect(toolbar?.querySelector("button")).toBeNull();
       expect(grid).not.toHaveClass("is-selection-context");
+      expect(first.querySelector(".selection-indicator")).toBeNull();
 
       await act(async () => second.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true })));
       expect(first).toHaveClass("is-selected");
@@ -285,12 +289,15 @@ describe("App Phase 3A backend flow", () => {
       expect(toolbar).toHaveTextContent("2개 선택됨");
       expect(toolbar?.querySelector(".primary")).not.toBeNull();
       expect(grid).toHaveClass("is-selection-context");
+      expect(first.querySelector(".selection-indicator")).not.toBeNull();
+      expect(second.querySelector(".selection-indicator")).not.toBeNull();
 
       await act(async () => second.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true })));
       expect(first).toHaveClass("is-selected");
       expect(second).not.toHaveClass("is-selected");
       expect(toolbar).not.toHaveClass("is-visible");
       expect(grid).not.toHaveClass("is-selection-context");
+      expect(first.querySelector(".selection-indicator")).toBeNull();
 
       await act(async () => second.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true })));
       await act(async () => first.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 })));
@@ -479,8 +486,10 @@ describe("App Phase 3A backend flow", () => {
       pageSize: 50,
     }));
     expect(viewport.scrollTop).toBe(0);
+    const refreshedMetadata = container.querySelector<HTMLButtonElement>(".gallery-card .byline");
+    if (!refreshedMetadata) throw new Error("Fresh gallery metadata fixture was not rendered");
     await act(async () => {
-      metadata.click();
+      refreshedMetadata.click();
       await settle();
     });
     expect(search.mock.calls).toHaveLength(callsBeforeMetadata + 2);
@@ -579,6 +588,62 @@ describe("App Phase 3A backend flow", () => {
     }
   });
 
+  it("shows the Explore skeleton instead of the previous list while a tag search is pending", async () => {
+    let resolveTagSearch: ((value: { ok: true; data: { queryId: string; firstPage: GalleryPage } }) => void) | undefined;
+    const tagSearch = new Promise<{ ok: true; data: { queryId: string; firstPage: GalleryPage } }>((resolve) => {
+      resolveTagSearch = resolve;
+    });
+    const search = vi.spyOn(backend, "searchSubmit")
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { queryId: "existing-explore-page", firstPage: selectionFixturePage() },
+      })
+      .mockImplementationOnce(() => tagSearch);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      await submitExploreSearch(container);
+      const existingCard = container.querySelector<HTMLElement>('[data-gallery-id="4051038"]');
+      const tag = [...(existingCard?.querySelectorAll<HTMLButtonElement>(".tag") ?? [])]
+        .find((chip) => chip.querySelector(".tag-label")?.textContent === "full color");
+      if (!existingCard || !tag) throw new Error("Existing Explore tag fixture was not rendered");
+
+      await act(async () => {
+        tag.click();
+        await Promise.resolve();
+      });
+      await vi.waitFor(() => expect(search).toHaveBeenCalledTimes(2));
+      expect(container.querySelector(".gallery-grid-skeleton")).toHaveAttribute("aria-busy", "true");
+      expect(container.querySelector('[data-gallery-id="4051038"]')).toBeNull();
+
+      const freshPage = selectionFixturePage();
+      await act(async () => {
+        resolveTagSearch?.({
+          ok: true,
+          data: {
+            queryId: "full-color-page",
+            firstPage: {
+              ...freshPage,
+              items: [{ ...freshPage.items[0]!, id: galleryId(9_000_001), title: "Fresh full color result" }],
+            },
+          },
+        });
+        await settle();
+      });
+      expect(container.querySelector(".gallery-grid-skeleton")).toBeNull();
+      expect(container).toHaveTextContent("Fresh full color result");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   it("keeps series and character favorites in detail while related galleries stay compact", async () => {
     const favoriteSet = vi.spyOn(backend, "favoriteSet");
     const container = document.createElement("div");
@@ -637,13 +702,12 @@ describe("App Phase 3A backend flow", () => {
     await backend.favoriteSet({ namespace: "character", value: "mira lane" }, false);
   });
 
-  it("cancels, restores, groups, batches, and excludes Auto Find candidates", async () => {
+  it("cancels, restores, groups, and excludes Auto Find candidates", async () => {
     await backend.favoriteSet({ namespace: "artist", value: "serein" }, true);
     await backend.favoriteSet({ namespace: "artist", value: "mizuno" }, true);
     const refresh = vi.spyOn(backend, "autoFindRefresh");
     const cancel = vi.spyOn(backend, "autoFindCancel");
     const exclude = vi.spyOn(backend, "autoFindExclude");
-    const queue = vi.spyOn(backend, "downloadQueueAdd");
     const container = document.createElement("div");
     document.body.append(container);
     let root = createRoot(container);
@@ -683,14 +747,8 @@ describe("App Phase 3A backend flow", () => {
     expect(container.textContent).toContain("The Last Tram");
     expect(container.textContent).toContain("Blue Lane");
 
-    await act(async () => {
-      clickButtonContaining(container, "후보 다운로드");
-      await settle();
-    });
-    expect(queue).toHaveBeenCalledWith(
-      expect.arrayContaining([galleryId(4050754), galleryId(4050642)]),
-      expect.stringMatching(/^frontend-queue-\d+-\d+$/),
-    );
+    expect(container).toHaveTextContent("전부 접기");
+    expect(container).not.toHaveTextContent("후보 다운로드");
 
     await act(async () => root.unmount());
     container.replaceChildren();
@@ -729,6 +787,113 @@ describe("App Phase 3A backend flow", () => {
     container.remove();
     await backend.favoriteSet({ namespace: "artist", value: "serein" }, false);
     await backend.favoriteSet({ namespace: "artist", value: "mizuno" }, false);
+  });
+
+  it("uses compact evidence and persists Auto Find and Downloads accordion state", async () => {
+    const originalSettings = await backend.settingsGet();
+    if (!originalSettings.ok) throw new Error(originalSettings.error.message);
+    const reset = await backend.settingsUpdate({ collapsedGroupKeys: [] }, originalSettings.data.revision);
+    if (!reset.ok) throw new Error(reset.error.message);
+    const first = await backend.favoriteSet({ namespace: "artist", value: "serein" }, true);
+    const second = await backend.favoriteSet({ namespace: "artist", value: "mizuno" }, true);
+    if (!first.ok || !second.ok) throw new Error("Could not prepare Auto Find favorites");
+    const seeded = await backend.downloadQueueAdd([galleryId(4051038)], "daily-group-fixture");
+    if (!seeded.ok) throw new Error(seeded.error.message);
+    const settingsUpdate = vi.spyOn(backend, "settingsUpdate");
+    const container = document.createElement("div");
+    document.body.append(container);
+    let root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      await act(async () => {
+        clickButtonContaining(container, "Auto Find");
+        await settle();
+      });
+      await act(async () => {
+        clickButtonContaining(container, "즐겨찾기 작가 갱신");
+        await settle(180);
+      });
+      expect(container).toHaveTextContent("기간별");
+      expect(container).toHaveTextContent("작가별");
+      expect(container).toHaveTextContent("전체");
+      const autoFindGroupingToolbar = container.querySelector(".context-left > .gallery-grouping-toolbar");
+      expect(autoFindGroupingToolbar).not.toBeNull();
+      expect(container.querySelector(".heading-actions .gallery-grouping-toolbar")).toBeNull();
+      await act(async () => {
+        clickButtonContaining(autoFindGroupingToolbar as HTMLElement, "전체");
+        await settle();
+      });
+      expect(container.querySelector(".gallery-groups[data-group-view='auto-find']")).toBeNull();
+      expect(container.querySelector(".gallery-viewport > .gallery-grid")).not.toBeNull();
+      expect(autoFindGroupingToolbar?.querySelector<HTMLButtonElement>(".gallery-groups-toggle-all")).toBeDisabled();
+      await act(async () => {
+        clickButtonContaining(container, "작가별");
+        await settle();
+      });
+      const firstToggle = container.querySelector<HTMLButtonElement>(".gallery-group-toggle[aria-expanded='true']");
+      if (!firstToggle) throw new Error("An expanded Auto Find accordion group is required");
+      await act(async () => {
+        firstToggle.click();
+        await settle();
+      });
+      expect(firstToggle).toHaveAttribute("aria-expanded", "false");
+      await vi.waitFor(() => expect(settingsUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ collapsedGroupKeys: expect.arrayContaining([expect.stringContaining("auto-find\u001fartist\u001f")]) }),
+        expect.any(Number),
+      ));
+
+      const persisted = await backend.settingsGet();
+      if (!persisted.ok) throw new Error(persisted.error.message);
+      expect(persisted.data.collapsedGroupKeys).toEqual(expect.arrayContaining([
+        expect.stringContaining("auto-find\u001fartist\u001f"),
+      ]));
+
+      await act(async () => {
+        clickButtonContaining(container, "Downloads");
+        await settle();
+      });
+      expect(container).toHaveTextContent("기간별");
+      const downloadsGroupingToolbar = container.querySelector(".context-left > .gallery-grouping-toolbar");
+      expect(downloadsGroupingToolbar).not.toBeNull();
+      expect(downloadsGroupingToolbar?.querySelectorAll("button")).toHaveLength(
+        autoFindGroupingToolbar?.querySelectorAll("button").length ?? 0,
+      );
+      const statusFilter = container.querySelector<HTMLSelectElement>("#download-status-filter");
+      expect(statusFilter).toHaveAccessibleName("다운로드 상태 필터");
+      expect(statusFilter).toHaveValue("all");
+      expect(statusFilter?.options).toHaveLength(5);
+      expect(container.querySelector(".status-filter")).toBeNull();
+      expect(container.querySelector(".gallery-group-toggle")).not.toBeNull();
+      expect(container).toHaveTextContent("전부 접기");
+      await act(async () => {
+        clickButtonContaining(container, "전부 접기");
+        await settle();
+      });
+      expect(container.querySelectorAll(".gallery-groups[data-group-view='downloads'] .gallery-group-toggle[aria-expanded='true']")).toHaveLength(0);
+      expect(container).toHaveTextContent("전부 펼치기");
+      await act(async () => {
+        clickButtonContaining(container, "전부 펼치기");
+        await settle();
+      });
+      expect(container.querySelector(".gallery-groups[data-group-view='downloads'] .gallery-group-toggle[aria-expanded='true']")).not.toBeNull();
+      await act(async () => {
+        clickButtonContaining(container, "작가별");
+        await settle();
+      });
+      expect(container.querySelector(".gallery-groups[data-group-view='downloads'] .gallery-group-toggle")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      await backend.downloadCancel(seeded.data.map((entry) => entry.entryId));
+      await backend.favoriteSet({ namespace: "artist", value: "serein" }, false);
+      await backend.favoriteSet({ namespace: "artist", value: "mizuno" }, false);
+      const latest = await backend.settingsGet();
+      if (latest.ok) await backend.settingsUpdate({ collapsedGroupKeys: originalSettings.data.collapsedGroupKeys }, latest.data.revision);
+    }
   });
 
   it("runs internal duplicate analysis only for the selected completed albums", async () => {
@@ -857,8 +1022,11 @@ describe("App Phase 3A backend flow", () => {
         first.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
         await settle();
       });
+      expect(container.textContent).not.toContain("선택 앨범 내부 결과 열기");
+      const internalResultBadge = first.querySelector<HTMLButtonElement>(".internal-result-badge");
+      if (!internalResultBadge) throw new Error("Per-album internal result badge was not rendered");
       await act(async () => {
-        clickButtonContaining(container, "선택 앨범 내부 결과 열기");
+        internalResultBadge.click();
         await settle();
       });
       expect(container.querySelector(".internal-review-dialog")).toHaveAttribute("open");
@@ -868,6 +1036,68 @@ describe("App Phase 3A backend flow", () => {
       });
       expect(scanStart).toHaveBeenLastCalledWith({ entryIds: ["selected-entry-a"] });
       expect(scanStart).toHaveBeenCalledTimes(3);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it("routes a typed download overlap review without looking up a global duplicate candidate", async () => {
+    vi.spyOn(backend, "downloadEntriesList").mockResolvedValue({
+      ok: true,
+      data: {
+        page: 1,
+        totalItems: 1,
+        entries: [{
+          entryId: "incoming-overlap-entry",
+          galleryId: galleryId(4051038),
+          revision: 3,
+          state: "review_required",
+          progress: 100,
+          reviewKind: "gallery_duplicate",
+          reviewId: "app-overlap-review",
+        }],
+      },
+    });
+    vi.spyOn(backend, "duplicateSnapshot").mockResolvedValue({
+      ok: true,
+      data: {
+        profile: {
+          profileVersion: 1,
+          algorithmVersion: 3,
+          dHashBits: 1024,
+          pHashBits: 64,
+          visualMatchThreshold: 0.82,
+          lowInformationStdDevThreshold: 8,
+        },
+        candidates: [],
+      },
+    });
+    const overlapGet = vi.spyOn(backend, "downloadOverlapReviewGet");
+    const globalGet = vi.spyOn(backend, "duplicateReviewGet");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<TestApp />);
+        await settle();
+      });
+      await act(async () => {
+        clickButtonContaining(container, "Downloads");
+        await settle();
+      });
+      const status = container.querySelector<HTMLButtonElement>('[data-gallery-id="4051038"] .status-pill');
+      if (!status) throw new Error("Overlap review status was not rendered");
+      expect(status).toHaveAttribute("title", expect.stringContaining("다운로드 판본 중복"));
+      await act(async () => {
+        status.click();
+        await settle();
+      });
+      expect(overlapGet).toHaveBeenCalledWith("app-overlap-review");
+      expect(globalGet).not.toHaveBeenCalled();
+      expect(container.querySelector(".download-overlap-dialog")).toHaveAttribute("open");
+      expect(container.textContent).toContain("다운로드 판본 중복 검토");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -1084,7 +1314,7 @@ describe("App Phase 3A backend flow", () => {
     expect(container.textContent).toContain("initial duplicate snapshot unavailable");
 
     await act(async () => {
-      clickButtonContaining(container, "전체 작품 간 중복 검사");
+      clickButtonContaining(container, "같은 작가 작품 중복 검사");
       await settle(15);
     });
     expect(scanStart).toHaveBeenCalledTimes(1);
@@ -1098,7 +1328,7 @@ describe("App Phase 3A backend flow", () => {
     expect(container.textContent).toContain("중복 검사 취소됨");
 
     await act(async () => {
-      clickButtonContaining(container, "전체 작품 간 중복 검사");
+      clickButtonContaining(container, "같은 작가 작품 중복 검사");
       await settle(130);
     });
     expect(container.textContent).toContain("중복 검사 완료");
@@ -1141,16 +1371,16 @@ describe("App Phase 3A backend flow", () => {
       },
     });
     await act(async () => {
-      clickButtonContaining(container, "부모 숨기기");
+      clickButtonContaining(container, "38p 포괄 작품 유지 · 24p 귀속 작품 숨기기");
       await settle();
     });
     expect(container.textContent).toContain("다른 창에서 판정이 변경되어 최신 근거와 이력을 다시 불러왔습니다.");
 
     await act(async () => {
-      clickButtonContaining(container, "부모 숨기기");
+      clickButtonContaining(container, "38p 포괄 작품 유지 · 24p 귀속 작품 숨기기");
       await settle();
     });
-    expect(container.querySelector(".decision-history")).toHaveTextContent("부모 숨김");
+    expect(container.querySelector(".decision-history")).toHaveTextContent("귀속 작품 숨김");
     expect(container.textContent).toContain("자동으로 파일을 삭제하지 않으며");
     expect(quarantine).not.toHaveBeenCalled();
 
@@ -1195,11 +1425,12 @@ describe("App Phase 3A backend flow", () => {
         root.render(<TestApp />);
         await settle();
       });
+      const snapshotCallsBeforeExitRequest = snapshot.mock.calls.length;
       await act(async () => {
         mockBackend.emit("app:exit-requested", { source: "tray_menu" });
         await settle();
       });
-      expect(snapshot).toHaveBeenCalledOnce();
+      expect(snapshot).toHaveBeenCalledTimes(snapshotCallsBeforeExitRequest + 1);
       expect(container.querySelector(".exit-dialog")).toHaveAttribute("open");
       expect(container).toHaveTextContent("다운로드 1개");
 

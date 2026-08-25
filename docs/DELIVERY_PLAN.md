@@ -54,7 +54,7 @@ Gate:
 Gate:
 
 - 최신 verified local artifact만 versioned SHA/perceptual/detail/edge evidence 대상으로 삼는다.
-- metadata는 전수 pair 작업 우선순위일 뿐 recall을 제한하지 않고, page matching은 monotonic one-to-one이다.
+- page matching은 monotonic one-to-one이며 현재 production scan은 계산 상한을 위해 정규화된 전체 작가 목록이 겹치는 pair만 생성한다.
 - candidate/evidence/decision/history는 SQLite에 남으며 hide/series/pair-exclude는 revision CAS transaction이다.
 - Review는 live URL이 아니라 root-bound `artifactPage(entryId, sourcePage)`를 사용하고 자동 파일 삭제하지 않는다.
 

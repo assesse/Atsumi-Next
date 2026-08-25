@@ -42,4 +42,18 @@ describe("download event projection", () => {
     expect(stale.galleries).toBe(latest.galleries);
     expect(stale.galleries.get(galleryId(4051027))?.download?.progress).toBe(88);
   });
+
+  it("projects the typed overlap review target from a review-required event", () => {
+    const result = applyDownloadChanged(galleryMap(), {
+      ...event(8, 100),
+      state: "review_required",
+      reviewKind: "gallery_duplicate",
+      reviewId: "overlap-review-1",
+    });
+    expect(result.galleries.get(galleryId(4051027))?.download).toMatchObject({
+      state: "review_required",
+      reviewKind: "gallery_duplicate",
+      reviewId: "overlap-review-1",
+    });
+  });
 });

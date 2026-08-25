@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { backend } from "./api/backend";
 import { hasActiveWork } from "./api/contracts";
 import type {
@@ -6,6 +6,8 @@ import type {
   AutoFindRun,
   AutoFindSnapshot,
   DownloadChangedEvent,
+  DownloadOverlapDecisionRequest,
+  DownloadOverlapReview,
   DuplicateDecisionRequest,
   DuplicateReview,
   DuplicateScanRun,
@@ -32,6 +34,7 @@ import type {
 import { ActivityDrawer } from "./components/ActivityDrawer";
 import { DetailWorkspace } from "./components/DetailWorkspace";
 import { DuplicateReviewDialog } from "./components/DuplicateReviewDialog";
+import { DownloadOverlapReviewDialog } from "./components/DownloadOverlapReviewDialog";
 import { InternalDuplicateDialog } from "./components/InternalDuplicateDialog";
 import { ExitConfirmDialog } from "./components/ExitConfirmDialog";
 import { FluentIcon } from "./components/FluentIcon";
@@ -42,7 +45,7 @@ import { SelectionToolbar } from "./components/SelectionToolbar";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SideRail } from "./components/SideRail";
 import { ViewHeader, type SearchSuggestion } from "./components/ViewHeader";
-import { retryableDownloadStates, type DownloadState, type Gallery, type GalleryId, type SearchSort, type ViewId } from "./core/types";
+import { retryableDownloadStates, type DownloadFilter, type DownloadState, type Gallery, type GalleryId, type SearchSort, type ViewId } from "./core/types";
 import { useSettings } from "./hooks/useSettings";
 import { useWindowPlacement } from "./hooks/useWindowPlacement";
 import { resolveGalleryColumns } from "./layout/galleryColumns";
@@ -59,6 +62,7 @@ import { mergeDownloadEntries, mergeGalleryDetail, mergeGalleryPage } from "./st
 import { galleryQueryReducer, initialGalleryQueryState } from "./state/galleryQuery";
 import { ExplorePageSession } from "./state/explorePageSession";
 import { visibleGalleries } from "./state/selectors";
+import { galleryGroupStorageKey, groupGalleries, type GalleryGroup, type GalleryGrouping } from "./state/galleryGrouping";
 import { initialUiState, uiReducer } from "./state/uiState";
 import { useThumbnailClient } from "./thumbnail";
 
@@ -180,6 +184,11 @@ export default function App() {
   const [duplicateReviewLoading, setDuplicateReviewLoading] = useState(false);
   const [duplicateReviewError, setDuplicateReviewError] = useState<string | null>(null);
   const [duplicateDecisionPending, setDuplicateDecisionPending] = useState(false);
+  const [downloadOverlapReviewId, setDownloadOverlapReviewId] = useState<string | null>(null);
+  const [downloadOverlapReview, setDownloadOverlapReview] = useState<DownloadOverlapReview | null>(null);
+  const [downloadOverlapLoading, setDownloadOverlapLoading] = useState(false);
+  const [downloadOverlapError, setDownloadOverlapError] = useState<string | null>(null);
+  const [downloadOverlapDecisionPending, setDownloadOverlapDecisionPending] = useState(false);
   const [internalSnapshot, setInternalSnapshot] = useState<InternalDuplicateSnapshot>({ groups: [], quarantineRecords: [], skips: [] });
   const [internalRun, setInternalRun] = useState<InternalScanRun | undefined>(undefined);
   const [internalArtifactProgress, setInternalArtifactProgress] = useState<InternalArtifactScanProgress | null>(null);
@@ -211,6 +220,8 @@ export default function App() {
   const duplicateSnapshotRef = useRef<DuplicateSnapshot | null>(null);
   const duplicatePendingRef = useRef(false);
   const duplicateDecisionPendingRef = useRef(false);
+  const downloadOverlapReviewToken = useRef(0);
+  const downloadOverlapDecisionPendingRef = useRef(false);
   const internalHydrationToken = useRef(0);
   const internalReviewToken = useRef(0);
   const internalRunRef = useRef<InternalScanRun | undefined>(undefined);
@@ -249,6 +260,8 @@ export default function App() {
     });
   }
   const { settings, loading: settingsLoading, error: settingsError, save: saveSettings } = useSettings();
+  const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const collapsedGroupPersistence = useRef<{ active: boolean; queued: string[] | null }>({ active: false, queued: null });
 
   useEffect(() => {
     document.documentElement.dataset.privacyMode = settings.privacyMode ? "on" : "off";
@@ -272,6 +285,39 @@ export default function App() {
     setToast({ id: Date.now(), message });
     toastTimer.current = window.setTimeout(() => setToast(null), 2400);
   }, []);
+
+  useEffect(() => {
+    if (collapsedGroupPersistence.current.active || collapsedGroupPersistence.current.queued !== null) return;
+    setCollapsedGroupKeys(new Set(settings.collapsedGroupKeys));
+  }, [settings.collapsedGroupKeys]);
+
+  const persistCollapsedGroupKeys = useCallback((nextKeys: ReadonlySet<string>) => {
+    const serialized = [...nextKeys].sort((left, right) => left.localeCompare(right));
+    setCollapsedGroupKeys(new Set(serialized));
+    collapsedGroupPersistence.current.queued = serialized;
+    if (collapsedGroupPersistence.current.active) return;
+    collapsedGroupPersistence.current.active = true;
+
+    void (async () => {
+      try {
+        while (collapsedGroupPersistence.current.queued !== null) {
+          const desired = collapsedGroupPersistence.current.queued;
+          collapsedGroupPersistence.current.queued = null;
+          const current = await backend.settingsGet();
+          if (!current.ok) {
+            showToast(`그룹 접힘 상태를 저장하지 못했습니다. ${current.error.message}`);
+            continue;
+          }
+          const saved = await backend.settingsUpdate({ collapsedGroupKeys: desired }, current.data.revision);
+          if (!saved.ok) showToast(`그룹 접힘 상태를 저장하지 못했습니다. ${saved.error.message}`);
+        }
+      } catch {
+        showToast("그룹 접힘 상태를 저장하지 못했습니다.");
+      } finally {
+        collapsedGroupPersistence.current.active = false;
+      }
+    })();
+  }, [showToast]);
 
   const runMaintenance = useCallback(async (action: MaintenanceAction): Promise<ApiResult<MaintenanceResult>> => {
     try {
@@ -613,6 +659,22 @@ export default function App() {
     };
   }, []);
 
+  const beginExploreSearch = useCallback(() => {
+    // Invalidate the previous projection before React paints the new search
+    // state. Metadata chips may be clicked while an Explore page is visible;
+    // retaining those IDs until the effect starts makes that old page look
+    // like a transient, local re-filter of the new query.
+    const token = ++searchToken.current;
+    exploreNavigationToken.current += 1;
+    if (exploreRestoreFrame.current !== null) {
+      window.cancelAnimationFrame(exploreRestoreFrame.current);
+      exploreRestoreFrame.current = null;
+    }
+    explorePageSession.current?.clear();
+    setExploreIds([]);
+    dispatchQuery({ type: "submit.started", token });
+  }, []);
+
   useEffect(() => {
     // Keep Explore idle until a form/suggestion/metadata search explicitly advances this generation.
     if (searchRefresh === 0) return;
@@ -882,7 +944,43 @@ export default function App() {
       if (token === duplicateReviewToken.current) setDuplicateReviewLoading(false);
     }
   }, []);
+  const hydrateDownloadOverlapReview = useCallback(async (reviewId: string) => {
+    const token = ++downloadOverlapReviewToken.current;
+    setDownloadOverlapLoading(true);
+    setDownloadOverlapError(null);
+    try {
+      const result = await backend.downloadOverlapReviewGet(reviewId);
+      if (token !== downloadOverlapReviewToken.current) return;
+      if (!result.ok) {
+        setDownloadOverlapError(result.error.message);
+        return;
+      }
+      setDownloadOverlapReview(result.data);
+    } catch {
+      if (token === downloadOverlapReviewToken.current) {
+        setDownloadOverlapError("다운로드 판본 검토 backend에 연결하지 못했습니다.");
+      }
+    } finally {
+      if (token === downloadOverlapReviewToken.current) setDownloadOverlapLoading(false);
+    }
+  }, []);
   const openReview = useCallback((id: GalleryId) => {
+    const download = displayGalleries.get(id)?.download;
+    if (download?.state === "review_required" && download.reviewKind === "gallery_duplicate") {
+      if (!download.reviewId) {
+        showToast("다운로드 판본 검토 ID가 없어 상태를 다시 불러옵니다.");
+        setDownloadsRefresh((value) => value + 1);
+        return;
+      }
+      setDuplicateReviewCandidateId(null);
+      setDuplicateReview(null);
+      setDownloadOverlapReviewId(download.reviewId);
+      setDownloadOverlapReview(null);
+      setDownloadOverlapError(null);
+      dispatch({ type: "overlay.review", galleryId: id });
+      void hydrateDownloadOverlapReview(download.reviewId);
+      return;
+    }
     const candidate = duplicateSnapshot?.candidates.find((item) =>
       item.parent.galleryId === id || item.candidate.galleryId === id,
     );
@@ -896,13 +994,21 @@ export default function App() {
     setDuplicateReviewError(null);
     dispatch({ type: "overlay.review", galleryId: id });
     void hydrateDuplicateReview(candidate.candidateId);
-  }, [duplicateSnapshot?.candidates, hydrateDuplicateReview, hydrateDuplicateSnapshot, showToast]);
+  }, [displayGalleries, duplicateSnapshot?.candidates, hydrateDownloadOverlapReview, hydrateDuplicateReview, hydrateDuplicateSnapshot, showToast]);
   const closeDuplicateReview = useCallback(() => {
     duplicateReviewToken.current += 1;
     setDuplicateReviewCandidateId(null);
     setDuplicateReview(null);
     setDuplicateReviewError(null);
     setDuplicateReviewLoading(false);
+    dispatch({ type: "overlay.review", galleryId: null });
+  }, []);
+  const closeDownloadOverlapReview = useCallback(() => {
+    downloadOverlapReviewToken.current += 1;
+    setDownloadOverlapReviewId(null);
+    setDownloadOverlapReview(null);
+    setDownloadOverlapError(null);
+    setDownloadOverlapLoading(false);
     dispatch({ type: "overlay.review", galleryId: null });
   }, []);
   const applyDuplicateDecision = useCallback(async (request: DuplicateDecisionRequest) => {
@@ -935,6 +1041,39 @@ export default function App() {
       setDuplicateDecisionPending(false);
     }
   }, [hydrateDuplicateReview, hydrateDuplicateSnapshot, showToast]);
+  const applyDownloadOverlapDecision = useCallback(async (request: DownloadOverlapDecisionRequest) => {
+    if (downloadOverlapDecisionPendingRef.current) return;
+    downloadOverlapDecisionPendingRef.current = true;
+    setDownloadOverlapDecisionPending(true);
+    setDownloadOverlapError(null);
+    try {
+      const result = await backend.downloadOverlapDecisionApply(request);
+      if (!result.ok) {
+        if (result.error.code === "REVISION_CONFLICT") {
+          await hydrateDownloadOverlapReview(request.reviewId);
+          setDownloadOverlapError("다른 창에서 검토가 변경되어 최신 내용을 다시 불러왔습니다.");
+          return;
+        }
+        setDownloadOverlapError(result.error.message);
+        return;
+      }
+      setDownloadOverlapReview(result.data.review);
+      setDownloadsRefresh((value) => value + 1);
+      if (result.data.resumed || result.data.cancelled) {
+        closeDownloadOverlapReview();
+        showToast(result.data.cancelled
+          ? "새 다운로드를 취소했습니다. 기존 보유 파일은 변경하지 않았습니다."
+          : "판본 검토를 저장하고 다운로드 완료 절차를 다시 시작했습니다.");
+      } else {
+        showToast("현재 후보 판정을 저장했습니다. 남은 후보를 검토해 주세요.");
+      }
+    } catch {
+      setDownloadOverlapError("다운로드 판본 판정을 backend에 전달하지 못했습니다.");
+    } finally {
+      downloadOverlapDecisionPendingRef.current = false;
+      setDownloadOverlapDecisionPending(false);
+    }
+  }, [closeDownloadOverlapReview, hydrateDownloadOverlapReview, showToast]);
 
   const hydrateInternalReview = useCallback(async (entryId: string) => {
     const token = ++internalReviewToken.current;
@@ -1188,8 +1327,9 @@ export default function App() {
     dispatch({ type: "detail.minimize", minimized: true });
     dispatch({ type: "search.commit", view: "explore", value: target.displayToken });
     if (galleryViewport.current) galleryViewport.current.scrollTop = 0;
+    beginExploreSearch();
     setSearchRefresh((current) => current + 1);
-  }, [ui.exploreSort, ui.search.explore.languages]);
+  }, [beginExploreSearch, ui.exploreSort, ui.search.explore.languages]);
 
   const searchMetadata = startFreshMetadataSearch;
 
@@ -1532,14 +1672,6 @@ export default function App() {
   }))], [displayGalleries, selectedIds]);
   const selectedCanInternalScan = selectedIds.length > 0
     && selectedCompletedEntryIds.length === selectedIds.length;
-  const selectedCompletedEntryId = useMemo(() => {
-    if (!selectedCanInternalScan || selectedCompletedEntryIds.length !== 1) return null;
-    return selectedCompletedEntryIds[0] ?? null;
-  }, [selectedCanInternalScan, selectedCompletedEntryIds]);
-  const selectedHasInternalResult = useMemo(() => (
-    selectedCompletedEntryId !== null
-    && internalSnapshot.groups.some((group) => group.entryId === selectedCompletedEntryId)
-  ), [internalSnapshot.groups, selectedCompletedEntryId]);
 
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
@@ -1617,15 +1749,37 @@ export default function App() {
     return ui.search.explore.draft.trim() ? tagSuggestions.map(catalogSuggestion) : buildSearchSuggestionCatalog(searchHistory);
   }, [searchHistory, tagSuggestions, ui.search.explore.draft]);
 
-  const autoFindGroups = useMemo(() => {
-    const groups = new Map<string, Gallery[]>();
-    for (const gallery of visible) {
-      const current = groups.get(gallery.artist);
-      if (current) current.push(gallery);
-      else groups.set(gallery.artist, [gallery]);
+  const autoFindDiscoveryDates = useMemo(() => new Map(
+    autoFindSnapshot.candidates.map((candidate) => [candidate.id, candidate.discoveredAt]),
+  ), [autoFindSnapshot.candidates]);
+  const groupedVisible = useMemo(() => {
+    if (ui.view !== "auto-find" && ui.view !== "downloads") return [];
+    const grouping = ui.grouping[ui.view] as GalleryGrouping;
+    if (grouping === "all") return [];
+    return groupGalleries(visible, grouping, (gallery) => ui.view === "auto-find"
+      ? autoFindDiscoveryDates.get(gallery.id) ?? gallery.publishedAt
+      : gallery.download?.updatedAt ?? gallery.download?.createdAt ?? gallery.publishedAt);
+  }, [autoFindDiscoveryDates, ui.grouping, ui.view, visible]);
+  const groupedStorageKeys = useMemo(() => groupedVisible.map((group) => galleryGroupStorageKey(
+    ui.view === "auto-find" ? "auto-find" : "downloads",
+    group,
+  )), [groupedVisible, ui.view]);
+  const allVisibleGroupsCollapsed = groupedStorageKeys.length > 0
+    && groupedStorageKeys.every((key) => collapsedGroupKeys.has(key));
+  const toggleGroupCollapsed = useCallback((key: string) => {
+    const next = new Set(collapsedGroupKeys);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    persistCollapsedGroupKeys(next);
+  }, [collapsedGroupKeys, persistCollapsedGroupKeys]);
+  const setAllVisibleGroupsCollapsed = useCallback((collapsed: boolean) => {
+    const next = new Set(collapsedGroupKeys);
+    for (const key of groupedStorageKeys) {
+      if (collapsed) next.add(key);
+      else next.delete(key);
     }
-    return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
-  }, [visible]);
+    persistCollapsedGroupKeys(next);
+  }, [collapsedGroupKeys, groupedStorageKeys, persistCollapsedGroupKeys]);
 
   const config = viewConfig[ui.view];
   const resultSourceLabel = backend.runtime === "tauri" ? "Hitomi 실데이터" : "브라우저 fixture";
@@ -1695,6 +1849,7 @@ export default function App() {
             onCommit={(value) => {
               if (ui.view === "explore") {
                 setExploreSearchOverride(null);
+                beginExploreSearch();
                 setSearchRefresh((current) => current + 1);
               }
               dispatch({ type: "search.commit", view: ui.view, value });
@@ -1708,7 +1863,10 @@ export default function App() {
               } else if (ui.view === "explore") {
                 setExploreSearchOverride(null);
               }
-              if (ui.view === "explore") setSearchRefresh((current) => current + 1);
+              if (ui.view === "explore") {
+                beginExploreSearch();
+                setSearchRefresh((current) => current + 1);
+              }
               dispatch({ type: "search.commit", view: ui.view, value });
             }}
             onCompleteSuggestion={(value) => {
@@ -1735,17 +1893,14 @@ export default function App() {
             <div className="heading-actions">
               {ui.view === "auto-find" ? (
                 <>
-                  <GroupingControl value={ui.grouping["auto-find"]} onChange={(grouping) => dispatch({ type: "grouping.set", view: "auto-find", grouping })} />
                   <button type="button" className="text-button" disabled={autoFindPending || autoFindSnapshot.run?.state === "running"} onClick={() => void refreshAutoFind()}><FluentIcon glyph="\uE72C" /> {autoFindSnapshot.run?.state === "failed" ? "다시 탐색" : "즐겨찾기 작가 갱신"}</button>
                   {autoFindSnapshot.run?.state === "running" ? <button type="button" className="text-button danger-button" disabled={autoFindPending} onClick={() => void cancelAutoFind()}><FluentIcon glyph="\uE711" /> 탐색 취소</button> : null}
-                  <button type="button" className="text-button dark" onClick={() => void queueGalleries(visibleIds)}><FluentIcon glyph="\uE896" /> 후보 다운로드</button>
                 </>
               ) : ui.view === "downloads" ? (
                 <>
-                  <p className="sr-only" id="duplicate-scan-explanation">작품 간 검사는 서로 다른 앨범을 비교하고, 내부 페이지 검사는 각 앨범 안에서 반복되거나 유사한 페이지를 찾습니다.</p>
-                  <GroupingControl value={ui.grouping.downloads} onChange={(grouping) => dispatch({ type: "grouping.set", view: "downloads", grouping })} />
+                  <p className="sr-only" id="duplicate-scan-explanation">작품 간 검사는 작가가 같은 서로 다른 앨범끼리 비교하고, 내부 페이지 검사는 각 앨범 안에서 반복되거나 유사한 페이지를 찾습니다.</p>
                   <button type="button" className="text-button" disabled={reconcilingArtifacts} onClick={() => void reconcileArtifacts()}><FluentIcon glyph="\uE9D9" /> {reconcilingArtifacts ? "무결성 검사 중" : "무결성 검사"}</button>
-                  <button type="button" className="text-button" aria-describedby="duplicate-scan-explanation" title="완료된 모든 앨범을 서로 비교해 작품 단위 중복 후보를 찾습니다." disabled={duplicateLoading || duplicatePending || duplicateRun?.state === "running"} onClick={() => void startDuplicateScan()}><FluentIcon glyph="\uE9D9" /> 전체 작품 간 중복 검사</button>
+                  <button type="button" className="text-button" aria-describedby="duplicate-scan-explanation" title="완료된 앨범 중 작가 정보가 하나라도 같은 작품끼리만 비교합니다." disabled={duplicateLoading || duplicatePending || duplicateRun?.state === "running"} onClick={() => void startDuplicateScan()}><FluentIcon glyph="\uE9D9" /> 같은 작가 작품 중복 검사</button>
                   {duplicateRun?.state === "running" ? <button type="button" className="text-button danger-button" disabled={duplicatePending} onClick={() => void cancelDuplicateScan()}><FluentIcon glyph="\uE711" /> 중복 검사 취소</button> : null}
                   <button
                     type="button"
@@ -1760,14 +1915,6 @@ export default function App() {
                     onClick={() => void startInternalScan(selectedCompletedEntryIds)}
                   ><FluentIcon glyph="\uE9D9" /> 선택 앨범 내부 페이지 검사{selectedCanInternalScan ? ` (${selectedCompletedEntryIds.length})` : ""}</button>
                   {internalRun?.state === "running" ? <button type="button" className="text-button danger-button" disabled={internalPending} onClick={() => void cancelInternalScan()}><FluentIcon glyph="\uE711" /> 내부 검사 취소</button> : null}
-                  <button type="button" className="text-button" disabled={!selectedCompletedEntryId || internalPending} title={!selectedCompletedEntryId ? "완료된 앨범 하나를 선택하세요." : selectedHasInternalResult ? "저장된 내부 페이지 검사 결과를 엽니다." : "저장된 내부 결과가 없습니다. 먼저 선택 앨범 내부 페이지 검사를 실행하세요."} onClick={() => {
-                    if (!selectedCompletedEntryId) return;
-                    if (!selectedHasInternalResult) {
-                      showToast("저장된 내부 결과가 없습니다. 먼저 ‘선택 앨범 내부 페이지 검사’를 실행하세요.");
-                      return;
-                    }
-                    openInternalReview(selectedCompletedEntryId);
-                  }}><FluentIcon glyph="\uE890" /> 선택 앨범 내부 결과 열기</button>
                   <button type="button" className="text-button primary" onClick={() => void queueGalleries(visibleIds)}><FluentIcon glyph="\uE896" /> 전체 다운로드</button>
                 </>
               ) : null}
@@ -1775,40 +1922,75 @@ export default function App() {
           </section>
           <section className="context-row">
             <div className="context-left">
+              {(ui.view === "auto-find" || ui.view === "downloads") ? (
+                <div className="gallery-grouping-toolbar" role="group" aria-label="목록 표시 도구">
+                  <GroupingControl value={ui.grouping[ui.view]} onChange={(grouping) => dispatch({
+                    type: "grouping.set",
+                    view: ui.view === "auto-find" ? "auto-find" : "downloads",
+                    grouping,
+                  })} />
+                  <button
+                    type="button"
+                    className="text-button dark gallery-groups-toggle-all"
+                    disabled={ui.grouping[ui.view] === "all" || !groupedVisible.length}
+                    title={ui.grouping[ui.view] === "all" ? "기간별 또는 작가별에서 사용할 수 있습니다." : undefined}
+                    onClick={() => setAllVisibleGroupsCollapsed(!allVisibleGroupsCollapsed)}
+                  ><FluentIcon glyph="\uE70D" /> {allVisibleGroupsCollapsed ? "전부 펼치기" : "전부 접기"}</button>
+                </div>
+              ) : null}
               {ui.view === "explore" ? (
-                <div className="select-control"><label htmlFor="sort-select">정렬</label><select id="sort-select" value={ui.exploreSort} onChange={(event) => { setExploreSearchOverride(null); dispatch({ type: "sort.set", sort: event.target.value as SearchSort }); }}>{sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
+                <div className="select-control explore-sort-control"><label htmlFor="sort-select">정렬</label><select id="sort-select" value={ui.exploreSort} onChange={(event) => { setExploreSearchOverride(null); dispatch({ type: "sort.set", sort: event.target.value as SearchSort }); }}>{sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
               ) : ui.view === "auto-find" ? (
-                <div className="auto-find-evidence" role="status" aria-live="polite">
-                  <span className={`context-summary auto-find-status is-${autoFindSnapshot.run?.state ?? "idle"}`}>{currentAutoFindStatus}</span>
-                  {autoFindSnapshot.run?.historyMode === "newer_than_oldest_downloaded" && autoFindSnapshot.cutoffEvidence.length ? (
-                    <ul aria-label="Auto Find 기록 cutoff 근거">
-                      {autoFindSnapshot.cutoffEvidence.map((evidence) => (
-                        <li key={evidence.artist}>
-                          {evidence.artist}: {evidence.oldestOwnedGalleryId === undefined
-                            ? "검증 완료·격리 소유 작품 없음"
-                            : `가장 오래된 소유 gallery ID #${evidence.oldestOwnedGalleryId} 이후, ${evidence.qualifiedOwnedCount}개 확인`}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {autoFindSnapshot.truncations.length ? (
-                    <ul aria-label="Auto Find 결과 제한 경고">
-                      {autoFindSnapshot.truncations.map((truncation) => (
-                        <li key={`${truncation.artist}-${truncation.limit}`}>
-                          {truncation.artist}: cutoff 이후 후보 {truncation.eligibleCount}개 중 {truncation.limit}개만 표시했습니다.
-                        </li>
-                      ))}
-                    </ul>
+                <div className="auto-find-evidence">
+                  <span className={`context-summary auto-find-status is-${autoFindSnapshot.run?.state ?? "idle"}`} role="status">{currentAutoFindStatus}</span>
+                  {((autoFindSnapshot.run?.historyMode === "newer_than_oldest_downloaded" && autoFindSnapshot.cutoffEvidence.length)
+                    || autoFindSnapshot.truncations.length) ? (
+                    <details className="auto-find-evidence-details">
+                      <summary>검증 근거 {autoFindSnapshot.cutoffEvidence.length + autoFindSnapshot.truncations.length}개</summary>
+                      <div className="auto-find-evidence-popover">
+                        {autoFindSnapshot.run?.historyMode === "newer_than_oldest_downloaded" && autoFindSnapshot.cutoffEvidence.length ? (
+                          <ul aria-label="Auto Find 기록 cutoff 근거">
+                            {autoFindSnapshot.cutoffEvidence.map((evidence) => (
+                              <li key={evidence.artist}>
+                                {evidence.artist}: {evidence.oldestOwnedGalleryId === undefined
+                                  ? "검증 완료·격리 소유 작품 없음"
+                                  : `가장 오래된 소유 gallery ID #${evidence.oldestOwnedGalleryId} 이후, ${evidence.qualifiedOwnedCount}개 확인`}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        {autoFindSnapshot.truncations.length ? (
+                          <ul aria-label="Auto Find 결과 제한 경고">
+                            {autoFindSnapshot.truncations.map((truncation) => (
+                              <li key={`${truncation.artist}-${truncation.limit}`}>
+                                {truncation.artist}: cutoff 이후 후보 {truncation.eligibleCount}개 중 {truncation.limit}개만 표시했습니다.
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
+                    </details>
                   ) : null}
                 </div>
               ) : (
                 <>
-                  <div className="segmented status-filter" role="group" aria-label="다운로드 상태 필터">
-                    {(["all", "active", "review", "failed", "complete"] as const).map((filter) => (
-                      <button key={filter} type="button" aria-pressed={ui.downloadsFilter === filter} className={ui.downloadsFilter === filter ? "is-active" : ""} onClick={() => dispatch({ type: "downloads.filter", filter })}>
-                        {{ all: "전체", active: "작업 중", review: "검토", failed: "실패", complete: "완료" }[filter]}
-                      </button>
-                    ))}
+                  <div className="select-control download-status-filter-control">
+                    <label className="sr-only" htmlFor="download-status-filter">다운로드 상태</label>
+                    <select
+                      id="download-status-filter"
+                      aria-label="다운로드 상태 필터"
+                      value={ui.downloadsFilter}
+                      onChange={(event) => dispatch({
+                        type: "downloads.filter",
+                        filter: event.target.value as DownloadFilter,
+                      })}
+                    >
+                      {(["all", "active", "review", "failed", "complete"] as const).map((filter) => (
+                        <option key={filter} value={filter}>
+                          {{ all: "전체 상태", active: "작업 중", review: "검토 필요", failed: "실패", complete: "완료" }[filter]}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                   <span className={`context-summary duplicate-scan-status is-${duplicateRun?.state ?? "idle"}`} role="status">{currentDuplicateStatus}</span>
                   <span className={`context-summary duplicate-scan-status is-${internalRun?.state ?? "idle"}`} role="status">{currentInternalStatus}</span>
@@ -1850,21 +2032,23 @@ export default function App() {
             ) : ui.view === "explore" && query.phase === "idle" ? (
               <div className="empty-state"><FluentIcon glyph="\uE721" /><h2>검색을 시작해 주세요</h2><p>검색어와 언어·정렬 필터를 정한 뒤 검색 버튼을 눌러 주세요.</p></div>
             ) : ui.view === "explore" && query.error && !query.page ? (
-              <div className="empty-state" role="alert"><FluentIcon glyph="\uE7BA" /><h2>검색 결과를 불러오지 못했습니다</h2><p>{query.error.message}</p><button type="button" className="text-button" onClick={() => setSearchRefresh((value) => value + 1)}>다시 시도</button></div>
+              <div className="empty-state" role="alert"><FluentIcon glyph="\uE7BA" /><h2>검색 결과를 불러오지 못했습니다</h2><p>{query.error.message}</p><button type="button" className="text-button" onClick={() => { beginExploreSearch(); setSearchRefresh((value) => value + 1); }}>다시 시도</button></div>
             ) : ui.view === "downloads" && downloadsError ? (
               <div className="empty-state" role="alert"><FluentIcon glyph="\uE7BA" /><h2>다운로드 목록을 불러오지 못했습니다</h2><p>{downloadsError}</p><button type="button" className="text-button" onClick={() => setDownloadsRefresh((value) => value + 1)}>다시 시도</button></div>
             ) : ui.view === "auto-find" && autoFindError && !autoFindSnapshot.candidates.length ? (
               <div className="empty-state" role="alert"><FluentIcon glyph="\uE7BA" /><h2>자동 탐색 결과를 불러오지 못했습니다</h2><p>{autoFindError}</p><button type="button" className="text-button" onClick={() => void hydrateAutoFind(true)}>다시 시도</button></div>
             ) : visible.length ? (
-              ui.view === "auto-find" && ui.grouping["auto-find"] === "artist" ? (
-                <div className="gallery-groups">
-                  {autoFindGroups.map(([artist, items]) => (
-                    <section className="gallery-group" key={artist} aria-labelledby={`auto-find-artist-${items[0]?.id}`}>
-                      <h2 id={`auto-find-artist-${items[0]?.id}`}><span>★</span> {artist}<small>{items.length}개 후보</small></h2>
-                      {renderGalleryGrid(items, `${artist} 자동 탐색 후보`)}
-                    </section>
-                  ))}
-                </div>
+              (ui.view === "auto-find" || ui.view === "downloads") ? (
+                ui.grouping[ui.view] === "all"
+                  ? renderGalleryGrid(visible, `${config.title} 전체 목록`)
+                  : <GalleryAccordionGroups
+                      groups={groupedVisible}
+                      view={ui.view}
+                      previewWidth={previewWidth}
+                      collapsedGroupKeys={collapsedGroupKeys}
+                      onToggle={toggleGroupCollapsed}
+                      renderGrid={renderGalleryGrid}
+                    />
               ) : renderGalleryGrid(visible, config.title)
             ) : (
               <div className="empty-state"><FluentIcon glyph="\uE11A" /><h2>표시할 갤러리가 없습니다</h2><p>{ui.view === "auto-find" ? "즐겨찾기 작가를 추가한 뒤 명시적으로 갱신하거나 현재 검색·언어 필터를 바꿔 보세요." : "검색어나 언어·상태 필터를 바꿔 보세요."}</p></div>
@@ -1928,6 +2112,19 @@ export default function App() {
         onRetry={() => duplicateReviewCandidateId && void hydrateDuplicateReview(duplicateReviewCandidateId)}
         onRescan={() => void startDuplicateScan()}
         onDecision={(request) => void applyDuplicateDecision(request)}
+      />
+
+      <DownloadOverlapReviewDialog
+        open={ui.overlays.reviewGalleryId !== null && downloadOverlapReviewId !== null}
+        review={downloadOverlapReview ?? undefined}
+        loading={downloadOverlapLoading}
+        error={downloadOverlapError}
+        decisionPending={downloadOverlapDecisionPending}
+        browserFixture={backend.runtime === "browser-mock"}
+        thumbnailClient={thumbnailClient}
+        onClose={closeDownloadOverlapReview}
+        onRetry={() => downloadOverlapReviewId && void hydrateDownloadOverlapReview(downloadOverlapReviewId)}
+        onDecision={(request) => void applyDownloadOverlapDecision(request)}
       />
 
       <InternalDuplicateDialog
@@ -2041,11 +2238,60 @@ export default function App() {
   );
 }
 
-function GroupingControl({ value, onChange }: { value: "all" | "artist"; onChange: (value: "all" | "artist") => void }) {
+function GroupingControl({ value, onChange }: { value: GalleryGrouping; onChange: (value: GalleryGrouping) => void }) {
   return (
-    <div className="segmented" role="group" aria-label="표시 방식">
+    <div className="segmented gallery-grouping-control" role="group" aria-label="표시 방식">
       <button type="button" aria-pressed={value === "all"} className={value === "all" ? "is-active" : ""} onClick={() => onChange("all")}>전체</button>
+      <button type="button" aria-pressed={value === "day"} className={value === "day" ? "is-active" : ""} onClick={() => onChange("day")}>기간별</button>
       <button type="button" aria-pressed={value === "artist"} className={value === "artist" ? "is-active" : ""} onClick={() => onChange("artist")}>작가별</button>
+    </div>
+  );
+}
+
+type GalleryAccordionGroupsProps = {
+  groups: readonly GalleryGroup[];
+  view: "auto-find" | "downloads";
+  previewWidth: number;
+  collapsedGroupKeys: ReadonlySet<string>;
+  onToggle: (key: string) => void;
+  renderGrid: (items: Gallery[], ariaLabel: string) => ReactNode;
+};
+
+function GalleryAccordionGroups({
+  groups,
+  view,
+  previewWidth,
+  collapsedGroupKeys,
+  onToggle,
+  renderGrid,
+}: GalleryAccordionGroupsProps) {
+  const titleSize = Math.round(Math.max(14, Math.min(17, previewWidth / 18)));
+  return (
+    <div className="gallery-groups" data-group-view={view}>
+      {groups.map((group) => {
+        const storageKey = galleryGroupStorageKey(view, group);
+        const collapsed = collapsedGroupKeys.has(storageKey);
+        const label = view === "auto-find" && group.key.startsWith("artist\u001f")
+          ? `즐겨찾기 작가 · ${group.label}`
+          : group.label;
+        return (
+          <section className={`gallery-group${collapsed ? " is-collapsed" : ""}`} key={group.key}>
+            <h2>
+              <button
+                type="button"
+                className="gallery-group-toggle"
+                aria-expanded={!collapsed}
+                onClick={() => onToggle(storageKey)}
+              >
+                <span className="gallery-group-title" style={{ fontSize: `${titleSize}px` }}>{label}</span>
+                <small className="gallery-group-count">{group.items.length}개 {view === "auto-find" ? "후보" : "작품"}</small>
+                <span className="gallery-group-toggle-icon" aria-hidden="true">▾</span>
+              </button>
+            </h2>
+            {!collapsed ? <div className="gallery-group-content">{renderGrid(group.items, `${label} 갤러리`)}</div> : null}
+          </section>
+        );
+      })}
     </div>
   );
 }

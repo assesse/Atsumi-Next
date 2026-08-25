@@ -25,7 +25,7 @@ export const initialUiState: UiState = {
   },
   exploreSort: "recent",
   downloadsFilter: "all",
-  grouping: { "auto-find": "all", downloads: "all" },
+  grouping: { "auto-find": "day", downloads: "day" },
   selection: { ids: new Set(), anchorId: null },
   detail: { tabs: [], activeId: null, minimized: false },
   overlays: {
@@ -45,7 +45,7 @@ export type UiAction =
   | { type: "search.languages"; view: ViewId; languages: Language[] }
   | { type: "sort.set"; sort: SearchSort }
   | { type: "downloads.filter"; filter: DownloadFilter }
-  | { type: "grouping.set"; view: "auto-find" | "downloads"; grouping: "all" | "artist" }
+  | { type: "grouping.set"; view: "auto-find" | "downloads"; grouping: "all" | "day" | "artist" }
   | {
       type: "selection.click";
       id: GalleryId;

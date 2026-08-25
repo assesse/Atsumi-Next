@@ -275,6 +275,21 @@ impl From<ApplicationError> for ApiError {
                     json!(candidate_id),
                 )])),
             },
+            ApplicationError::DownloadOverlapReviewNotFound(review_id) => Self {
+                code: "DOWNLOAD_OVERLAP_REVIEW_NOT_FOUND".into(),
+                message: "The download overlap review no longer exists; reload the download list"
+                    .into(),
+                retryable: false,
+                action: Some(ApiAction::Review),
+                details: Some(BTreeMap::from([("reviewId".into(), json!(review_id))])),
+            },
+            ApplicationError::DownloadOverlapDecisionInvalid(reason) => Self {
+                code: "DOWNLOAD_OVERLAP_DECISION_INVALID".into(),
+                message: "The download overlap decision is no longer safe to apply".into(),
+                retryable: false,
+                action: Some(ApiAction::Review),
+                details: Some(BTreeMap::from([("reason".into(), json!(reason))])),
+            },
             ApplicationError::InternalDuplicateScanNotRunning => Self {
                 code: "INTERNAL_DUPLICATE_SCAN_NOT_RUNNING".into(),
                 message: "There is no active internal duplicate scan to cancel".into(),

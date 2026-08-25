@@ -134,7 +134,7 @@ type JobEvent = {
 
 ## 데이터 소유권
 
-- SQLite(schema v19): 설정(독립 Related galleries preview width 포함), source revision identity가 분리된 Gallery snapshot, 다운로드, immutable artifact 위치, job/page attempt 진단, 판정, 제외, 즐겨찾기, 검색 이력과 Auto Find run/후보/cutoff/truncation의 canonical source
+- SQLite(schema v26): 설정(프라이버시·그룹 accordion 포함), source revision identity가 분리된 Gallery snapshot, 다운로드, immutable artifact 위치, job/page attempt 진단, 완료 전 판본 겹침 review/policy, 판정, 제외, 즐겨찾기, 검색 이력과 Auto Find run/후보/cutoff/truncation의 canonical source
 - 실제 폴더: 다운로드 artifact
 - 폴더 manifest: 이식성과 복구를 위한 파생 metadata
 - thumbnail cache: 언제든 재생성 가능한 cache
@@ -180,6 +180,13 @@ type JobEvent = {
 - production Tauri는 `HitomiLiveAdapter` 하나를 `SearchRepository`와 `ThumbnailResolver` 양쪽에 공유 주입한다. 브라우저 review mode와 단위 테스트만 fixture resolver를 사용한다.
 - resolver는 HTTPS allowlist·redirect 재검증·응답 크기·MIME/signature·decode dimension/allocation을 검사하고 지원 후보를 순서대로 시도한다. thumbnail은 재생성 가능한 bounded memory cache이며, 영속 파일은 검증된 download artifact만 소유한다.
 
+## 다운로드 완료 전 판본 겹침 gate
+
+- worker가 incoming page 전체를 verified WebP/SHA checkpoint로 만든 뒤, manifest/Completed transaction 전에 gate를 실행한다. HashProfile 1 page cache와 global pair analyzer를 재사용하며 internal duplicate algorithm v4는 사용하지 않는다.
+- 정규화 작가 key가 정확히 교차하는 candidate만 v1 blocking 대상이다. 같은 작가 finalization lock을 정렬된 key 순서로 잡은 상태에서 candidate를 다시 읽고, 강한 근거가 없으면 manifest를 쓴 뒤 completed로 commit하며 근거가 있으면 review/candidate/page pair와 `review_required` target을 한 transaction에 쓴다.
+- 사용자 결정 시 incoming과 아직 미해결인 existing artifact의 실제 파일을 다시 검증하고 fingerprint를 재현한다. CAS/fingerprint가 오래됐으면 review를 stale로 닫고 새 attempt를 queue해 gate를 다시 실행한다. keep-both/false-positive pair policy도 fingerprint+HashProfile+policy version에 묶이므로 다른 bytes에 재사용되지 않는다.
+- `review_required`는 restart에서 자동 resume하지 않는다. valid pending review는 보존하고, target이 없거나 pending row가 깨진 legacy/corrupt entry만 안전한 failed 상태로 정규화한다. 어느 경로도 기존 owned artifact를 자동 변경하지 않는다.
+
 ## 즐겨찾기·검색 이력·Auto Find
 
 - 작가·그룹·시리즈·캐릭터·태그 즐겨찾기와 성공한 명시적 검색 이력은 SQLite가 소유한다. frontend set과 suggestion 목록은 backend snapshot의 projection이며 localStorage를 canonical source로 사용하지 않는다. 검색·상세·Related의 `GallerySummary`는 `series[]`와 `characters[]`를 항상 전달한다.
@@ -191,7 +198,7 @@ type JobEvent = {
 - run, 진행률, 후보 metadata snapshot과 gallery 제외는 SQLite에 기록한다. schema v11 후보에는 series/characters JSON도 들어가며 이전 v10 후보는 `[]` 기본값으로 보존한다. `auto-find:changed`는 시작·작가별 진행·최종 상태에서 보내는 bounded UI 갱신 신호일 뿐이며, 앱 재시작이나 event 유실 뒤에는 `auto_find_snapshot`으로 최신 run과 후보를 복원한다.
 - cancel token과 DB run state를 함께 확인해 취소 뒤 늦은 page를 저장하지 않는다. 정상 앱 종료는 active run을 `cancelled/AUTO_FIND_APP_EXIT`, 비정상 종료 뒤 startup recovery는 남은 run을 `failed/AUTO_FIND_INTERRUPTED`로 종결하고 부분 후보를 보존한다.
 - 후보 insert와 snapshot은 모든 download entry, 명시적 Auto Find exclusion, 작품 숨김, resolved duplicate decision과 pair 제외를 제외한다. 이 판정은 frontend flag가 아니라 schema v12의 SQLite record를 조회한다.
-- 전체/작가별 묶음, 결과 문자열 검색과 언어 filter는 이미 저장된 후보에 대한 frontend local projection이다. 이 조작은 source request를 만들지 않는다. 후보 일괄 다운로드는 기존 idempotent download queue use case를 재사용한다.
+- 전체/기간별/작가별 projection, 결과 문자열 검색과 언어 filter는 이미 저장된 후보에 대한 frontend local projection이다. 이 조작은 source request를 만들지 않는다. 후보 다운로드는 기존 idempotent download queue use case를 재사용한다.
 - run은 설정의 `include_all_history|newer_than_oldest_downloaded`를 snapshot한다. 후자는 complete/quarantined 상태의 실제 소유 artifact만 근거로 작가별 oldest gallery ID를 계산하고 `source=verified_owned_artifact`, `policyVersion=1`, qualified count를 저장한다. 증거가 없으면 임의 cutoff하지 않는다.
 - production source는 언어별 Nozomi ID를 교집합·dedupe·내림차순 정렬한 뒤 cutoff를 metadata fetch 전에 적용한다. cutoff 뒤 candidate limit은 50,000개이고 초과는 `candidate_limit_after_cutoff` truncation으로 영속한다. 과거의 작가당 250-page 상한은 더 이상 현재 계약이 아니다.
 

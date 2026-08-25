@@ -312,7 +312,7 @@ pub const MIGRATIONS: &[Migration] = &[
             CREATE TABLE download_jobs_v7 (
                 job_id TEXT PRIMARY KEY,
                 request_id TEXT NOT NULL UNIQUE,
-                entry_id TEXT NOT NULL UNIQUE
+                entry_id TEXT NOT NULL
                     REFERENCES download_entries_v7(entry_id) ON DELETE CASCADE,
                 gallery_id INTEGER NOT NULL CHECK (gallery_id > 0),
                 revision INTEGER NOT NULL CHECK (revision >= 0),
@@ -1366,6 +1366,119 @@ pub const MIGRATIONS: &[Migration] = &[
                 ON metadata_catalog_entries(normalized_name);
         "#,
     },
+    Migration {
+        version: 25,
+        name: "gallery_group_accordion_state",
+        sql: r#"
+            ALTER TABLE settings
+            ADD COLUMN collapsed_group_keys_json TEXT NOT NULL DEFAULT '[]'
+                CHECK (length(collapsed_group_keys_json) <= 131072);
+        "#,
+    },
+    Migration {
+        version: 26,
+        name: "download_overlap_review_gate",
+        sql: r#"
+            CREATE TABLE download_overlap_reviews (
+                review_id TEXT PRIMARY KEY CHECK (length(trim(review_id)) > 0),
+                entry_id TEXT NOT NULL
+                    REFERENCES download_entries(entry_id) ON DELETE CASCADE,
+                incoming_gallery_id INTEGER NOT NULL CHECK (incoming_gallery_id > 0),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                state TEXT NOT NULL CHECK (state IN (
+                    'pending', 'resolved', 'cancelled', 'stale'
+                )),
+                profile_version INTEGER NOT NULL
+                    REFERENCES duplicate_hash_profiles(profile_version),
+                policy_version INTEGER NOT NULL CHECK (policy_version > 0),
+                incoming_fingerprint TEXT NOT NULL CHECK (length(incoming_fingerprint) = 64),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+                resolved_at TEXT
+            ) STRICT;
+            CREATE UNIQUE INDEX download_overlap_one_pending_per_entry
+                ON download_overlap_reviews(entry_id) WHERE state = 'pending';
+            CREATE INDEX download_overlap_reviews_entry_idx
+                ON download_overlap_reviews(entry_id, created_at DESC, review_id DESC);
+            CREATE INDEX download_overlap_reviews_recent_idx
+                ON download_overlap_reviews(updated_at DESC, review_id DESC);
+
+            CREATE TABLE download_overlap_candidates (
+                candidate_id TEXT PRIMARY KEY CHECK (length(trim(candidate_id)) > 0),
+                review_id TEXT NOT NULL
+                    REFERENCES download_overlap_reviews(review_id) ON DELETE CASCADE,
+                existing_entry_id TEXT NOT NULL
+                    REFERENCES download_entries(entry_id) ON DELETE CASCADE,
+                existing_gallery_id INTEGER NOT NULL CHECK (existing_gallery_id > 0),
+                existing_fingerprint TEXT NOT NULL CHECK (length(existing_fingerprint) = 64),
+                relation TEXT NOT NULL CHECK (relation IN (
+                    'near_equivalent', 'incoming_contains_existing',
+                    'existing_contains_incoming', 'partial_overlap',
+                    'translation_edition'
+                )),
+                confidence REAL NOT NULL CHECK (confidence BETWEEN 0.0 AND 1.0),
+                matched_pages INTEGER NOT NULL CHECK (matched_pages > 0),
+                exact_pages INTEGER NOT NULL CHECK (exact_pages BETWEEN 0 AND matched_pages),
+                visual_pages INTEGER NOT NULL CHECK (visual_pages BETWEEN 0 AND matched_pages),
+                existing_coverage REAL NOT NULL CHECK (existing_coverage BETWEEN 0.0 AND 1.0),
+                incoming_coverage REAL NOT NULL CHECK (incoming_coverage BETWEEN 0.0 AND 1.0),
+                existing_unique_pages INTEGER NOT NULL CHECK (existing_unique_pages >= 0),
+                incoming_unique_pages INTEGER NOT NULL CHECK (incoming_unique_pages >= 0),
+                longest_aligned_run INTEGER NOT NULL CHECK (longest_aligned_run > 0),
+                rank INTEGER NOT NULL CHECK (rank > 0),
+                decision TEXT CHECK (decision IS NULL OR decision IN ('keep_both', 'false_positive')),
+                UNIQUE (review_id, existing_entry_id),
+                CHECK (exact_pages + visual_pages = matched_pages)
+            ) STRICT;
+            CREATE INDEX download_overlap_candidates_review_idx
+                ON download_overlap_candidates(review_id, decision, rank, candidate_id);
+
+            CREATE TABLE download_overlap_page_pairs (
+                candidate_id TEXT NOT NULL
+                    REFERENCES download_overlap_candidates(candidate_id) ON DELETE CASCADE,
+                pair_index INTEGER NOT NULL CHECK (pair_index >= 0),
+                incoming_source_page INTEGER NOT NULL CHECK (incoming_source_page > 0),
+                existing_source_page INTEGER NOT NULL CHECK (existing_source_page > 0),
+                exact_sha256 INTEGER NOT NULL CHECK (exact_sha256 IN (0, 1)),
+                d_hash_distance INTEGER NOT NULL CHECK (d_hash_distance >= 0),
+                p_hash_distance INTEGER NOT NULL CHECK (p_hash_distance >= 0),
+                detail_hash_distance INTEGER NOT NULL CHECK (detail_hash_distance >= 0),
+                edge_similarity REAL NOT NULL CHECK (edge_similarity BETWEEN 0.0 AND 1.0),
+                visual_similarity REAL NOT NULL CHECK (visual_similarity BETWEEN 0.0 AND 1.0),
+                low_information INTEGER NOT NULL CHECK (low_information IN (0, 1)),
+                PRIMARY KEY (candidate_id, pair_index)
+            ) STRICT;
+
+            CREATE TABLE download_overlap_decisions (
+                decision_id TEXT PRIMARY KEY CHECK (length(trim(decision_id)) > 0),
+                review_id TEXT NOT NULL
+                    REFERENCES download_overlap_reviews(review_id),
+                review_revision INTEGER NOT NULL CHECK (review_revision >= 0),
+                candidate_id TEXT REFERENCES download_overlap_candidates(candidate_id),
+                action TEXT NOT NULL CHECK (action IN (
+                    'continue_keep_both', 'false_positive_continue', 'cancel_incoming'
+                )),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0)
+            ) STRICT;
+            CREATE INDEX download_overlap_decisions_review_idx
+                ON download_overlap_decisions(review_id, created_at, decision_id);
+
+            CREATE TABLE download_overlap_pair_policies (
+                left_fingerprint TEXT NOT NULL CHECK (length(left_fingerprint) = 64),
+                right_fingerprint TEXT NOT NULL CHECK (length(right_fingerprint) = 64),
+                profile_version INTEGER NOT NULL
+                    REFERENCES duplicate_hash_profiles(profile_version),
+                policy_version INTEGER NOT NULL CHECK (policy_version > 0),
+                decision TEXT NOT NULL CHECK (decision IN ('keep_both', 'false_positive')),
+                created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+                PRIMARY KEY (
+                    left_fingerprint, right_fingerprint,
+                    profile_version, policy_version
+                ),
+                CHECK (left_fingerprint <= right_fingerprint)
+            ) STRICT;
+        "#,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1653,7 +1766,7 @@ mod tests {
         let report = MigrationRunner::run(&mut connection).expect("migrate v14 to v15");
         assert_eq!(
             report.applied_versions,
-            vec![15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+            vec![15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
         );
         let historical_import_tables: i64 = connection
             .query_row(
@@ -1750,9 +1863,9 @@ mod tests {
         let report = MigrationRunner::run(&mut connection).expect("migrate v11 to v12");
         assert_eq!(
             report.applied_versions,
-            vec![12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+            vec![12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
         );
-        assert_eq!(report.current_version, 24);
+        assert_eq!(report.current_version, 26);
         let favorite: String = connection
             .query_row(
                 "SELECT value FROM favorites WHERE namespace = 'artist'",
@@ -1805,7 +1918,7 @@ mod tests {
         }
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v21 to v22");
-        assert_eq!(report.applied_versions, vec![22, 23, 24]);
+        assert_eq!(report.applied_versions, vec![22, 23, 24, 25, 26]);
         let columns = connection
             .prepare(
                 "SELECT name FROM pragma_table_info('internal_duplicate_group_pages') ORDER BY cid",
@@ -1856,8 +1969,8 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v22 to v23");
-        assert_eq!(report.applied_versions, vec![23, 24]);
-        assert_eq!(report.current_version, 24);
+        assert_eq!(report.applied_versions, vec![23, 24, 25, 26]);
+        assert_eq!(report.current_version, 26);
         let settings: (i64, i64) = connection
             .query_row(
                 "SELECT max_columns, privacy_mode FROM settings WHERE singleton = 1",
@@ -1929,8 +2042,8 @@ mod tests {
             .unwrap();
 
         let report = MigrationRunner::run(&mut connection).expect("migrate v23 to v24");
-        assert_eq!(report.applied_versions, vec![24]);
-        assert_eq!(report.current_version, 24);
+        assert_eq!(report.applied_versions, vec![24, 25, 26]);
+        assert_eq!(report.current_version, 26);
         let preserved: (String, i64, i64, i64) = connection
             .query_row(
                 r#"SELECT e.canonical_token, s.revision, s.artist_count, s.group_count
@@ -1941,6 +2054,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(preserved, ("tag:webtoon".to_owned(), 7, 0, 0));
+        let collapsed_group_keys: String = connection
+            .query_row(
+                "SELECT collapsed_group_keys_json FROM settings WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(collapsed_group_keys, "[]");
         assert_eq!(
             connection
                 .execute(
@@ -1964,5 +2085,70 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn download_overlap_migration_is_additive_from_v25() {
+        let mut connection = Connection::open_in_memory().expect("open v25 migration database");
+        connection
+            .execute_batch(
+                r#"
+                    PRAGMA foreign_keys = ON;
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT (
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        )
+                    ) STRICT;
+                "#,
+            )
+            .unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 25)
+        {
+            connection.execute_batch(migration.sql).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                    params![migration.version, migration.name],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO galleries (gallery_id, revision, title, source_page_count) VALUES (42, 0, 'Preserved', 1)",
+                [],
+            )
+            .unwrap();
+
+        let report = MigrationRunner::run(&mut connection).expect("migrate v25 to v26");
+        assert_eq!(report.applied_versions, vec![26]);
+        assert_eq!(report.current_version, 26);
+        let preserved: String = connection
+            .query_row(
+                "SELECT title FROM galleries WHERE gallery_id=42",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved, "Preserved");
+        for table in [
+            "download_overlap_reviews",
+            "download_overlap_candidates",
+            "download_overlap_page_pairs",
+            "download_overlap_decisions",
+            "download_overlap_pair_policies",
+        ] {
+            let count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing {table}");
+        }
     }
 }

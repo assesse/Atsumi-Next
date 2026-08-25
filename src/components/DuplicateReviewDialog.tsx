@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type {
   DuplicateDecisionAction,
   DuplicateDecisionRequest,
@@ -44,8 +44,8 @@ const evidenceLabel: Record<DuplicateReview["evidence"][number]["kind"], string>
 };
 
 const decisionLabel: Record<DuplicateDecisionAction, string> = {
-  hide_parent: "부모 숨김",
-  hide_candidate: "후보 숨김",
+  hide_parent: "작품 A 숨김",
+  hide_candidate: "작품 B 숨김",
   series_link: "연작 연결",
   series_unlink: "연작 연결 해제",
   exclude_pair: "작품 쌍 제외",
@@ -53,6 +53,15 @@ const decisionLabel: Record<DuplicateDecisionAction, string> = {
 
 const percent = (value: number): string =>
   `${Math.round(Math.min(1, Math.max(0, Number.isFinite(value) ? value : 0)) * 100)}%`;
+
+const containmentDecision = (review?: DuplicateReview) => {
+  if (!review || review.candidate.relation !== "contains") return null;
+  const { parent, candidate } = review.candidate;
+  if (parent.pageCount === candidate.pageCount) return null;
+  return parent.pageCount > candidate.pageCount
+    ? { keep: parent, hide: candidate, hideAction: "hide_candidate" as const, keepSide: "parent" as const }
+    : { keep: candidate, hide: parent, hideAction: "hide_parent" as const, keepSide: "candidate" as const };
+};
 
 const visualGallery = (
   gallery: DuplicateGalleryRef,
@@ -116,8 +125,6 @@ export function DuplicateReviewDialog({
   const dialog = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
-  const [seriesGroupId, setSeriesGroupId] = useState("");
-  const [seriesName, setSeriesName] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -138,12 +145,6 @@ export function DuplicateReviewDialog({
     };
   }, [open]);
 
-  useEffect(() => {
-    const first = review?.seriesGroups[0];
-    setSeriesGroupId(first?.seriesGroupId ?? "");
-    setSeriesName("");
-  }, [review?.candidate.candidateId, review?.seriesGroups[0]?.seriesGroupId]);
-
   const parentVisual = useMemo(
     () => review ? visualGallery(review.candidate.parent, galleries) : undefined,
     [galleries, review],
@@ -152,6 +153,7 @@ export function DuplicateReviewDialog({
     () => review ? visualGallery(review.candidate.candidate, galleries) : undefined,
     [galleries, review],
   );
+  const containment = containmentDecision(review);
 
   const decide = (action: DuplicateDecisionAction, extra: Partial<DuplicateDecisionRequest> = {}) => {
     if (!review || decisionPending) return;
@@ -217,6 +219,12 @@ export function DuplicateReviewDialog({
                 자동으로 파일을 삭제하지 않으며 판정은 이력에 보존됩니다.
               </span>
             </div>
+            {containment ? (
+              <div className="containment-policy" role="note">
+                <strong>{containment.keep.pageCount}p 포괄 작품을 남깁니다.</strong>
+                <span>{containment.hide.pageCount}p 귀속 작품은 포괄 작품에 완전히 포함된 것으로 판정되어 숨김 대상만 선택할 수 있습니다.</span>
+              </div>
+            ) : null}
 
             <section className="review-evidence" aria-labelledby="review-evidence-title">
               <h3 id="review-evidence-title">판정 근거</h3>
@@ -232,8 +240,18 @@ export function DuplicateReviewDialog({
             </section>
 
             <div className="review-columns">
-              <ReviewCard gallery={review.candidate.parent} label="부모 작품" visual={parentVisual} thumbnailClient={thumbnailClient} />
-              <ReviewCard gallery={review.candidate.candidate} label="후보 작품" visual={candidateVisual} thumbnailClient={thumbnailClient} />
+              <ReviewCard
+                gallery={review.candidate.parent}
+                label={containment ? (containment.keepSide === "parent" ? "포괄 작품" : "귀속 작품") : "작품 A"}
+                visual={parentVisual}
+                thumbnailClient={thumbnailClient}
+              />
+              <ReviewCard
+                gallery={review.candidate.candidate}
+                label={containment ? (containment.keepSide === "candidate" ? "포괄 작품" : "귀속 작품") : "작품 B"}
+                visual={candidateVisual}
+                thumbnailClient={thumbnailClient}
+              />
             </div>
 
             <details className="match-pairs" open>
@@ -274,55 +292,13 @@ export function DuplicateReviewDialog({
               ) : <p className="review-empty">표시할 일치 페이지가 없습니다.</p>}
             </details>
 
-            <section className="series-decision" aria-labelledby="series-decision-title">
-              <div>
-                <h3 id="series-decision-title">연작 관계</h3>
-                <span>기존 그룹을 선택하거나 새 이름을 입력해 두 작품을 연결합니다.</span>
-              </div>
-              <select aria-label="기존 연작 그룹" value={seriesGroupId} onChange={(event) => setSeriesGroupId(event.target.value)}>
-                <option value="">새 연작 만들기</option>
-                {review.seriesGroups.map((group) => <option key={group.seriesGroupId} value={group.seriesGroupId}>{group.name}</option>)}
-              </select>
-              <input
-                aria-label="새 연작 이름"
-                placeholder="새 연작 이름"
-                value={seriesName}
-                disabled={Boolean(seriesGroupId)}
-                onChange={(event) => setSeriesName(event.target.value)}
-              />
-              <button
-                type="button"
-                className="text-button series-button"
-                disabled={decisionPending || (!seriesGroupId && !seriesName.trim())}
-                onClick={() => decide("series_link", seriesGroupId ? { seriesGroupId } : { seriesName: seriesName.trim() })}
-              >연작으로 묶기</button>
-              <button
-                type="button"
-                className="text-button"
-                disabled={decisionPending || !review.seriesGroups.length}
-                onClick={() => decide("series_unlink", {
-                  targetGalleryId: review.candidate.parent.galleryId,
-                  ...(seriesGroupId ? { seriesGroupId } : {}),
-                })}
-              >부모 묶음 풀기</button>
-              <button
-                type="button"
-                className="text-button"
-                disabled={decisionPending || !review.seriesGroups.length}
-                onClick={() => decide("series_unlink", {
-                  targetGalleryId: review.candidate.candidate.galleryId,
-                  ...(seriesGroupId ? { seriesGroupId } : {}),
-                })}
-              >후보 묶음 풀기</button>
-            </section>
-
             <section className="decision-history" aria-labelledby="decision-history-title">
               <h3 id="decision-history-title">판정 이력 · {review.decisions.length}건</h3>
               {review.decisions.length ? (
                 <ol>
                   {[...review.decisions].reverse().map((decision) => (
                     <li key={decision.decisionId}>
-                      <strong>{decisionLabel[decision.action]}</strong>
+                      <strong>{containment && decision.action === containment.hideAction ? "귀속 작품 숨김" : decisionLabel[decision.action]}</strong>
                       <span>revision {decision.candidateRevision} · {new Date(decision.createdAt).toLocaleString("ko-KR")}</span>
                     </li>
                   ))}
@@ -332,13 +308,21 @@ export function DuplicateReviewDialog({
           </div>
         ) : null}
 
-        <div className="review-actions">
+        <div className={`review-actions${containment ? " is-containment" : ""}`}>
           <button type="button" className="text-button scan-button" disabled={decisionPending} onClick={onRescan}>
             <FluentIcon glyph="\uE9D9" /> 전체 다시 검사
           </button>
           <span />
-          <button type="button" className="text-button danger-button" disabled={!review || decisionPending} onClick={() => decide("hide_parent")}>부모 숨기기</button>
-          <button type="button" className="text-button danger-button" disabled={!review || decisionPending} onClick={() => decide("hide_candidate")}>후보 숨기기</button>
+          {containment ? (
+            <button type="button" className="text-button danger-button containment-keep-action" disabled={decisionPending} onClick={() => decide(containment.hideAction)}>
+              {containment.keep.pageCount}p 포괄 작품 유지 · {containment.hide.pageCount}p 귀속 작품 숨기기
+            </button>
+          ) : (
+            <>
+              <button type="button" className="text-button danger-button" disabled={!review || decisionPending} onClick={() => decide("hide_parent")}>작품 A 숨기기</button>
+              <button type="button" className="text-button danger-button" disabled={!review || decisionPending} onClick={() => decide("hide_candidate")}>작품 B 숨기기</button>
+            </>
+          )}
           <button type="button" className="text-button" disabled={!review || decisionPending} onClick={() => decide("exclude_pair")}>이 작품 쌍 제외</button>
         </div>
       </div>

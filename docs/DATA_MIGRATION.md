@@ -4,7 +4,7 @@
 
 새 버전의 영속 데이터 기준은 SQLite 하나로 통합한다. 파일 시스템은 artifact의 실제 존재를 증명하며, DB와 불일치하면 reconciliation job이 해결한다.
 
-## 현재 구현 schema (v20)
+## 현재 구현 schema (v26)
 
 | 테이블 | 책임 |
 |---|---|
@@ -36,6 +36,9 @@
 | `duplicate_hidden_galleries`·`duplicate_pair_exclusions` | 사용자 숨김과 오탐 pair 제외 |
 | `duplicate_series_groups`·`duplicate_series_members` | 원자적으로 관리되는 연작 묶음 |
 | `duplicate_decisions` | candidate revision별 append-only 사용자 판정 이력 |
+| `download_overlap_reviews`·`download_overlap_candidates` | 완료 직전 판본 겹침 검토, 방향성 coverage, revision과 후보별 처리 상태 |
+| `download_overlap_page_pairs`·`download_overlap_decisions` | incoming/existing source page 근거와 append-only 사용자 결정 |
+| `download_overlap_pair_policies` | 두 artifact fingerprint·HashProfile·policy version에 묶인 보관/오탐 승인 |
 | `internal_duplicate_runs` | 앨범 내부 page scan 상태·revision·진행률·오류 |
 | `internal_duplicate_groups`·`internal_duplicate_group_pages` | immutable source page 기반 synchronized scene row와 근거 |
 | `internal_removal_plans` | group revision과 파일 수·byte 합계를 고정한 만료형 격리 계획 |
@@ -134,6 +137,13 @@
 - `settings.privacy_mode`는 `0|1` CHECK와 기본값 `0`을 갖는 additive column이다. 기존 사용자의 preview는 migration 뒤에도 자동으로 가려지지 않는다.
 - 이 설정은 실제 이미지·artifact·thumbnail cache를 수정하거나 삭제하지 않고 frontend의 전역 visual mask만 제어한다.
 
+### v26 추가 규칙
+
+- migration 이름은 `download_overlap_review_gate`다. 실제 v23 privacy, v24 artist/group catalog, v25 accordion state 뒤에 추가하며 기존 migration 1~25의 SQL·이름·순서는 변경하지 않는다.
+- pending review 하나만 entry를 점유하며 resolved/cancelled/stale 이력은 같은 entry에 누적될 수 있다. 후보와 page pair는 review 삭제 시 cascade되고, 사용자 결정과 fingerprint pair policy는 명시적 기록으로 남는다.
+- `profile_version=1` hash cache를 재사용하고 별도 image hash schema를 만들지 않는다. pair policy key에는 양쪽 artifact fingerprint, HashProfile version과 download overlap policy version이 모두 포함된다.
+- 기존 v25 DB는 migration 전 backup 뒤 v26으로 올라가며 gallery/download/artifact/tag catalog/내부 중복 데이터가 그대로 보존되는 additive migration test를 갖는다.
+
 ## 유지보수 데이터 초기화
 
 - thumbnail cache clear는 완료된 재생성 가능 cache만 제거한다. DB artifact/page와 실제 파일에는 쓰지 않는다.
@@ -160,7 +170,7 @@ D:\Atsumi\.atsumi-quarantine\<record-id>\[artist] Gallery title [group] 4051027\
 ## rollback
 
 - Next가 생성한 manifest는 schema와 writer version을 가진다.
-- schema v15~v23 downgrade는 지원하지 않는다. 오래된 binary는 future-schema를 쓰기 전에 거부하며 실제 downgrade는 migration 전 backup과 호환 binary를 함께 복원해야 한다.
+- schema v15~v26 downgrade는 지원하지 않는다. 오래된 binary는 future-schema를 쓰기 전에 거부하며 실제 downgrade는 migration 전 backup과 호환 binary를 함께 복원해야 한다.
 - 운영 DB에 과거 migration table/column을 수동 삭제하거나 migration history를 편집하지 않는다. 복구는 migration 전 일관 backup과 호환 binary를 함께 사용한다.
 
 quarantine에는 자동 보존 만료가 없다. 사용자가 명시적으로 복원하거나, 별도 재확인을 거친 비우기 기능을 실행하기 전까지 파일을 유지한다.

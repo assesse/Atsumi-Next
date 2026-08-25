@@ -30,6 +30,10 @@ pub struct DownloadEntry {
     pub review_kind: Option<DownloadReviewKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

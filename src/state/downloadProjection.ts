@@ -32,6 +32,8 @@ export function applyDownloadChanged(
       attempt: event.attempt,
       errorCode: event.errorCode,
       errorMessage: event.errorMessage,
+      reviewKind: event.reviewKind,
+      reviewId: event.reviewId,
     },
   });
   return { galleries: nextGalleries, applied: true };
