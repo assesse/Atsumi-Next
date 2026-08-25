@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" style="color:var(--status-color,#95631e)" role="img" aria-labelledby="title">
+  <title id="title">검토 필요</title>
+  <rect x=".75" y=".75" width="22.5" height="22.5" rx="5.5" fill="var(--status-bg,#fffaf1)" stroke="var(--status-line,#eadcc5)"/>
+  <path d="M12 6.25 17.35 16.4H6.65L12 6.25Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M12 9.4v3.25" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <circle cx="12" cy="14.55" r=".65" fill="currentColor"/>
+</svg>

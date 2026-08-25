@@ -49,6 +49,8 @@
 
 실제 원격 데이터는 변할 수 있으므로 가능한 범위에서 metadata, image sample, expected hash를 로컬 fixture로 고정한다.
 
+Milestone E의 repository-safe synthetic regression은 저작물 원본을 커밋하지 않고 다음 경계를 고정한다: blank/저정보 page 거부, 서로 다른 고대비 흑백 layout 거부, 중앙 장면 변화 거부, 10-page 중 2-page 공통 panel만 있는 pair 거부, 재압축·해상도와 작은 번역 overlay visual match, 긴/짧은 gallery 양방향 containment, 단조 1:1 page 비재사용. 위 golden ID의 실제 파일 검증은 사용자가 보유한 local artifact 또는 opt-in live smoke에서만 수행하며 일반 CI의 완료 근거로 가장하지 않는다.
+
 ## 사건 기록 양식
 
 앞으로 문제를 수정할 때 다음을 남긴다.

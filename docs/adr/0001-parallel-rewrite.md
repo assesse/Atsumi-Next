@@ -10,7 +10,7 @@ Classic은 실제 사용자 요구를 검증했지만 UI 상태, JSON, SQLite와
 ## 결정
 
 - Classic을 tag로 보존한다.
-- Atsumi Next는 별도 branch와 하위 workspace에서 개발한다.
+- Atsumi Next는 Classic과 분리된 독립 Git 저장소에서 개발한다.
 - Classic은 참고 구현과 fixture 생성 도구로 사용한다.
 - Next는 Classic 데이터 원본을 직접 수정하지 않는다.
 - 전환 전 일정 기간 두 버전을 병행한다.

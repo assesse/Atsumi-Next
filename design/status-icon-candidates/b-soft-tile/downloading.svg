@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" style="color:var(--status-color,#167d9f)" role="img" aria-labelledby="title">
+  <title id="title">다운로드 중</title>
+  <style>
+    .arrow { animation: settle 1.35s ease-in-out infinite; transform-origin: 12px 12px; }
+    @keyframes settle { 0%, 100% { transform: translateY(-.4px); } 50% { transform: translateY(.6px); } }
+    @media (prefers-reduced-motion: reduce) { .arrow { animation: none; } }
+  </style>
+  <rect x=".75" y=".75" width="22.5" height="22.5" rx="5.5" fill="var(--status-bg,#f1f8fa)" stroke="var(--status-line,#cadfe4)"/>
+  <g class="arrow" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 6.35v7.4"/>
+    <path d="m9.35 11.25 2.65 2.65 2.65-2.65"/>
+  </g>
+  <path d="M8 17h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" style="color:var(--status-color,#34785f)" role="img" aria-labelledby="title">
+  <title id="title">다운로드 완료</title>
+  <rect x=".75" y=".75" width="22.5" height="22.5" rx="5.5" fill="var(--status-bg,#f2f8f5)" stroke="var(--status-line,#ccded6)"/>
+  <path d="m7.4 12.25 2.95 2.9 6.25-6.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
